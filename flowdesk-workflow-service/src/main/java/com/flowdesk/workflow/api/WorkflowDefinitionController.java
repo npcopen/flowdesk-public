@@ -1,0 +1,196 @@
+package com.flowdesk.workflow.api;
+
+import com.flowdesk.common.web.ApiException;
+import com.flowdesk.common.web.ApiMeta;
+import com.flowdesk.common.web.PageMeta;
+import com.flowdesk.common.web.RequestCorrelation;
+import com.flowdesk.common.web.SuccessEnvelope;
+import com.flowdesk.workflow.service.WorkflowDefinitionService;
+import com.flowdesk.workflow.service.WorkflowPage;
+import com.flowdesk.workflow.service.WorkflowSupport;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.validation.Valid;
+import org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplication;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.ResponseEntity;
+import org.springframework.util.MultiValueMap;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PatchMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.servlet.support.ServletUriComponentsBuilder;
+
+import java.net.URI;
+import java.util.Set;
+import java.util.UUID;
+
+/** HTTP contract for M6-A API-034..042/062. */
+@RestController
+@ConditionalOnWebApplication(type = ConditionalOnWebApplication.Type.SERVLET)
+public class WorkflowDefinitionController {
+
+    private static final Set<String> DEFINITION_LIST_PARAMS =
+            Set.of("pageSize", "pageToken", "sort");
+    private static final Set<String> VERSION_LIST_PARAMS =
+            Set.of("versionNo", "pageSize", "pageToken", "sort");
+
+    private final WorkflowDefinitionService service;
+
+    public WorkflowDefinitionController(WorkflowDefinitionService service) {
+        this.service = service;
+    }
+
+    @GetMapping("/api/v1/workflow-definitions")
+    public SuccessEnvelope<java.util.List<WorkflowDtos.WorkflowDefinitionResponse>> definitions(
+            @RequestParam MultiValueMap<String, String> params) {
+        WorkflowQueryParams.single(params, "pageSize", DEFINITION_LIST_PARAMS);
+        int pageSize = WorkflowQueryParams.pageSize(params.getFirst("pageSize"));
+        WorkflowPage<WorkflowDtos.WorkflowDefinitionResponse> page = service.listDefinitions(
+                pageSize, params.getFirst("pageToken"), params.getFirst("sort"));
+        return page(page);
+    }
+
+    @GetMapping("/api/v1/workflow-definitions/{definitionId}")
+    public ResponseEntity<SuccessEnvelope<WorkflowDtos.WorkflowDefinitionResponse>> definition(
+            @PathVariable UUID definitionId,
+            @RequestParam MultiValueMap<String, String> params) {
+        WorkflowQueryParams.none(params);
+        WorkflowDtos.WorkflowDefinitionResponse result = service.getDefinition(definitionId);
+        return ResponseEntity.ok()
+                .header(HttpHeaders.ETAG, WorkflowSupport.etag(result.lockVersion()))
+                .body(success(result));
+    }
+
+    @PostMapping("/api/v1/workflow-definitions/{definitionId}/drafts")
+    public ResponseEntity<SuccessEnvelope<WorkflowDtos.WorkflowDraftResponse>> createDraft(
+            @PathVariable UUID definitionId,
+            @Valid @RequestBody WorkflowDtos.WorkflowDraftWriteRequest request,
+            @RequestHeader(name = "Idempotency-Key", required = false) String idempotencyKey,
+            @RequestHeader(name = "If-Match", required = false) String ifMatch,
+            @RequestParam MultiValueMap<String, String> params) {
+        WorkflowQueryParams.none(params);
+        WorkflowDefinitionService.DraftCommandResult result = service.createDraft(
+                definitionId, request, idempotencyKey, ifMatch);
+        URI location = ServletUriComponentsBuilder.fromCurrentContextPath()
+                .path("/api/v1/workflow-drafts/{draftId}")
+                .buildAndExpand(result.draft().draftId()).toUri();
+        ResponseEntity.BodyBuilder response = ResponseEntity
+                .status(result.replayed() ? 200 : 201)
+                .header(HttpHeaders.LOCATION, location.toString())
+                .header(HttpHeaders.ETAG, WorkflowSupport.etag(result.draft().lockVersion()));
+        if (result.replayed()) {
+            response.header("Idempotency-Replayed", "true");
+        }
+        return response.body(success(result.draft()));
+    }
+
+    @GetMapping("/api/v1/workflow-definitions/{definitionId}/drafts/current")
+    public ResponseEntity<SuccessEnvelope<WorkflowDtos.WorkflowDraftResponse>> currentDraft(
+            @PathVariable UUID definitionId,
+            @RequestParam MultiValueMap<String, String> params) {
+        WorkflowQueryParams.none(params);
+        WorkflowDtos.WorkflowDraftResponse result = service.getCurrentDraft(definitionId);
+        return draftResponse(result);
+    }
+
+    @GetMapping("/api/v1/workflow-drafts/{draftId}")
+    public ResponseEntity<SuccessEnvelope<WorkflowDtos.WorkflowDraftResponse>> draft(
+            @PathVariable UUID draftId,
+            @RequestParam MultiValueMap<String, String> params) {
+        WorkflowQueryParams.none(params);
+        return draftResponse(service.getDraft(draftId));
+    }
+
+    @PatchMapping("/api/v1/workflow-drafts/{draftId}")
+    public ResponseEntity<SuccessEnvelope<WorkflowDtos.WorkflowDraftResponse>> updateDraft(
+            @PathVariable UUID draftId,
+            @Valid @RequestBody WorkflowDtos.WorkflowDraftWriteRequest request,
+            @RequestHeader(name = "If-Match", required = false) String ifMatch,
+            @RequestParam MultiValueMap<String, String> params) {
+        WorkflowQueryParams.none(params);
+        return draftResponse(service.updateDraft(draftId, request, ifMatch));
+    }
+
+    @PostMapping("/api/v1/workflow-drafts/{draftId}/validate")
+    public ResponseEntity<SuccessEnvelope<WorkflowDtos.WorkflowValidationResponse>> validateDraft(
+            @PathVariable UUID draftId,
+            @RequestHeader(name = "If-Match", required = false) String ifMatch,
+            @RequestParam MultiValueMap<String, String> params,
+            HttpServletRequest servletRequest) {
+        WorkflowQueryParams.none(params);
+        rejectBody(servletRequest);
+        WorkflowDtos.WorkflowValidationResponse result = service.validateDraft(draftId, ifMatch);
+        return ResponseEntity.ok()
+                .header(HttpHeaders.ETAG, WorkflowSupport.etag(result.lockVersion()))
+                .body(success(result));
+    }
+
+    @PostMapping("/api/v1/workflow-drafts/{draftId}/publish")
+    public ResponseEntity<SuccessEnvelope<WorkflowDtos.WorkflowVersionResponse>> publishDraft(
+            @PathVariable UUID draftId,
+            @RequestHeader(name = "If-Match", required = false) String ifMatch,
+            @RequestHeader(name = "Idempotency-Key", required = false) String idempotencyKey,
+            @RequestParam MultiValueMap<String, String> params,
+            HttpServletRequest servletRequest) {
+        WorkflowQueryParams.none(params);
+        rejectBody(servletRequest);
+        WorkflowDefinitionService.VersionCommandResult result = service.publishDraft(
+                draftId, ifMatch, idempotencyKey);
+        URI location = ServletUriComponentsBuilder.fromCurrentContextPath()
+                .path("/api/v1/workflow-versions/{workflowVersionId}")
+                .buildAndExpand(result.version().workflowVersionId()).toUri();
+        ResponseEntity.BodyBuilder response = ResponseEntity
+                .status(result.replayed() ? 200 : 201)
+                .header(HttpHeaders.LOCATION, location.toString());
+        if (result.replayed()) {
+            response.header("Idempotency-Replayed", "true");
+        }
+        return response.body(success(result.version()));
+    }
+
+    @GetMapping("/api/v1/workflow-definitions/{definitionId}/versions")
+    public SuccessEnvelope<java.util.List<WorkflowDtos.WorkflowVersionResponse>> versions(
+            @PathVariable UUID definitionId,
+            @RequestParam MultiValueMap<String, String> params) {
+        WorkflowQueryParams.single(params, "versionNo", VERSION_LIST_PARAMS);
+        WorkflowPage<WorkflowDtos.WorkflowVersionResponse> page = service.listVersions(
+                definitionId, WorkflowQueryParams.positiveInteger(params.getFirst("versionNo")),
+                WorkflowQueryParams.pageSize(params.getFirst("pageSize")),
+                params.getFirst("pageToken"), params.getFirst("sort"));
+        return page(page);
+    }
+
+    @GetMapping("/api/v1/workflow-versions/{workflowVersionId}")
+    public SuccessEnvelope<WorkflowDtos.WorkflowVersionResponse> version(
+            @PathVariable UUID workflowVersionId,
+            @RequestParam MultiValueMap<String, String> params) {
+        WorkflowQueryParams.none(params);
+        return success(service.getVersion(workflowVersionId));
+    }
+
+    private static ResponseEntity<SuccessEnvelope<WorkflowDtos.WorkflowDraftResponse>> draftResponse(
+            WorkflowDtos.WorkflowDraftResponse result) {
+        return ResponseEntity.ok()
+                .header(HttpHeaders.ETAG, WorkflowSupport.etag(result.lockVersion()))
+                .body(success(result));
+    }
+
+    private static <T> SuccessEnvelope<T> success(T value) {
+        return new SuccessEnvelope<>(value, new ApiMeta(RequestCorrelation.current()));
+    }
+
+    private static <T> SuccessEnvelope<java.util.List<T>> page(WorkflowPage<T> page) {
+        return new SuccessEnvelope<>(page.items(), new ApiMeta(RequestCorrelation.current(),
+                new PageMeta(page.items().size(), page.nextPageToken(), page.sort())));
+    }
+
+    private static void rejectBody(HttpServletRequest request) {
+        if (request.getContentLengthLong() > 0 || request.getHeader("Transfer-Encoding") != null) {
+            throw ApiException.badRequest("REQUEST_BODY_NOT_ALLOWED", "该命令不接受请求 body。");
+        }
+    }
+}

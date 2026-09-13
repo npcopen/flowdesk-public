@@ -1,0 +1,58 @@
+server:
+  port: ${FLOWDESK_NOTIFICATION_PORT:8085}
+
+spring:
+  application:
+    name: flowdesk-notification-service
+  datasource:
+    url: ${FLOWDESK_NOTIFICATION_DB_URL:jdbc:mysql://127.0.0.1:3306/flowdesk_notification?sslMode=PREFERRED&allowPublicKeyRetrieval=true&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true}
+    username: fd_notification_runtime
+    password: ${FLOWDESK_NOTIFICATION_DB_PASSWORD}
+  cloud:
+    nacos:
+      discovery:
+        server-addr: ${FLOWDESK_NACOS_SERVER_ADDR:127.0.0.1:8848}
+        namespace: ${FLOWDESK_NACOS_NAMESPACE:}
+        group: ${FLOWDESK_NACOS_GROUP:DEFAULT_GROUP}
+        username: ${FLOWDESK_NACOS_USERNAME:nacos}
+        password: ${FLOWDESK_NACOS_PASSWORD:}
+        enabled: ${FLOWDESK_NACOS_DISCOVERY_ENABLED:true}
+        register-enabled: ${FLOWDESK_NACOS_REGISTER_ENABLED:true}
+    stream:
+      default:
+        consumer:
+          max-attempts: 1
+      rocketmq:
+        binder:
+          name-server: ${FLOWDESK_ROCKETMQ_NAME_SERVER:127.0.0.1:9876}
+
+flowdesk:
+  health:
+    database-required: ${FLOWDESK_HEALTH_DATABASE_REQUIRED:true}
+    migration-required: ${FLOWDESK_HEALTH_MIGRATION_REQUIRED:true}
+  security:
+    cursor-token:
+      hmac-key: ${FLOWDESK_NOTIFICATION_CURSOR_TOKEN_HMAC_KEY:${FLOWDESK_CURSOR_TOKEN_HMAC_KEY:}}
+    jwt:
+      public-key-pem: ${FLOWDESK_JWT_PUBLIC_KEY_PEM:}
+      public-key-location: ${FLOWDESK_JWT_PUBLIC_KEY_FILE:}
+  notification:
+    cursor-token:
+      hmac-key: ${FLOWDESK_NOTIFICATION_CURSOR_TOKEN_HMAC_KEY:${FLOWDESK_CURSOR_TOKEN_HMAC_KEY:}}
+    entry:
+      enabled: ${FLOWDESK_NOTIFICATION_ENTRY_ENABLED:${FLOWDESK_NOTIFICATION_CONSUMER_ENABLED:false}}
+    consumer:
+      enabled: ${FLOWDESK_NOTIFICATION_CONSUMER_ENABLED:false}
+      name-server: ${FLOWDESK_ROCKETMQ_NAME_SERVER:127.0.0.1:9876}
+      access-key: ${FLOWDESK_NOTIFICATION_ROCKETMQ_ACCESS_KEY:flowdesknotification}
+      secret-key: ${FLOWDESK_NOTIFICATION_ROCKETMQ_SECRET_KEY:}
+    recovery:
+      enabled: ${FLOWDESK_NOTIFICATION_RECOVERY_ENABLED:false}
+      datasource:
+        # Keep the replay source connection separate from the normal runtime
+        # principal.  The recovery account is the only application identity
+        # allowed to SELECT inbox_message.body_bytes.
+        url: ${FLOWDESK_NOTIFICATION_RECOVERY_DB_URL:${FLOWDESK_NOTIFICATION_DB_URL:jdbc:mysql://127.0.0.1:3306/flowdesk_notification?sslMode=PREFERRED&allowPublicKeyRetrieval=true&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true}}
+        username: ${FLOWDESK_NOTIFICATION_RECOVERY_DB_USERNAME:fd_notification_recovery}
+        password: ${FLOWDESK_NOTIFICATION_RECOVERY_DB_PASSWORD:}
+        driver-class-name: com.mysql.cj.jdbc.Driver

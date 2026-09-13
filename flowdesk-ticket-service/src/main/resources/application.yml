@@ -1,0 +1,98 @@
+server:
+  port: ${FLOWDESK_TICKET_PORT:8082}
+
+spring:
+  application:
+    name: flowdesk-ticket-service
+  datasource:
+    url: ${FLOWDESK_TICKET_DB_URL:jdbc:mysql://127.0.0.1:3306/flowdesk_ticket?sslMode=PREFERRED&allowPublicKeyRetrieval=true&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true}
+    username: fd_ticket_runtime
+    password: ${FLOWDESK_TICKET_DB_PASSWORD}
+  jackson:
+    deserialization:
+      fail-on-unknown-properties: true
+  data:
+    redis:
+      host: ${FLOWDESK_REDIS_HOST:127.0.0.1}
+      port: ${FLOWDESK_REDIS_PORT:6379}
+      password: ${FLOWDESK_REDIS_PASSWORD:}
+  cloud:
+    nacos:
+      discovery:
+        server-addr: ${FLOWDESK_NACOS_SERVER_ADDR:127.0.0.1:8848}
+        namespace: ${FLOWDESK_NACOS_NAMESPACE:}
+        group: ${FLOWDESK_NACOS_GROUP:DEFAULT_GROUP}
+        username: ${FLOWDESK_NACOS_USERNAME:nacos}
+        password: ${FLOWDESK_NACOS_PASSWORD:}
+        enabled: ${FLOWDESK_NACOS_DISCOVERY_ENABLED:true}
+        register-enabled: ${FLOWDESK_NACOS_REGISTER_ENABLED:true}
+    stream:
+      rocketmq:
+        binder:
+          name-server: ${FLOWDESK_ROCKETMQ_NAME_SERVER:127.0.0.1:9876}
+
+flowdesk:
+  health:
+    database-required: ${FLOWDESK_HEALTH_DATABASE_REQUIRED:true}
+    migration-required: ${FLOWDESK_HEALTH_MIGRATION_REQUIRED:true}
+  security:
+    cursor-token:
+      hmac-key: ${FLOWDESK_CURSOR_TOKEN_HMAC_KEY:}
+    jwt:
+      public-key-pem: ${FLOWDESK_JWT_PUBLIC_KEY_PEM:}
+      public-key-location: ${FLOWDESK_JWT_PUBLIC_KEY_FILE:}
+      clock-skew: ${FLOWDESK_JWT_CLOCK_SKEW:PT30S}
+  ticket:
+    workflow:
+      base-url: ${FLOWDESK_TICKET_WORKFLOW_BASE_URL:http://127.0.0.1:8083}
+    sla:
+      enabled: ${FLOWDESK_TICKET_SLA_ENABLED:false}
+      scanner-enabled: ${FLOWDESK_TICKET_SLA_SCANNER_ENABLED:false}
+      rebuilder-enabled: ${FLOWDESK_TICKET_SLA_REBUILDER_ENABLED:false}
+      redis-enabled: ${FLOWDESK_TICKET_SLA_REDIS_ENABLED:false}
+      batch-size: ${FLOWDESK_TICKET_SLA_BATCH_SIZE:100}
+      tenant-batch-size: ${FLOWDESK_TICKET_SLA_TENANT_BATCH_SIZE:100}
+      poll-interval: ${FLOWDESK_TICKET_SLA_POLL_INTERVAL:PT5S}
+      rebuild-lease-duration: ${FLOWDESK_TICKET_SLA_REBUILD_LEASE_DURATION:PT30S}
+      redis-degraded-sweep-interval: ${FLOWDESK_TICKET_SLA_REDIS_DEGRADED_SWEEP_INTERVAL:PT60S}
+      qualification-refresh-interval: ${FLOWDESK_TICKET_SLA_QUALIFICATION_REFRESH_INTERVAL:PT5M}
+      qualification-max-age: ${FLOWDESK_TICKET_SLA_QUALIFICATION_MAX_AGE:PT5M}
+      qualification-clock-skew: ${FLOWDESK_TICKET_SLA_QUALIFICATION_CLOCK_SKEW:PT30S}
+    notification:
+      outbox:
+        publisher:
+          enabled: ${FLOWDESK_TICKET_NOTIFICATION_OUTBOX_PUBLISHER_ENABLED:false}
+          name-server: ${FLOWDESK_ROCKETMQ_NAME_SERVER:127.0.0.1:9876}
+          access-key: ${FLOWDESK_TICKET_ROCKETMQ_ACCESS_KEY:}
+          secret-key: ${FLOWDESK_TICKET_ROCKETMQ_SECRET_KEY:}
+          poll-interval-millis: ${FLOWDESK_TICKET_NOTIFICATION_OUTBOX_POLL_INTERVAL_MILLIS:500}
+    incident-entry:
+      enabled: ${FLOWDESK_TICKET_INCIDENT_ENTRY_ENABLED:${FLOWDESK_TICKET_INCIDENT_CONSUMER_ENABLED:false}}
+    incident-consumer:
+      enabled: ${FLOWDESK_TICKET_INCIDENT_CONSUMER_ENABLED:false}
+      name-server: ${FLOWDESK_ROCKETMQ_NAME_SERVER:127.0.0.1:9876}
+      access-key: ${FLOWDESK_TICKET_ROCKETMQ_ACCESS_KEY:}
+      secret-key: ${FLOWDESK_TICKET_ROCKETMQ_SECRET_KEY:}
+      retry-delay-level: ${FLOWDESK_TICKET_INCIDENT_RETRY_DELAY_LEVEL:0}
+    incident-result-publisher:
+      enabled: ${FLOWDESK_TICKET_INCIDENT_RESULT_PUBLISHER_ENABLED:false}
+      name-server: ${FLOWDESK_ROCKETMQ_NAME_SERVER:127.0.0.1:9876}
+      access-key: ${FLOWDESK_TICKET_ROCKETMQ_ACCESS_KEY:}
+      secret-key: ${FLOWDESK_TICKET_ROCKETMQ_SECRET_KEY:}
+    workflow-reverse:
+      entry:
+        enabled: ${FLOWDESK_TICKET_WORKFLOW_REVERSE_ENTRY_ENABLED:${FLOWDESK_TICKET_WORKFLOW_REVERSE_CONSUMER_ENABLED:false}}
+      consumer:
+        enabled: ${FLOWDESK_TICKET_WORKFLOW_REVERSE_CONSUMER_ENABLED:false}
+        name-server: ${FLOWDESK_ROCKETMQ_NAME_SERVER:127.0.0.1:9876}
+        access-key: ${FLOWDESK_TICKET_ROCKETMQ_ACCESS_KEY:}
+        secret-key: ${FLOWDESK_TICKET_ROCKETMQ_SECRET_KEY:}
+    iam:
+      base-url: ${FLOWDESK_TICKET_IAM_BASE_URL:http://127.0.0.1:8081}
+      service-token-file: ${FLOWDESK_TICKET_IAM_SERVICE_TOKEN_FILE:}
+    outbox:
+      publisher:
+        enabled: ${FLOWDESK_TICKET_OUTBOX_PUBLISHER_ENABLED:false}
+        name-server: ${FLOWDESK_ROCKETMQ_NAME_SERVER:127.0.0.1:9876}
+        access-key: ${FLOWDESK_TICKET_ROCKETMQ_ACCESS_KEY:}
+        secret-key: ${FLOWDESK_TICKET_ROCKETMQ_SECRET_KEY:}

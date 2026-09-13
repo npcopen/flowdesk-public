@@ -1,0 +1,13 @@
+.git
+.data
+.idea
+**/target
+**/node_modules
+flowdesk-gateway/src/main/resources/static
+flowdesk-web/dist
+flowdesk-web/playwright-report
+flowdesk-web/test-results
+*.log
+.env
+.env.*
+!.env.example

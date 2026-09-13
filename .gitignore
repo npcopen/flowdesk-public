@@ -1,0 +1,57 @@
+# Maven
+target/
+*.class
+*.jar
+*.war
+*.ear
+
+# Java and IDE metadata
+.idea/
+*.iml
+.classpath
+.project
+.settings/
+.vscode/
+
+# Logs and runtime files
+*.log
+logs/
+*.pid
+*.hprof
+hs_err_pid*
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.local.yml
+*.local.yaml
+*.local.properties
+secrets/
+
+# Frontend build and test output
+node_modules/
+dist/
+coverage/
+playwright-report/
+test-results/
+.npm-cache/
+.playwright-browsers/
+
+# Generated SPA bundle (rebuild with flowdesk-web/npm run build:gateway)
+flowdesk-gateway/src/main/resources/static/
+
+# Local infrastructure data
+.data/
+infra/jwt/
+
+# Operating system files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Public release exclusions
+flowdesk-web/artifacts/
+flowdesk-web/.playwright-browsers/
+flowdesk-gateway/src/main/resources/static/
+

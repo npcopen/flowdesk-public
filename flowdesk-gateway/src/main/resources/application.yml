@@ -1,0 +1,39 @@
+server:
+  port: ${FLOWDESK_GATEWAY_PORT:8080}
+  ssl:
+    enabled: ${FLOWDESK_GATEWAY_TLS_ENABLED:false}
+    key-store: ${FLOWDESK_GATEWAY_TLS_KEY_STORE:}
+    key-store-password: ${FLOWDESK_GATEWAY_TLS_KEY_STORE_PASSWORD:}
+    key-store-type: ${FLOWDESK_GATEWAY_TLS_KEY_STORE_TYPE:PKCS12}
+
+spring:
+  application:
+    name: flowdesk-gateway
+  cloud:
+    nacos:
+      discovery:
+        server-addr: ${FLOWDESK_NACOS_SERVER_ADDR:127.0.0.1:8848}
+        namespace: ${FLOWDESK_NACOS_NAMESPACE:}
+        group: ${FLOWDESK_NACOS_GROUP:DEFAULT_GROUP}
+        username: ${FLOWDESK_NACOS_USERNAME:nacos}
+        password: ${FLOWDESK_NACOS_PASSWORD:}
+        enabled: ${FLOWDESK_NACOS_DISCOVERY_ENABLED:true}
+        register-enabled: ${FLOWDESK_NACOS_REGISTER_ENABLED:true}
+
+flowdesk:
+  health:
+    # Gateway readiness is served by GatewayHealthController and requires the
+    # same-origin SPA bundle to be present in the executable artifact.
+    static-bundle-required: ${FLOWDESK_HEALTH_STATIC_BUNDLE_REQUIRED:true}
+  security:
+    jwt:
+      public-key-pem: ${FLOWDESK_JWT_PUBLIC_KEY_PEM:}
+      public-key-location: ${FLOWDESK_JWT_PUBLIC_KEY_FILE:}
+  gateway:
+    webhook-require-tls: ${FLOWDESK_GATEWAY_WEBHOOK_REQUIRE_TLS:true}
+    routes:
+      iam: ${FLOWDESK_GATEWAY_ROUTES_IAM:lb://flowdesk-iam-service}
+      ticket: ${FLOWDESK_GATEWAY_ROUTES_TICKET:lb://flowdesk-ticket-service}
+      workflow: ${FLOWDESK_GATEWAY_ROUTES_WORKFLOW:lb://flowdesk-workflow-service}
+      alert: ${FLOWDESK_GATEWAY_ROUTES_ALERT:lb://flowdesk-alert-service}
+      notification: ${FLOWDESK_GATEWAY_ROUTES_NOTIFICATION:lb://flowdesk-notification-service}

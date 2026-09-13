@@ -1,0 +1,58 @@
+server:
+  port: ${FLOWDESK_ALERT_PORT:8084}
+
+spring:
+  application:
+    name: flowdesk-alert-service
+  datasource:
+    url: ${FLOWDESK_ALERT_DB_URL:jdbc:mysql://127.0.0.1:3306/flowdesk_alert?sslMode=PREFERRED&allowPublicKeyRetrieval=true&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true}
+    username: fd_alert_runtime
+    password: ${FLOWDESK_ALERT_DB_PASSWORD}
+    hikari:
+      maximum-pool-size: ${FLOWDESK_ALERT_DB_MAXIMUM_POOL_SIZE:64}
+      minimum-idle: ${FLOWDESK_ALERT_DB_MINIMUM_IDLE:16}
+      transaction-isolation: TRANSACTION_READ_COMMITTED
+  cloud:
+    nacos:
+      discovery:
+        server-addr: ${FLOWDESK_NACOS_SERVER_ADDR:127.0.0.1:8848}
+        namespace: ${FLOWDESK_NACOS_NAMESPACE:}
+        group: ${FLOWDESK_NACOS_GROUP:DEFAULT_GROUP}
+        username: ${FLOWDESK_NACOS_USERNAME:nacos}
+        password: ${FLOWDESK_NACOS_PASSWORD:}
+        enabled: ${FLOWDESK_NACOS_DISCOVERY_ENABLED:true}
+        register-enabled: ${FLOWDESK_NACOS_REGISTER_ENABLED:true}
+    stream:
+      rocketmq:
+        binder:
+          name-server: ${FLOWDESK_ROCKETMQ_NAME_SERVER:127.0.0.1:9876}
+
+flowdesk:
+  health:
+    database-required: ${FLOWDESK_HEALTH_DATABASE_REQUIRED:true}
+    migration-required: ${FLOWDESK_HEALTH_MIGRATION_REQUIRED:true}
+  security:
+    cursor-token:
+      hmac-key: ${FLOWDESK_CURSOR_TOKEN_HMAC_KEY:}
+    jwt:
+      public-key-pem: ${FLOWDESK_JWT_PUBLIC_KEY_PEM:}
+      public-key-location: ${FLOWDESK_JWT_PUBLIC_KEY_FILE:}
+  alert:
+    webhook:
+      enabled: ${FLOWDESK_ALERT_WEBHOOK_ENABLED:false}
+      timestamp-window: ${FLOWDESK_ALERT_WEBHOOK_TIMESTAMP_WINDOW:PT0S}
+      secrets-file: ${FLOWDESK_ALERT_WEBHOOK_SECRETS_FILE:}
+    ticket-result:
+      entry:
+        enabled: ${FLOWDESK_ALERT_TICKET_RESULT_ENTRY_ENABLED:${FLOWDESK_ALERT_TICKET_RESULT_CONSUMER_ENABLED:false}}
+      consumer:
+        enabled: ${FLOWDESK_ALERT_TICKET_RESULT_CONSUMER_ENABLED:false}
+        name-server: ${FLOWDESK_ROCKETMQ_NAME_SERVER:127.0.0.1:9876}
+        access-key: ${FLOWDESK_ALERT_ROCKETMQ_ACCESS_KEY:}
+        secret-key: ${FLOWDESK_ALERT_ROCKETMQ_SECRET_KEY:}
+    outbox:
+      publisher:
+        enabled: ${FLOWDESK_ALERT_OUTBOX_PUBLISHER_ENABLED:false}
+        name-server: ${FLOWDESK_ROCKETMQ_NAME_SERVER:127.0.0.1:9876}
+        access-key: ${FLOWDESK_ALERT_ROCKETMQ_ACCESS_KEY:}
+        secret-key: ${FLOWDESK_ALERT_ROCKETMQ_SECRET_KEY:}

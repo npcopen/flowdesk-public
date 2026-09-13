@@ -1,0 +1,7 @@
+import { config } from '@vue/test-utils'
+
+config.global.stubs = {
+  Teleport: true,
+  Transition: false,
+  TransitionGroup: false
+}

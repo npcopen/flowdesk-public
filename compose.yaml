@@ -1,0 +1,1031 @@
+name: flowdesk
+
+x-flyway-common: &flyway-common
+  image: flyway/flyway:11.14.1@sha256:ba032dc3fc4510694e1d096e2491ef562e42170ed91eec66ee5377b1124913d8
+  restart: "no"
+  networks:
+    - data
+  depends_on:
+    mysql:
+      condition: service_healthy
+  command:
+    - -connectRetries=30
+    - -validateMigrationNaming=true
+    - -cleanDisabled=true
+    - migrate
+
+x-flyway-demo-common: &flyway-demo-common
+  image: flyway/flyway:11.14.1@sha256:ba032dc3fc4510694e1d096e2491ef562e42170ed91eec66ee5377b1124913d8
+  restart: "no"
+  networks:
+    - data
+  command:
+    - -connectRetries=30
+    - -validateMigrationNaming=true
+    - -cleanDisabled=true
+    - migrate
+
+services:
+  mysql:
+    image: mysql:8.4.10@sha256:8dbcf531a03aade657e181b9cf2f1d1803ce621a1d55610cb44cb531ab7d7db6
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${FLOWDESK_MYSQL_ROOT_PASSWORD:?set FLOWDESK_MYSQL_ROOT_PASSWORD}
+      MYSQL_ROOT_HOST: "%"
+      FLOWDESK_GATEWAY_DB_PASSWORD: ${FLOWDESK_GATEWAY_DB_PASSWORD:?set FLOWDESK_GATEWAY_DB_PASSWORD}
+      FLOWDESK_IAM_DB_PASSWORD: ${FLOWDESK_IAM_DB_PASSWORD:?set FLOWDESK_IAM_DB_PASSWORD}
+      FLOWDESK_IAM_MIGRATOR_PASSWORD: ${FLOWDESK_IAM_MIGRATOR_PASSWORD:?set FLOWDESK_IAM_MIGRATOR_PASSWORD}
+      FLOWDESK_TICKET_DB_PASSWORD: ${FLOWDESK_TICKET_DB_PASSWORD:?set FLOWDESK_TICKET_DB_PASSWORD}
+      FLOWDESK_TICKET_MIGRATOR_PASSWORD: ${FLOWDESK_TICKET_MIGRATOR_PASSWORD:?set FLOWDESK_TICKET_MIGRATOR_PASSWORD}
+      FLOWDESK_WORKFLOW_DB_PASSWORD: ${FLOWDESK_WORKFLOW_DB_PASSWORD:?set FLOWDESK_WORKFLOW_DB_PASSWORD}
+      FLOWDESK_WORKFLOW_MIGRATOR_PASSWORD: ${FLOWDESK_WORKFLOW_MIGRATOR_PASSWORD:?set FLOWDESK_WORKFLOW_MIGRATOR_PASSWORD}
+      FLOWDESK_ALERT_DB_PASSWORD: ${FLOWDESK_ALERT_DB_PASSWORD:?set FLOWDESK_ALERT_DB_PASSWORD}
+      FLOWDESK_ALERT_MIGRATOR_PASSWORD: ${FLOWDESK_ALERT_MIGRATOR_PASSWORD:?set FLOWDESK_ALERT_MIGRATOR_PASSWORD}
+      FLOWDESK_NOTIFICATION_DB_PASSWORD: ${FLOWDESK_NOTIFICATION_DB_PASSWORD:?set FLOWDESK_NOTIFICATION_DB_PASSWORD}
+      FLOWDESK_NOTIFICATION_MIGRATOR_PASSWORD: ${FLOWDESK_NOTIFICATION_MIGRATOR_PASSWORD:?set FLOWDESK_NOTIFICATION_MIGRATOR_PASSWORD}
+      FLOWDESK_NOTIFICATION_RECOVERY_DB_PASSWORD: ${FLOWDESK_NOTIFICATION_RECOVERY_DB_PASSWORD:?set FLOWDESK_NOTIFICATION_RECOVERY_DB_PASSWORD}
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      - --default-time-zone=+00:00
+      - --explicit-defaults-for-timestamp=ON
+      - --local-infile=OFF
+      - --skip-name-resolve
+      - --log-bin-trust-function-creators=ON
+      # Local Compose has no replica or point-in-time-recovery consumer. Keep
+      # InnoDB commit durability strict, but avoid a second per-transaction
+      # Docker Desktop fsync for an otherwise unused local binary log.
+      - --innodb-flush-log-at-trx-commit=1
+      - --sync-binlog=0
+      # The M7 webhook benchmark owns 64 independent fingerprint partitions.
+      # Keep their hot indexes resident and avoid dedicated redo-writer handoff
+      # overhead in this low-throughput local profile.
+      - --innodb-buffer-pool-size=1G
+      - --innodb-redo-log-capacity=512M
+      - --innodb-log-writer-threads=OFF
+    volumes:
+      - mysql-data:/var/lib/mysql
+      - ./infra/mysql/bootstrap/00-bootstrap.sh:/docker-entrypoint-initdb.d/00-bootstrap.sh:ro
+    networks:
+      - data
+    ports:
+      # Loopback-only publishing for local development (host -> container). The
+      # internal networks remain the primary path; nothing binds 0.0.0.0.
+      # The host side is configurable because some machines already run a native
+      # MySQL service on 3306 (for example MySQL80 on Windows).
+      - "127.0.0.1:${FLOWDESK_MYSQL_PORT:-3306}:3306"
+    healthcheck:
+      test: ["CMD-SHELL", "MYSQL_PWD=$$MYSQL_ROOT_PASSWORD mysqladmin ping --protocol=tcp -h 127.0.0.1 -uroot --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  redis:
+    image: redis:7.4.10-alpine@sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2
+    restart: unless-stopped
+    environment:
+      FLOWDESK_REDIS_PASSWORD: ${FLOWDESK_REDIS_PASSWORD:?set FLOWDESK_REDIS_PASSWORD}
+    command: ["sh", "-c", "exec redis-server --appendonly yes --requirepass \"$$FLOWDESK_REDIS_PASSWORD\""]
+    volumes:
+      - redis-data:/data
+    networks:
+      - messaging
+    ports:
+      - "127.0.0.1:${FLOWDESK_REDIS_PUBLISH_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=$$FLOWDESK_REDIS_PASSWORD redis-cli ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  redis-verify:
+    image: redis:7.4.10-alpine@sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2
+    restart: "no"
+    entrypoint: ["sh", "/verify/verify.sh"]
+    environment:
+      FLOWDESK_REDIS_PASSWORD: ${FLOWDESK_REDIS_PASSWORD:?set FLOWDESK_REDIS_PASSWORD}
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      - ./infra/redis/verify.sh:/verify/verify.sh:ro
+    networks:
+      - messaging
+
+  nacos:
+    image: nacos/nacos-server:v3.1.2@sha256:65cf0ad9c84e45f0112cbef0acccb5541198b919f64d7e6ac61dd1f9d8c1509c
+    restart: unless-stopped
+    environment:
+      MODE: standalone
+      PREFER_HOST_MODE: hostname
+      NACOS_AUTH_SYSTEM_TYPE: nacos
+      NACOS_AUTH_ENABLE: "true"
+      NACOS_AUTH_ADMIN_ENABLE: "true"
+      NACOS_AUTH_CONSOLE_ENABLE: "true"
+      NACOS_AUTH_TOKEN: ${FLOWDESK_NACOS_AUTH_TOKEN:?set FLOWDESK_NACOS_AUTH_TOKEN}
+      NACOS_AUTH_IDENTITY_KEY: ${FLOWDESK_NACOS_IDENTITY_KEY:?set FLOWDESK_NACOS_IDENTITY_KEY}
+      NACOS_AUTH_IDENTITY_VALUE: ${FLOWDESK_NACOS_IDENTITY_VALUE:?set FLOWDESK_NACOS_IDENTITY_VALUE}
+      JVM_XMS: 256m
+      JVM_XMX: 512m
+      JVM_XMN: 128m
+    volumes:
+      - nacos-data:/home/nacos/data
+    networks:
+      - control
+    ports:
+      - "127.0.0.1:${FLOWDESK_NACOS_HTTP_PUBLISH_PORT:-8848}:8848"
+      - "127.0.0.1:${FLOWDESK_NACOS_GRPC_PUBLISH_PORT:-9848}:9848"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8848/nacos/v3/admin/core/state/readiness | grep -q '\"data\":\"ok\"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+  nacos-initialize:
+    image: nacos/nacos-server:v3.1.2@sha256:65cf0ad9c84e45f0112cbef0acccb5541198b919f64d7e6ac61dd1f9d8c1509c
+    restart: "no"
+    entrypoint: ["sh", "-ec"]
+    environment:
+      FLOWDESK_NACOS_ADMIN_PASSWORD: ${FLOWDESK_NACOS_ADMIN_PASSWORD:?set FLOWDESK_NACOS_ADMIN_PASSWORD}
+    command:
+      - |
+        curl -sS -X POST http://nacos:8848/nacos/v3/auth/user/admin \
+          --data-urlencode "password=$$FLOWDESK_NACOS_ADMIN_PASSWORD" >/dev/null || true
+        curl -fsS -X POST http://nacos:8848/nacos/v3/auth/user/login \
+          --data-urlencode "username=nacos" \
+          --data-urlencode "password=$$FLOWDESK_NACOS_ADMIN_PASSWORD" | grep -q 'accessToken'
+        echo FLOWDESK_NACOS_AUTH_LOGIN_OK
+    depends_on:
+      nacos:
+        condition: service_healthy
+    networks:
+      - control
+
+  rocketmq-nameserver:
+    image: apache/rocketmq:5.3.4@sha256:d57ee4ebbd9d7bb6e185775bde41c128e98f185b25bf0b05c77d4e6c010572b8
+    restart: unless-stopped
+    command: ["sh", "mqnamesrv"]
+    depends_on:
+      rocketmq-volume-init:
+        condition: service_completed_successfully
+    volumes:
+      - rocketmq-nameserver-logs:/home/rocketmq/logs
+    networks:
+      - messaging
+    ports:
+      - "127.0.0.1:${FLOWDESK_ROCKETMQ_NAMESERVER_PUBLISH_PORT:-9876}:9876"
+    healthcheck:
+      test: ["CMD-SHELL", "sh mqadmin clusterList -n 127.0.0.1:9876 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  rocketmq-broker:
+    image: apache/rocketmq:5.3.4@sha256:d57ee4ebbd9d7bb6e185775bde41c128e98f185b25bf0b05c77d4e6c010572b8
+    restart: unless-stopped
+    environment:
+      NAMESRV_ADDR: rocketmq-nameserver:9876
+      FLOWDESK_ROCKETMQ_BROKER_ADVERTISED_HOST: ${FLOWDESK_ROCKETMQ_BROKER_ADVERTISED_HOST:-127.0.0.1}
+      FLOWDESK_ROCKETMQ_BROKER_VIP_PUBLISH_PORT: ${FLOWDESK_ROCKETMQ_BROKER_VIP_PUBLISH_PORT:-10909}
+      FLOWDESK_ROCKETMQ_BROKER_PUBLISH_PORT: ${FLOWDESK_ROCKETMQ_BROKER_PUBLISH_PORT:-10911}
+      FLOWDESK_ROCKETMQ_BROKER_HA_PUBLISH_PORT: ${FLOWDESK_ROCKETMQ_BROKER_HA_PUBLISH_PORT:-10912}
+      FLOWDESK_ROCKETMQ_ACL_ENABLED: ${FLOWDESK_ROCKETMQ_ACL_ENABLED:-false}
+      FLOWDESK_ROCKETMQ_ADMIN_ACCESS_KEY: ${FLOWDESK_ROCKETMQ_ADMIN_ACCESS_KEY:-}
+      FLOWDESK_ROCKETMQ_ADMIN_SECRET_KEY: ${FLOWDESK_ROCKETMQ_ADMIN_SECRET_KEY:-}
+      FLOWDESK_ROCKETMQ_INNER_ACCESS_KEY: ${FLOWDESK_ROCKETMQ_INNER_ACCESS_KEY:-}
+      FLOWDESK_ROCKETMQ_INNER_SECRET_KEY: ${FLOWDESK_ROCKETMQ_INNER_SECRET_KEY:-}
+    entrypoint: ["sh", "/flowdesk/start-broker.sh"]
+    depends_on:
+      rocketmq-nameserver:
+        condition: service_healthy
+      rocketmq-volume-init:
+        condition: service_completed_successfully
+    volumes:
+      - ./infra/rocketmq/broker.conf:/home/rocketmq/rocketmq-5.3.4/conf/flowdesk-broker.conf:ro
+      - ./infra/rocketmq/start-broker.sh:/flowdesk/start-broker.sh:ro
+      - rocketmq-broker-store:/home/rocketmq/store
+      - rocketmq-broker-logs:/home/rocketmq/logs
+    networks:
+      - messaging
+    ports:
+      # Legacy host-JVM profiles receive a loopback Broker address from NameServer.
+      # M10 sets the advertised host to rocketmq-broker and uses the internal
+      # network; these optional bindings remain loopback-only.
+      - "127.0.0.1:${FLOWDESK_ROCKETMQ_BROKER_VIP_PUBLISH_PORT:-10909}:${FLOWDESK_ROCKETMQ_BROKER_VIP_PUBLISH_PORT:-10909}"
+      - "127.0.0.1:${FLOWDESK_ROCKETMQ_BROKER_PUBLISH_PORT:-10911}:${FLOWDESK_ROCKETMQ_BROKER_PUBLISH_PORT:-10911}"
+      - "127.0.0.1:${FLOWDESK_ROCKETMQ_BROKER_HA_PUBLISH_PORT:-10912}:${FLOWDESK_ROCKETMQ_BROKER_HA_PUBLISH_PORT:-10912}"
+    healthcheck:
+      test: ["CMD-SHELL", "sh mqadmin clusterList -n rocketmq-nameserver:9876 2>/dev/null | grep -q flowdesk-broker"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 20s
+
+  rocketmq-volume-init:
+    image: apache/rocketmq:5.3.4@sha256:d57ee4ebbd9d7bb6e185775bde41c128e98f185b25bf0b05c77d4e6c010572b8
+    user: "0:0"
+    restart: "no"
+    entrypoint: ["sh", "-c"]
+    command:
+      - mkdir -p /nameserver-logs/rocketmqlogs /broker-logs/rocketmqlogs /broker-store && chown -R 3000:3000 /nameserver-logs /broker-logs /broker-store
+    volumes:
+      - rocketmq-nameserver-logs:/nameserver-logs
+      - rocketmq-broker-store:/broker-store
+      - rocketmq-broker-logs:/broker-logs
+    networks:
+      - messaging
+
+  rocketmq-verify:
+    image: apache/rocketmq:5.3.4@sha256:d57ee4ebbd9d7bb6e185775bde41c128e98f185b25bf0b05c77d4e6c010572b8
+    restart: "no"
+    entrypoint: ["sh", "/verify/verify.sh"]
+    environment:
+      FLOWDESK_ROCKETMQ_ACL_ENABLED: ${FLOWDESK_ROCKETMQ_ACL_ENABLED:-false}
+      FLOWDESK_ROCKETMQ_ADMIN_ACCESS_KEY: ${FLOWDESK_ROCKETMQ_ADMIN_ACCESS_KEY:-}
+      FLOWDESK_ROCKETMQ_ADMIN_SECRET_KEY: ${FLOWDESK_ROCKETMQ_ADMIN_SECRET_KEY:-}
+      FLOWDESK_ROCKETMQ_VERIFY_BROKER_ADDRESS: ${FLOWDESK_ROCKETMQ_VERIFY_BROKER_ADDRESS:-}
+      FLOWDESK_ROCKETMQ_VERIFY_BROKER_HOST: ${FLOWDESK_ROCKETMQ_VERIFY_BROKER_HOST:-127.0.0.1}
+      FLOWDESK_ROCKETMQ_BROKER_VIP_PUBLISH_PORT: ${FLOWDESK_ROCKETMQ_BROKER_VIP_PUBLISH_PORT:-10909}
+      FLOWDESK_ROCKETMQ_BROKER_PUBLISH_PORT: ${FLOWDESK_ROCKETMQ_BROKER_PUBLISH_PORT:-10911}
+      FLOWDESK_ROCKETMQ_BROKER_HA_PUBLISH_PORT: ${FLOWDESK_ROCKETMQ_BROKER_HA_PUBLISH_PORT:-10912}
+      FLOWDESK_ROCKETMQ_M7_ENABLED: ${FLOWDESK_ROCKETMQ_M7_ENABLED:-false}
+      FLOWDESK_ROCKETMQ_M8_ENABLED: ${FLOWDESK_ROCKETMQ_M8_ENABLED:-false}
+    depends_on:
+      rocketmq-broker:
+        condition: service_healthy
+    volumes:
+      - ./infra/rocketmq/verify.sh:/verify/verify.sh:ro
+    # NameServer advertises the loopback Broker address used by host JVMs. Sharing
+    # the Broker network namespace lets the container verifier exercise that same
+    # address without weakening the host-only publish bindings.
+    network_mode: "service:rocketmq-broker"
+
+  rocketmq-acl-provision:
+    image: apache/rocketmq:5.3.4@sha256:d57ee4ebbd9d7bb6e185775bde41c128e98f185b25bf0b05c77d4e6c010572b8
+    restart: "no"
+    entrypoint: ["sh", "/provision/provision-workflow-start-v1-acl.sh"]
+    environment:
+      FLOWDESK_ROCKETMQ_ACL_ENABLED: ${FLOWDESK_ROCKETMQ_ACL_ENABLED:-false}
+      FLOWDESK_ROCKETMQ_ADMIN_ACCESS_KEY: ${FLOWDESK_ROCKETMQ_ADMIN_ACCESS_KEY:-}
+      FLOWDESK_ROCKETMQ_ADMIN_SECRET_KEY: ${FLOWDESK_ROCKETMQ_ADMIN_SECRET_KEY:-}
+      FLOWDESK_ROCKETMQ_ADMIN_BROKER_ADDRESS: ${FLOWDESK_ROCKETMQ_ADMIN_BROKER_ADDRESS:-}
+      FLOWDESK_ROCKETMQ_ADMIN_BROKER_HOST: ${FLOWDESK_ROCKETMQ_ADMIN_BROKER_HOST:-127.0.0.1}
+      FLOWDESK_ROCKETMQ_BROKER_PUBLISH_PORT: ${FLOWDESK_ROCKETMQ_BROKER_PUBLISH_PORT:-10911}
+      FLOWDESK_TICKET_ROCKETMQ_ACCESS_KEY: ${FLOWDESK_TICKET_ROCKETMQ_ACCESS_KEY:-flowdeskticket}
+      FLOWDESK_TICKET_ROCKETMQ_SECRET_KEY: ${FLOWDESK_TICKET_ROCKETMQ_SECRET_KEY:-}
+      FLOWDESK_WORKFLOW_ROCKETMQ_ACCESS_KEY: ${FLOWDESK_WORKFLOW_ROCKETMQ_ACCESS_KEY:-flowdeskworkflow}
+      FLOWDESK_WORKFLOW_ROCKETMQ_SECRET_KEY: ${FLOWDESK_WORKFLOW_ROCKETMQ_SECRET_KEY:-}
+      FLOWDESK_ALERT_ROCKETMQ_ACCESS_KEY: ${FLOWDESK_ALERT_ROCKETMQ_ACCESS_KEY:-flowdeskalert}
+      FLOWDESK_ALERT_ROCKETMQ_SECRET_KEY: ${FLOWDESK_ALERT_ROCKETMQ_SECRET_KEY:-}
+      FLOWDESK_ROCKETMQ_M7_ENABLED: ${FLOWDESK_ROCKETMQ_M7_ENABLED:-false}
+      FLOWDESK_NOTIFICATION_ROCKETMQ_ACCESS_KEY: ${FLOWDESK_NOTIFICATION_ROCKETMQ_ACCESS_KEY:-flowdesknotification}
+      FLOWDESK_NOTIFICATION_ROCKETMQ_SECRET_KEY: ${FLOWDESK_NOTIFICATION_ROCKETMQ_SECRET_KEY:-}
+      FLOWDESK_ROCKETMQ_M8_ENABLED: ${FLOWDESK_ROCKETMQ_M8_ENABLED:-false}
+    depends_on:
+      rocketmq-broker:
+        condition: service_healthy
+    volumes:
+      - ./infra/rocketmq/provision-workflow-start-v1-acl.sh:/provision/provision-workflow-start-v1-acl.sh:ro
+    network_mode: "service:rocketmq-broker"
+
+  migrate-iam:
+    <<: *flyway-common
+    entrypoint: ["bash", "/flyway/scripts/migrate-iam.sh"]
+    environment:
+      FLYWAY_URL: jdbc:mysql://mysql:3306/flowdesk_iam?sslMode=PREFERRED&allowPublicKeyRetrieval=true&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true
+      FLYWAY_USER: fd_iam_migrator
+      FLYWAY_PASSWORD: ${FLOWDESK_IAM_MIGRATOR_PASSWORD:?set FLOWDESK_IAM_MIGRATOR_PASSWORD}
+      FLYWAY_LOCATIONS: filesystem:/flyway/sql
+    volumes:
+      - ./flowdesk-iam-service/src/main/resources/db/migration:/flyway/sql:ro
+      - ./flowdesk-iam-service/src/main/resources/db/demo-migration:/flyway/demo:ro
+      - ./infra/mysql/flyway/migrate-iam.sh:/flyway/scripts/migrate-iam.sh:ro
+
+  migrate-ticket:
+    <<: *flyway-common
+    entrypoint: ["bash", "/flyway/scripts/migrate-ticket.sh"]
+    environment:
+      FLYWAY_URL: jdbc:mysql://mysql:3306/flowdesk_ticket?sslMode=PREFERRED&allowPublicKeyRetrieval=true&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true
+      FLYWAY_USER: fd_ticket_migrator
+      FLYWAY_PASSWORD: ${FLOWDESK_TICKET_MIGRATOR_PASSWORD:?set FLOWDESK_TICKET_MIGRATOR_PASSWORD}
+      FLYWAY_LOCATIONS: filesystem:/flyway/sql
+    volumes:
+      - ./flowdesk-ticket-service/src/main/resources/db/migration:/flyway/sql:ro
+      - ./flowdesk-ticket-service/src/main/resources/db/demo-migration:/flyway/demo:ro
+      - ./infra/mysql/flyway/migrate-ticket.sh:/flyway/scripts/migrate-ticket.sh:ro
+
+  migrate-workflow:
+    <<: *flyway-common
+    entrypoint: ["bash", "/flyway/scripts/migrate-workflow.sh"]
+    environment:
+      FLYWAY_URL: jdbc:mysql://mysql:3306/flowdesk_workflow?sslMode=PREFERRED&allowPublicKeyRetrieval=true&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true
+      FLYWAY_USER: fd_workflow_migrator
+      FLYWAY_PASSWORD: ${FLOWDESK_WORKFLOW_MIGRATOR_PASSWORD:?set FLOWDESK_WORKFLOW_MIGRATOR_PASSWORD}
+      FLYWAY_LOCATIONS: filesystem:/flyway/sql
+    volumes:
+      - ./flowdesk-workflow-service/src/main/resources/db/migration:/flyway/sql:ro
+      - ./flowdesk-workflow-service/src/main/resources/db/demo-migration:/flyway/demo:ro
+      - ./infra/mysql/flyway/migrate-workflow.sh:/flyway/scripts/migrate-workflow.sh:ro
+
+  migrate-alert:
+    <<: *flyway-common
+    entrypoint: ["bash", "/flyway/scripts/migrate-alert.sh"]
+    environment:
+      FLYWAY_URL: jdbc:mysql://mysql:3306/flowdesk_alert?sslMode=PREFERRED&allowPublicKeyRetrieval=true&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true
+      FLYWAY_USER: fd_alert_migrator
+      FLYWAY_PASSWORD: ${FLOWDESK_ALERT_MIGRATOR_PASSWORD:?set FLOWDESK_ALERT_MIGRATOR_PASSWORD}
+      FLYWAY_LOCATIONS: filesystem:/flyway/sql
+    volumes:
+      - ./flowdesk-alert-service/src/main/resources/db/migration:/flyway/sql:ro
+      - ./flowdesk-alert-service/src/main/resources/db/demo-migration:/flyway/demo:ro
+      - ./infra/mysql/flyway/migrate-alert.sh:/flyway/scripts/migrate-alert.sh:ro
+
+  migrate-notification:
+    <<: *flyway-common
+    entrypoint: ["bash", "/flyway/scripts/migrate-notification.sh"]
+    environment:
+      FLYWAY_URL: jdbc:mysql://mysql:3306/flowdesk_notification?sslMode=PREFERRED&allowPublicKeyRetrieval=true&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true
+      FLYWAY_USER: fd_notification_migrator
+      FLYWAY_PASSWORD: ${FLOWDESK_NOTIFICATION_MIGRATOR_PASSWORD:?set FLOWDESK_NOTIFICATION_MIGRATOR_PASSWORD}
+      FLYWAY_LOCATIONS: filesystem:/flyway/sql
+    volumes:
+      - ./flowdesk-notification-service/src/main/resources/db/migration:/flyway/sql:ro
+      - ./flowdesk-notification-service/src/main/resources/db/demo-migration:/flyway/demo:ro
+      - ./infra/mysql/flyway/migrate-notification.sh:/flyway/scripts/migrate-notification.sh:ro
+
+
+  seed-iam:
+    <<: *flyway-demo-common
+    environment:
+      FLYWAY_URL: jdbc:mysql://mysql:3306/flowdesk_iam?sslMode=PREFERRED&allowPublicKeyRetrieval=true&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true
+      FLYWAY_USER: fd_iam_migrator
+      FLYWAY_PASSWORD: ${FLOWDESK_IAM_MIGRATOR_PASSWORD:?set FLOWDESK_IAM_MIGRATOR_PASSWORD}
+      FLYWAY_LOCATIONS: filesystem:/flyway/sql,filesystem:/flyway/demo
+      FLYWAY_OUT_OF_ORDER: "true"
+    depends_on:
+      mysql: {condition: service_healthy}
+      migrate-iam: {condition: service_completed_successfully}
+    volumes:
+      - ./flowdesk-iam-service/src/main/resources/db/migration:/flyway/sql:ro
+      - ./flowdesk-iam-service/src/main/resources/db/demo-migration:/flyway/demo:ro
+
+  seed-workflow:
+    <<: *flyway-demo-common
+    environment:
+      FLYWAY_URL: jdbc:mysql://mysql:3306/flowdesk_workflow?sslMode=PREFERRED&allowPublicKeyRetrieval=true&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true
+      FLYWAY_USER: fd_workflow_migrator
+      FLYWAY_PASSWORD: ${FLOWDESK_WORKFLOW_MIGRATOR_PASSWORD:?set FLOWDESK_WORKFLOW_MIGRATOR_PASSWORD}
+      FLYWAY_LOCATIONS: filesystem:/flyway/sql,filesystem:/flyway/demo
+      FLYWAY_OUT_OF_ORDER: "true"
+    depends_on:
+      mysql: {condition: service_healthy}
+      migrate-workflow: {condition: service_completed_successfully}
+    volumes:
+      - ./flowdesk-workflow-service/src/main/resources/db/migration:/flyway/sql:ro
+      - ./flowdesk-workflow-service/src/main/resources/db/demo-migration:/flyway/demo:ro
+
+  seed-ticket:
+    <<: *flyway-demo-common
+    environment:
+      FLYWAY_URL: jdbc:mysql://mysql:3306/flowdesk_ticket?sslMode=PREFERRED&allowPublicKeyRetrieval=true&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true
+      FLYWAY_USER: fd_ticket_migrator
+      FLYWAY_PASSWORD: ${FLOWDESK_TICKET_MIGRATOR_PASSWORD:?set FLOWDESK_TICKET_MIGRATOR_PASSWORD}
+      FLYWAY_LOCATIONS: filesystem:/flyway/sql,filesystem:/flyway/demo
+      FLYWAY_OUT_OF_ORDER: "true"
+    depends_on:
+      mysql: {condition: service_healthy}
+      migrate-ticket: {condition: service_completed_successfully}
+      seed-iam: {condition: service_completed_successfully}
+      seed-workflow: {condition: service_completed_successfully}
+    volumes:
+      - ./flowdesk-ticket-service/src/main/resources/db/migration:/flyway/sql:ro
+      - ./flowdesk-ticket-service/src/main/resources/db/demo-migration:/flyway/demo:ro
+
+  seed-alert:
+    <<: *flyway-demo-common
+    environment:
+      FLYWAY_URL: jdbc:mysql://mysql:3306/flowdesk_alert?sslMode=PREFERRED&allowPublicKeyRetrieval=true&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true
+      FLYWAY_USER: fd_alert_migrator
+      FLYWAY_PASSWORD: ${FLOWDESK_ALERT_MIGRATOR_PASSWORD:?set FLOWDESK_ALERT_MIGRATOR_PASSWORD}
+      FLYWAY_LOCATIONS: filesystem:/flyway/sql,filesystem:/flyway/demo
+      FLYWAY_OUT_OF_ORDER: "true"
+    depends_on:
+      mysql: {condition: service_healthy}
+      migrate-alert: {condition: service_completed_successfully}
+      seed-ticket: {condition: service_completed_successfully}
+    volumes:
+      - ./flowdesk-alert-service/src/main/resources/db/migration:/flyway/sql:ro
+      - ./flowdesk-alert-service/src/main/resources/db/demo-migration:/flyway/demo:ro
+
+  seed-notification:
+    <<: *flyway-demo-common
+    environment:
+      FLYWAY_URL: jdbc:mysql://mysql:3306/flowdesk_notification?sslMode=PREFERRED&allowPublicKeyRetrieval=true&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true
+      FLYWAY_USER: fd_notification_migrator
+      FLYWAY_PASSWORD: ${FLOWDESK_NOTIFICATION_MIGRATOR_PASSWORD:?set FLOWDESK_NOTIFICATION_MIGRATOR_PASSWORD}
+      FLYWAY_LOCATIONS: filesystem:/flyway/sql,filesystem:/flyway/demo
+      FLYWAY_OUT_OF_ORDER: "true"
+    depends_on:
+      mysql: {condition: service_healthy}
+      migrate-notification: {condition: service_completed_successfully}
+      seed-ticket: {condition: service_completed_successfully}
+    volumes:
+      - ./flowdesk-notification-service/src/main/resources/db/migration:/flyway/sql:ro
+      - ./flowdesk-notification-service/src/main/resources/db/demo-migration:/flyway/demo:ro
+
+  demo-seed-verify:
+    image: mysql:8.4.10@sha256:8dbcf531a03aade657e181b9cf2f1d1803ce621a1d55610cb44cb531ab7d7db6
+    restart: "no"
+    environment:
+      MYSQL_PWD: ${FLOWDESK_MYSQL_ROOT_PASSWORD:?set FLOWDESK_MYSQL_ROOT_PASSWORD}
+    command:
+      - sh
+      - -ec
+      - mysql --protocol=tcp -hmysql -uroot < /verify/demo-seed-contract.sql
+    depends_on:
+      seed-iam: {condition: service_completed_successfully}
+      seed-ticket: {condition: service_completed_successfully}
+      seed-workflow: {condition: service_completed_successfully}
+      seed-alert: {condition: service_completed_successfully}
+      seed-notification: {condition: service_completed_successfully}
+    volumes:
+      - ./infra/mysql/verify:/verify:ro
+    networks:
+      - data
+
+  milestone7-monitoring-credentials:
+    image: mysql:8.4.10@sha256:8dbcf531a03aade657e181b9cf2f1d1803ce621a1d55610cb44cb531ab7d7db6
+    restart: "no"
+    environment:
+      MYSQL_PWD: ${FLOWDESK_MYSQL_ROOT_PASSWORD:?set FLOWDESK_MYSQL_ROOT_PASSWORD}
+    command:
+      - sh
+      - -ec
+      - mysql --protocol=tcp -hmysql -uroot < /runtime/monitoring-credentials.sql
+    depends_on:
+      seed-alert: {condition: service_completed_successfully}
+    volumes:
+      - ./.data/milestone7:/runtime:ro
+    networks:
+      - data
+
+  # M6 formal acceptance only.  The fixture is intentionally absent from
+  # product/demo Flyway locations and is loaded with an admin-only one-shot job.
+  milestone6-condition-false-fixture:
+    image: mysql:8.4.10@sha256:8dbcf531a03aade657e181b9cf2f1d1803ce621a1d55610cb44cb531ab7d7db6
+    restart: "no"
+    environment:
+      MYSQL_PWD: ${FLOWDESK_MYSQL_ROOT_PASSWORD:?set FLOWDESK_MYSQL_ROOT_PASSWORD}
+    command:
+      - sh
+      - -ec
+      - mysql --protocol=tcp -hmysql -uroot < /verify/milestone6-condition-false-fixture.sql
+    depends_on:
+      demo-seed-verify:
+        condition: service_completed_successfully
+    volumes:
+      - ./infra/mysql/verify:/verify:ro
+    networks:
+      - data
+
+  milestone6-takeover-schema-init:
+    image: mysql:8.4.10@sha256:8dbcf531a03aade657e181b9cf2f1d1803ce621a1d55610cb44cb531ab7d7db6
+    restart: "no"
+    environment:
+      MYSQL_PWD: ${FLOWDESK_MYSQL_ROOT_PASSWORD:?set FLOWDESK_MYSQL_ROOT_PASSWORD}
+    command:
+      - sh
+      - -ec
+      - >-
+        mysql --protocol=tcp -hmysql -uroot
+        -e "CREATE DATABASE flowdesk_workflow_m6_takeover
+        CHARACTER SET utf8mb4 COLLATE utf8mb4_bin"
+    depends_on:
+      mysql:
+        condition: service_healthy
+    networks:
+      - data
+
+  milestone6-takeover-migrate:
+    image: flyway/flyway:11.14.1@sha256:ba032dc3fc4510694e1d096e2491ef562e42170ed91eec66ee5377b1124913d8
+    restart: "no"
+    command: ["migrate"]
+    environment:
+      FLYWAY_URL: jdbc:mysql://mysql:3306/flowdesk_workflow_m6_takeover?sslMode=PREFERRED&allowPublicKeyRetrieval=true&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true
+      FLYWAY_USER: root
+      FLYWAY_PASSWORD: ${FLOWDESK_MYSQL_ROOT_PASSWORD:?set FLOWDESK_MYSQL_ROOT_PASSWORD}
+      FLYWAY_LOCATIONS: filesystem:/flyway/product,filesystem:/flyway/acceptance
+    depends_on:
+      milestone6-takeover-schema-init:
+        condition: service_completed_successfully
+    volumes:
+      - ./flowdesk-workflow-service/src/main/resources/db/migration:/flyway/product:ro
+      - ./infra/mysql/milestone6-takeover:/flyway/acceptance:ro
+    networks:
+      - data
+
+  milestone6-takeover-verify:
+    image: mysql:8.4.10@sha256:8dbcf531a03aade657e181b9cf2f1d1803ce621a1d55610cb44cb531ab7d7db6
+    restart: "no"
+    environment:
+      MYSQL_PWD: ${FLOWDESK_MYSQL_ROOT_PASSWORD:?set FLOWDESK_MYSQL_ROOT_PASSWORD}
+    command:
+      - sh
+      - -ec
+      - >-
+        test "$(mysql --protocol=tcp -hmysql -uroot -N -B
+        -e 'SELECT marker FROM flowdesk_workflow_m6_takeover.milestone6_takeover_result')"
+        = FLOWDESK_MILESTONE_6_HISTORICAL_TAKEOVER_OK &&
+        echo FLOWDESK_MILESTONE_6_HISTORICAL_TAKEOVER_OK
+    depends_on:
+      milestone6-takeover-migrate:
+        condition: service_completed_successfully
+    networks:
+      - data
+
+  database-permissions:
+    image: mysql:8.4.10@sha256:8dbcf531a03aade657e181b9cf2f1d1803ce621a1d55610cb44cb531ab7d7db6
+    restart: "no"
+    environment:
+      MYSQL_PWD: ${FLOWDESK_MYSQL_ROOT_PASSWORD:?set FLOWDESK_MYSQL_ROOT_PASSWORD}
+    command:
+      - sh
+      - -ec
+      - mysql --protocol=tcp -hmysql -uroot < /grants/all.sql
+    depends_on:
+      migrate-iam: {condition: service_completed_successfully}
+      migrate-ticket: {condition: service_completed_successfully}
+      migrate-workflow: {condition: service_completed_successfully}
+      migrate-alert: {condition: service_completed_successfully}
+      migrate-notification: {condition: service_completed_successfully}
+    volumes:
+      - ./infra/mysql/runtime-grants:/grants:ro
+    networks:
+      - data
+
+  # Focused M5 acceptance grants only the two schemas exercised by the frozen
+  # Ticket -> Workflow slice. It deliberately avoids the all-service verifier.
+  database-permissions-m5:
+    image: mysql:8.4.10@sha256:8dbcf531a03aade657e181b9cf2f1d1803ce621a1d55610cb44cb531ab7d7db6
+    restart: "no"
+    environment:
+      MYSQL_PWD: ${FLOWDESK_MYSQL_ROOT_PASSWORD:?set FLOWDESK_MYSQL_ROOT_PASSWORD}
+    command:
+      - sh
+      - -ec
+      - mysql --protocol=tcp -hmysql -uroot < /grants/ticket.sql && mysql --protocol=tcp -hmysql -uroot < /grants/workflow.sql
+    depends_on:
+      migrate-ticket: {condition: service_completed_successfully}
+      migrate-workflow: {condition: service_completed_successfully}
+    volumes:
+      - ./infra/mysql/runtime-grants:/grants:ro
+    networks:
+      - data
+
+  database-verify:
+    image: mysql:8.4.10@sha256:8dbcf531a03aade657e181b9cf2f1d1803ce621a1d55610cb44cb531ab7d7db6
+    restart: "no"
+    environment:
+      MYSQL_PWD: ${FLOWDESK_MYSQL_ROOT_PASSWORD:?set FLOWDESK_MYSQL_ROOT_PASSWORD}
+    command:
+      - sh
+      - -ec
+      - mysql --protocol=tcp -hmysql -uroot < /verify/baseline-contract.sql
+    depends_on:
+      database-permissions:
+        condition: service_completed_successfully
+      demo-seed-verify:
+        condition: service_completed_successfully
+    volumes:
+      - ./infra/mysql/verify:/verify:ro
+    networks:
+      - data
+
+  database-permissions-verify:
+    image: mysql:8.4.10@sha256:8dbcf531a03aade657e181b9cf2f1d1803ce621a1d55610cb44cb531ab7d7db6
+    restart: "no"
+    entrypoint: ["bash", "/verify/runtime-permissions.sh"]
+    environment:
+      FLOWDESK_MYSQL_ROOT_PASSWORD: ${FLOWDESK_MYSQL_ROOT_PASSWORD:?set FLOWDESK_MYSQL_ROOT_PASSWORD}
+      FLOWDESK_GATEWAY_DB_PASSWORD: ${FLOWDESK_GATEWAY_DB_PASSWORD:?set FLOWDESK_GATEWAY_DB_PASSWORD}
+      FLOWDESK_IAM_DB_PASSWORD: ${FLOWDESK_IAM_DB_PASSWORD:?set FLOWDESK_IAM_DB_PASSWORD}
+      FLOWDESK_IAM_MIGRATOR_PASSWORD: ${FLOWDESK_IAM_MIGRATOR_PASSWORD:?set FLOWDESK_IAM_MIGRATOR_PASSWORD}
+      FLOWDESK_TICKET_DB_PASSWORD: ${FLOWDESK_TICKET_DB_PASSWORD:?set FLOWDESK_TICKET_DB_PASSWORD}
+      FLOWDESK_TICKET_MIGRATOR_PASSWORD: ${FLOWDESK_TICKET_MIGRATOR_PASSWORD:?set FLOWDESK_TICKET_MIGRATOR_PASSWORD}
+      FLOWDESK_WORKFLOW_DB_PASSWORD: ${FLOWDESK_WORKFLOW_DB_PASSWORD:?set FLOWDESK_WORKFLOW_DB_PASSWORD}
+      FLOWDESK_WORKFLOW_MIGRATOR_PASSWORD: ${FLOWDESK_WORKFLOW_MIGRATOR_PASSWORD:?set FLOWDESK_WORKFLOW_MIGRATOR_PASSWORD}
+      FLOWDESK_ALERT_DB_PASSWORD: ${FLOWDESK_ALERT_DB_PASSWORD:?set FLOWDESK_ALERT_DB_PASSWORD}
+      FLOWDESK_ALERT_MIGRATOR_PASSWORD: ${FLOWDESK_ALERT_MIGRATOR_PASSWORD:?set FLOWDESK_ALERT_MIGRATOR_PASSWORD}
+      FLOWDESK_NOTIFICATION_DB_PASSWORD: ${FLOWDESK_NOTIFICATION_DB_PASSWORD:?set FLOWDESK_NOTIFICATION_DB_PASSWORD}
+      FLOWDESK_NOTIFICATION_MIGRATOR_PASSWORD: ${FLOWDESK_NOTIFICATION_MIGRATOR_PASSWORD:?set FLOWDESK_NOTIFICATION_MIGRATOR_PASSWORD}
+      FLOWDESK_NOTIFICATION_RECOVERY_DB_PASSWORD: ${FLOWDESK_NOTIFICATION_RECOVERY_DB_PASSWORD:?set FLOWDESK_NOTIFICATION_RECOVERY_DB_PASSWORD}
+    depends_on:
+      database-verify:
+        condition: service_completed_successfully
+    volumes:
+      - ./infra/mysql/verify:/verify:ro
+    networks:
+      - data
+
+  ticket-number-concurrency-verify:
+    image: mysql:8.4.10@sha256:8dbcf531a03aade657e181b9cf2f1d1803ce621a1d55610cb44cb531ab7d7db6
+    restart: "no"
+    entrypoint: ["bash", "/verify/ticket-number-concurrency.sh"]
+    environment:
+      FLOWDESK_MYSQL_ROOT_PASSWORD: ${FLOWDESK_MYSQL_ROOT_PASSWORD:?set FLOWDESK_MYSQL_ROOT_PASSWORD}
+      FLOWDESK_TICKET_DB_PASSWORD: ${FLOWDESK_TICKET_DB_PASSWORD:?set FLOWDESK_TICKET_DB_PASSWORD}
+    depends_on:
+      database-permissions:
+        condition: service_completed_successfully
+    volumes:
+      - ./infra/mysql/verify:/verify:ro
+    networks:
+      - data
+
+  milestone2-verify:
+    image: mysql:8.4.10@sha256:8dbcf531a03aade657e181b9cf2f1d1803ce621a1d55610cb44cb531ab7d7db6
+    restart: "no"
+    entrypoint: ["sh", "-c", "echo FLOWDESK_MILESTONE_2_OK"]
+    depends_on:
+      database-permissions-verify:
+        condition: service_completed_successfully
+      demo-seed-verify:
+        condition: service_completed_successfully
+      nacos-initialize:
+        condition: service_completed_successfully
+      redis-verify:
+        condition: service_completed_successfully
+      rocketmq-verify:
+        condition: service_completed_successfully
+    networks:
+      - data
+
+  # M10 deployable application profile. Historical milestone scripts keep
+  # using host JVMs; this profile is the reproducible single-machine topology
+  # used by the final acceptance gate.
+  m10-monitoring-credentials:
+    profiles: ["m10"]
+    image: mysql:8.4.10@sha256:8dbcf531a03aade657e181b9cf2f1d1803ce621a1d55610cb44cb531ab7d7db6
+    restart: "no"
+    environment:
+      MYSQL_PWD: ${FLOWDESK_MYSQL_ROOT_PASSWORD:?set FLOWDESK_MYSQL_ROOT_PASSWORD}
+    command: ["sh", "-ec", "mysql --protocol=tcp -hmysql -uroot < /runtime/monitoring-credentials.sql"]
+    depends_on:
+      seed-alert: {condition: service_completed_successfully}
+    volumes:
+      - type: bind
+        source: ${FLOWDESK_M10_RUNTIME_DIRECTORY:-./.data/milestone10}
+        target: /runtime
+        read_only: true
+    networks: [data]
+
+  iam:
+    profiles: ["m10"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args: {SERVICE: flowdesk-iam-service}
+    restart: unless-stopped
+    init: true
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    tmpfs: ["/tmp"]
+    environment:
+      FLOWDESK_IAM_PORT: 8081
+      FLOWDESK_IAM_DB_URL: jdbc:mysql://mysql:3306/flowdesk_iam?sslMode=PREFERRED&allowPublicKeyRetrieval=true&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true
+      FLOWDESK_IAM_DB_PASSWORD: ${FLOWDESK_IAM_DB_PASSWORD:?set FLOWDESK_IAM_DB_PASSWORD}
+      FLOWDESK_CURSOR_TOKEN_HMAC_KEY: ${FLOWDESK_CURSOR_TOKEN_HMAC_KEY:?set FLOWDESK_CURSOR_TOKEN_HMAC_KEY}
+      FLOWDESK_IAM_JWT_PRIVATE_KEY_FILE: /run/secrets/flowdesk-jwt-private.pem
+      FLOWDESK_IAM_SERVICE_JWT_ROTATION_ENABLED: "true"
+      FLOWDESK_IAM_SERVICE_JWT_EXIT_AFTER_ISSUE: "false"
+      FLOWDESK_IAM_SERVICE_JWT_OUTPUT_DIRECTORY: /run/flowdesk/service-tokens
+      FLOWDESK_IAM_SERVICE_JWT_MAPPINGS: ${FLOWDESK_IAM_SERVICE_JWT_MAPPINGS:?set FLOWDESK_IAM_SERVICE_JWT_MAPPINGS}
+      FLOWDESK_SERVICE_JWT_TTL: ${FLOWDESK_SERVICE_JWT_TTL:-PT30S}
+      FLOWDESK_SERVICE_JWT_ROTATION_INTERVAL: ${FLOWDESK_SERVICE_JWT_ROTATION_INTERVAL:-PT10S}
+      FLOWDESK_JWT_CLOCK_SKEW: ${FLOWDESK_JWT_CLOCK_SKEW:-PT2S}
+      FLOWDESK_NACOS_SERVER_ADDR: nacos:8848
+      FLOWDESK_NACOS_USERNAME: ${FLOWDESK_NACOS_USERNAME:-nacos}
+      FLOWDESK_NACOS_PASSWORD: ${FLOWDESK_NACOS_ADMIN_PASSWORD:?set FLOWDESK_NACOS_ADMIN_PASSWORD}
+      FLOWDESK_NACOS_DISCOVERY_ENABLED: "true"
+      FLOWDESK_NACOS_REGISTER_ENABLED: "true"
+      FLOWDESK_HEALTH_DATABASE_REQUIRED: "true"
+      FLOWDESK_HEALTH_MIGRATION_REQUIRED: "true"
+    secrets:
+      - source: flowdesk-jwt-private
+        target: flowdesk-jwt-private.pem
+    volumes:
+      - flowdesk-service-tokens:/run/flowdesk/service-tokens
+    depends_on:
+      seed-iam: {condition: service_completed_successfully}
+      nacos: {condition: service_healthy}
+    networks: [data, control]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS -H 'X-Correlation-Id: 00000000-0000-4000-8000-000000000000' http://127.0.0.1:8081/api/v1/internal/health/readiness >/dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 20s
+
+  workflow:
+    profiles: ["m10"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args: {SERVICE: flowdesk-workflow-service}
+    restart: unless-stopped
+    init: true
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    tmpfs: ["/tmp"]
+    environment:
+      FLOWDESK_WORKFLOW_PORT: 8083
+      FLOWDESK_WORKFLOW_DB_URL: jdbc:mysql://mysql:3306/flowdesk_workflow?sslMode=PREFERRED&allowPublicKeyRetrieval=true&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true
+      FLOWDESK_WORKFLOW_DB_PASSWORD: ${FLOWDESK_WORKFLOW_DB_PASSWORD:?set FLOWDESK_WORKFLOW_DB_PASSWORD}
+      FLOWDESK_CURSOR_TOKEN_HMAC_KEY: ${FLOWDESK_CURSOR_TOKEN_HMAC_KEY:?set FLOWDESK_CURSOR_TOKEN_HMAC_KEY}
+      FLOWDESK_JWT_PUBLIC_KEY_FILE: /run/secrets/flowdesk-jwt-public.pem
+      FLOWDESK_ROCKETMQ_NAME_SERVER: rocketmq-nameserver:9876
+      FLOWDESK_WORKFLOW_ROCKETMQ_ACCESS_KEY: ${FLOWDESK_WORKFLOW_ROCKETMQ_ACCESS_KEY:?set FLOWDESK_WORKFLOW_ROCKETMQ_ACCESS_KEY}
+      FLOWDESK_WORKFLOW_ROCKETMQ_SECRET_KEY: ${FLOWDESK_WORKFLOW_ROCKETMQ_SECRET_KEY:?set FLOWDESK_WORKFLOW_ROCKETMQ_SECRET_KEY}
+      FLOWDESK_WORKFLOW_IAM_BASE_URL: http://iam:8081
+      FLOWDESK_WORKFLOW_IAM_SERVICE_TOKEN_FILE: /run/flowdesk/service-tokens/{tenantId}-flowdesk-workflow-service.jwt
+      FLOWDESK_WORKFLOW_START_ENTRY_ENABLED: "true"
+      FLOWDESK_WORKFLOW_START_CONSUMER_ENABLED: "true"
+      FLOWDESK_WORKFLOW_OUTBOX_PUBLISHER_ENABLED: "true"
+      FLOWDESK_WORKFLOW_NOTIFICATION_OUTBOX_PUBLISHER_ENABLED: "true"
+      FLOWDESK_NACOS_SERVER_ADDR: nacos:8848
+      FLOWDESK_NACOS_USERNAME: ${FLOWDESK_NACOS_USERNAME:-nacos}
+      FLOWDESK_NACOS_PASSWORD: ${FLOWDESK_NACOS_ADMIN_PASSWORD:?set FLOWDESK_NACOS_ADMIN_PASSWORD}
+      FLOWDESK_NACOS_DISCOVERY_ENABLED: "true"
+      FLOWDESK_NACOS_REGISTER_ENABLED: "true"
+      FLOWDESK_ROCKETMQ_M8_ENABLED: "true"
+      FLOWDESK_HEALTH_DATABASE_REQUIRED: "true"
+      FLOWDESK_HEALTH_MIGRATION_REQUIRED: "true"
+    secrets:
+      - source: flowdesk-jwt-public
+        target: flowdesk-jwt-public.pem
+    volumes:
+      - flowdesk-service-tokens:/run/flowdesk/service-tokens:ro
+    depends_on:
+      seed-workflow: {condition: service_completed_successfully}
+      iam: {condition: service_healthy}
+      rocketmq-broker: {condition: service_healthy}
+      nacos: {condition: service_healthy}
+    networks: [data, control, messaging]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS -H 'X-Correlation-Id: 00000000-0000-4000-8000-000000000000' http://127.0.0.1:8083/api/v1/internal/health/readiness >/dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 30s
+
+  ticket:
+    profiles: ["m10"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args: {SERVICE: flowdesk-ticket-service}
+    restart: unless-stopped
+    init: true
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    tmpfs: ["/tmp"]
+    environment:
+      FLOWDESK_TICKET_PORT: 8082
+      FLOWDESK_TICKET_DB_URL: jdbc:mysql://mysql:3306/flowdesk_ticket?sslMode=PREFERRED&allowPublicKeyRetrieval=true&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true
+      FLOWDESK_TICKET_DB_PASSWORD: ${FLOWDESK_TICKET_DB_PASSWORD:?set FLOWDESK_TICKET_DB_PASSWORD}
+      FLOWDESK_CURSOR_TOKEN_HMAC_KEY: ${FLOWDESK_CURSOR_TOKEN_HMAC_KEY:?set FLOWDESK_CURSOR_TOKEN_HMAC_KEY}
+      FLOWDESK_JWT_PUBLIC_KEY_FILE: /run/secrets/flowdesk-jwt-public.pem
+      FLOWDESK_REDIS_HOST: redis
+      FLOWDESK_REDIS_PORT: 6379
+      FLOWDESK_REDIS_PASSWORD: ${FLOWDESK_REDIS_PASSWORD:?set FLOWDESK_REDIS_PASSWORD}
+      FLOWDESK_ROCKETMQ_NAME_SERVER: rocketmq-nameserver:9876
+      FLOWDESK_TICKET_ROCKETMQ_ACCESS_KEY: ${FLOWDESK_TICKET_ROCKETMQ_ACCESS_KEY:?set FLOWDESK_TICKET_ROCKETMQ_ACCESS_KEY}
+      FLOWDESK_TICKET_ROCKETMQ_SECRET_KEY: ${FLOWDESK_TICKET_ROCKETMQ_SECRET_KEY:?set FLOWDESK_TICKET_ROCKETMQ_SECRET_KEY}
+      FLOWDESK_TICKET_IAM_BASE_URL: http://iam:8081
+      FLOWDESK_TICKET_WORKFLOW_BASE_URL: http://workflow:8083
+      FLOWDESK_TICKET_IAM_SERVICE_TOKEN_FILE: /run/flowdesk/service-tokens/{tenantId}-flowdesk-ticket-service.jwt
+      FLOWDESK_TICKET_OUTBOX_PUBLISHER_ENABLED: "true"
+      FLOWDESK_TICKET_WORKFLOW_REVERSE_ENTRY_ENABLED: "true"
+      FLOWDESK_TICKET_WORKFLOW_REVERSE_CONSUMER_ENABLED: "true"
+      FLOWDESK_TICKET_INCIDENT_ENTRY_ENABLED: "true"
+      FLOWDESK_TICKET_INCIDENT_CONSUMER_ENABLED: "true"
+      FLOWDESK_TICKET_INCIDENT_RESULT_PUBLISHER_ENABLED: "true"
+      FLOWDESK_TICKET_NOTIFICATION_OUTBOX_PUBLISHER_ENABLED: "true"
+      FLOWDESK_TICKET_SLA_ENABLED: "true"
+      FLOWDESK_TICKET_SLA_SCANNER_ENABLED: "true"
+      FLOWDESK_TICKET_SLA_REBUILDER_ENABLED: "true"
+      FLOWDESK_TICKET_SLA_REDIS_ENABLED: "true"
+      FLOWDESK_NACOS_SERVER_ADDR: nacos:8848
+      FLOWDESK_NACOS_USERNAME: ${FLOWDESK_NACOS_USERNAME:-nacos}
+      FLOWDESK_NACOS_PASSWORD: ${FLOWDESK_NACOS_ADMIN_PASSWORD:?set FLOWDESK_NACOS_ADMIN_PASSWORD}
+      FLOWDESK_NACOS_DISCOVERY_ENABLED: "true"
+      FLOWDESK_NACOS_REGISTER_ENABLED: "true"
+      FLOWDESK_ROCKETMQ_M7_ENABLED: "true"
+      FLOWDESK_ROCKETMQ_M8_ENABLED: "true"
+      FLOWDESK_HEALTH_DATABASE_REQUIRED: "true"
+      FLOWDESK_HEALTH_MIGRATION_REQUIRED: "true"
+    secrets:
+      - source: flowdesk-jwt-public
+        target: flowdesk-jwt-public.pem
+    volumes:
+      - flowdesk-service-tokens:/run/flowdesk/service-tokens:ro
+    depends_on:
+      seed-ticket: {condition: service_completed_successfully}
+      iam: {condition: service_healthy}
+      workflow: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      rocketmq-broker: {condition: service_healthy}
+      nacos: {condition: service_healthy}
+    networks: [data, control, messaging]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS -H 'X-Correlation-Id: 00000000-0000-4000-8000-000000000000' http://127.0.0.1:8082/api/v1/internal/health/readiness >/dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 30s
+
+  alert:
+    profiles: ["m10"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args: {SERVICE: flowdesk-alert-service}
+    restart: unless-stopped
+    init: true
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    tmpfs: ["/tmp"]
+    environment:
+      FLOWDESK_ALERT_PORT: 8084
+      FLOWDESK_ALERT_DB_URL: jdbc:mysql://mysql:3306/flowdesk_alert?sslMode=PREFERRED&allowPublicKeyRetrieval=true&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true
+      FLOWDESK_ALERT_DB_PASSWORD: ${FLOWDESK_ALERT_DB_PASSWORD:?set FLOWDESK_ALERT_DB_PASSWORD}
+      FLOWDESK_CURSOR_TOKEN_HMAC_KEY: ${FLOWDESK_CURSOR_TOKEN_HMAC_KEY:?set FLOWDESK_CURSOR_TOKEN_HMAC_KEY}
+      FLOWDESK_JWT_PUBLIC_KEY_FILE: /run/secrets/flowdesk-jwt-public.pem
+      FLOWDESK_ROCKETMQ_NAME_SERVER: rocketmq-nameserver:9876
+      FLOWDESK_ALERT_ROCKETMQ_ACCESS_KEY: ${FLOWDESK_ALERT_ROCKETMQ_ACCESS_KEY:?set FLOWDESK_ALERT_ROCKETMQ_ACCESS_KEY}
+      FLOWDESK_ALERT_ROCKETMQ_SECRET_KEY: ${FLOWDESK_ALERT_ROCKETMQ_SECRET_KEY:?set FLOWDESK_ALERT_ROCKETMQ_SECRET_KEY}
+      FLOWDESK_ALERT_WEBHOOK_ENABLED: "true"
+      FLOWDESK_ALERT_WEBHOOK_TIMESTAMP_WINDOW: ${FLOWDESK_ALERT_WEBHOOK_TIMESTAMP_WINDOW:-PT5M}
+      FLOWDESK_ALERT_WEBHOOK_SECRETS_FILE: /run/secrets/flowdesk-webhook-secrets
+      FLOWDESK_ALERT_TICKET_RESULT_ENTRY_ENABLED: "true"
+      FLOWDESK_ALERT_TICKET_RESULT_CONSUMER_ENABLED: "true"
+      FLOWDESK_ALERT_OUTBOX_PUBLISHER_ENABLED: "true"
+      FLOWDESK_NACOS_SERVER_ADDR: nacos:8848
+      FLOWDESK_NACOS_USERNAME: ${FLOWDESK_NACOS_USERNAME:-nacos}
+      FLOWDESK_NACOS_PASSWORD: ${FLOWDESK_NACOS_ADMIN_PASSWORD:?set FLOWDESK_NACOS_ADMIN_PASSWORD}
+      FLOWDESK_NACOS_DISCOVERY_ENABLED: "true"
+      FLOWDESK_NACOS_REGISTER_ENABLED: "true"
+      FLOWDESK_ROCKETMQ_M7_ENABLED: "true"
+      FLOWDESK_HEALTH_DATABASE_REQUIRED: "true"
+      FLOWDESK_HEALTH_MIGRATION_REQUIRED: "true"
+    secrets:
+      - source: flowdesk-jwt-public
+        target: flowdesk-jwt-public.pem
+    volumes:
+      - type: bind
+        source: ${FLOWDESK_ALERT_WEBHOOK_SECRETS_FILE:-./.data/m10/webhook-secrets.json}
+        target: /run/secrets/flowdesk-webhook-secrets
+        read_only: true
+    depends_on:
+      seed-alert: {condition: service_completed_successfully}
+      ticket: {condition: service_healthy}
+      rocketmq-broker: {condition: service_healthy}
+      nacos: {condition: service_healthy}
+    networks: [data, control, messaging]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS -H 'X-Correlation-Id: 00000000-0000-4000-8000-000000000000' http://127.0.0.1:8084/api/v1/internal/health/readiness >/dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 30s
+
+  notification:
+    profiles: ["m10"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args: {SERVICE: flowdesk-notification-service}
+    restart: unless-stopped
+    init: true
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    tmpfs: ["/tmp"]
+    environment:
+      FLOWDESK_NOTIFICATION_PORT: 8085
+      FLOWDESK_NOTIFICATION_DB_URL: jdbc:mysql://mysql:3306/flowdesk_notification?sslMode=PREFERRED&allowPublicKeyRetrieval=true&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true
+      FLOWDESK_NOTIFICATION_DB_PASSWORD: ${FLOWDESK_NOTIFICATION_DB_PASSWORD:?set FLOWDESK_NOTIFICATION_DB_PASSWORD}
+      FLOWDESK_NOTIFICATION_RECOVERY_DB_URL: jdbc:mysql://mysql:3306/flowdesk_notification?sslMode=PREFERRED&allowPublicKeyRetrieval=true&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true
+      FLOWDESK_NOTIFICATION_RECOVERY_DB_PASSWORD: ${FLOWDESK_NOTIFICATION_RECOVERY_DB_PASSWORD:?set FLOWDESK_NOTIFICATION_RECOVERY_DB_PASSWORD}
+      FLOWDESK_CURSOR_TOKEN_HMAC_KEY: ${FLOWDESK_CURSOR_TOKEN_HMAC_KEY:?set FLOWDESK_CURSOR_TOKEN_HMAC_KEY}
+      FLOWDESK_JWT_PUBLIC_KEY_FILE: /run/secrets/flowdesk-jwt-public.pem
+      FLOWDESK_ROCKETMQ_NAME_SERVER: rocketmq-nameserver:9876
+      FLOWDESK_NOTIFICATION_ROCKETMQ_ACCESS_KEY: ${FLOWDESK_NOTIFICATION_ROCKETMQ_ACCESS_KEY:?set FLOWDESK_NOTIFICATION_ROCKETMQ_ACCESS_KEY}
+      FLOWDESK_NOTIFICATION_ROCKETMQ_SECRET_KEY: ${FLOWDESK_NOTIFICATION_ROCKETMQ_SECRET_KEY:?set FLOWDESK_NOTIFICATION_ROCKETMQ_SECRET_KEY}
+      FLOWDESK_NOTIFICATION_ENTRY_ENABLED: "true"
+      FLOWDESK_NOTIFICATION_CONSUMER_ENABLED: "true"
+      FLOWDESK_NOTIFICATION_RECOVERY_ENABLED: "true"
+      FLOWDESK_NACOS_SERVER_ADDR: nacos:8848
+      FLOWDESK_NACOS_USERNAME: ${FLOWDESK_NACOS_USERNAME:-nacos}
+      FLOWDESK_NACOS_PASSWORD: ${FLOWDESK_NACOS_ADMIN_PASSWORD:?set FLOWDESK_NACOS_ADMIN_PASSWORD}
+      FLOWDESK_NACOS_DISCOVERY_ENABLED: "true"
+      FLOWDESK_NACOS_REGISTER_ENABLED: "true"
+      FLOWDESK_ROCKETMQ_M8_ENABLED: "true"
+      FLOWDESK_HEALTH_DATABASE_REQUIRED: "true"
+      FLOWDESK_HEALTH_MIGRATION_REQUIRED: "true"
+    secrets:
+      - source: flowdesk-jwt-public
+        target: flowdesk-jwt-public.pem
+    depends_on:
+      seed-notification: {condition: service_completed_successfully}
+      rocketmq-broker: {condition: service_healthy}
+      nacos: {condition: service_healthy}
+    networks: [data, control, messaging]
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS -H 'X-Correlation-Id: 00000000-0000-4000-8000-000000000000' http://127.0.0.1:8085/api/v1/internal/health/readiness >/dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 30s
+
+  gateway:
+    profiles: ["m10"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args: {SERVICE: flowdesk-gateway}
+    restart: unless-stopped
+    init: true
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    tmpfs: ["/tmp"]
+    environment:
+      FLOWDESK_GATEWAY_PORT: ${FLOWDESK_GATEWAY_PORT:-8080}
+      FLOWDESK_JWT_PUBLIC_KEY_FILE: /run/secrets/flowdesk-jwt-public.pem
+      FLOWDESK_GATEWAY_WEBHOOK_REQUIRE_TLS: ${FLOWDESK_GATEWAY_WEBHOOK_REQUIRE_TLS:-true}
+      # M10 is HTTPS-only at the published boundary.  Host-JVM profiles keep
+      # their historical HTTP defaults in the generated local environment;
+      # this profile must never silently downgrade to plaintext.
+      FLOWDESK_GATEWAY_TLS_ENABLED: ${FLOWDESK_GATEWAY_TLS_ENABLED:-true}
+      FLOWDESK_GATEWAY_TLS_KEY_STORE: ${FLOWDESK_GATEWAY_TLS_KEY_STORE:-/run/secrets/flowdesk-gateway-tls.p12}
+      FLOWDESK_GATEWAY_TLS_KEY_STORE_PASSWORD: ${FLOWDESK_GATEWAY_TLS_KEY_STORE_PASSWORD:-}
+      FLOWDESK_GATEWAY_TLS_KEY_STORE_TYPE: ${FLOWDESK_GATEWAY_TLS_KEY_STORE_TYPE:-PKCS12}
+      FLOWDESK_NACOS_SERVER_ADDR: nacos:8848
+      FLOWDESK_NACOS_USERNAME: ${FLOWDESK_NACOS_USERNAME:-nacos}
+      FLOWDESK_NACOS_PASSWORD: ${FLOWDESK_NACOS_ADMIN_PASSWORD:?set FLOWDESK_NACOS_ADMIN_PASSWORD}
+      FLOWDESK_NACOS_DISCOVERY_ENABLED: "true"
+      FLOWDESK_NACOS_REGISTER_ENABLED: "true"
+      FLOWDESK_GATEWAY_ROUTES_IAM: http://iam:8081
+      FLOWDESK_GATEWAY_ROUTES_TICKET: http://ticket:8082
+      FLOWDESK_GATEWAY_ROUTES_WORKFLOW: http://workflow:8083
+      FLOWDESK_GATEWAY_ROUTES_ALERT: http://alert:8084
+      FLOWDESK_GATEWAY_ROUTES_NOTIFICATION: http://notification:8085
+      FLOWDESK_HEALTH_STATIC_BUNDLE_REQUIRED: "true"
+    secrets:
+      - source: flowdesk-jwt-public
+        target: flowdesk-jwt-public.pem
+      - source: flowdesk-gateway-tls
+        target: flowdesk-gateway-tls.p12
+    depends_on:
+      iam: {condition: service_healthy}
+      ticket: {condition: service_healthy}
+      workflow: {condition: service_healthy}
+      alert: {condition: service_healthy}
+      notification: {condition: service_healthy}
+    networks: [control, data, messaging]
+    ports:
+      - "127.0.0.1:${FLOWDESK_GATEWAY_PORT:-8080}:${FLOWDESK_GATEWAY_PORT:-8080}"
+    healthcheck:
+      test: ["CMD-SHELL", "if [ \"$$FLOWDESK_GATEWAY_TLS_ENABLED\" != \"true\" ]; then exit 1; fi; curl -k -fsS \"https://127.0.0.1:$${FLOWDESK_GATEWAY_PORT}/api/v1/internal/health/readiness\" >/dev/null"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 30s
+
+networks:
+  # Docker Desktop does not activate published host ports for `internal: true`
+  # networks. The security boundary for local development is still enforced by
+  # the explicit 127.0.0.1 host bindings above; no service binds 0.0.0.0.
+  control:
+  data:
+  messaging:
+
+volumes:
+  mysql-data:
+  redis-data:
+  nacos-data:
+  rocketmq-nameserver-logs:
+  rocketmq-broker-store:
+  rocketmq-broker-logs:
+  flowdesk-service-tokens:
+
+secrets:
+  # The files are supplied by New-FlowDeskLocalEnv.ps1 or the M10 verifier and
+  # are mounted read-only only into the services that need them.
+  flowdesk-jwt-private:
+    file: ${FLOWDESK_IAM_JWT_PRIVATE_KEY_FILE:?set FLOWDESK_IAM_JWT_PRIVATE_KEY_FILE}
+  flowdesk-jwt-public:
+    file: ${FLOWDESK_JWT_PUBLIC_KEY_FILE:?set FLOWDESK_JWT_PUBLIC_KEY_FILE}
+  flowdesk-gateway-tls:
+    file: ${FLOWDESK_GATEWAY_TLS_KEY_STORE_FILE:-./.data/milestone10/gateway-local.p12}

@@ -1,0 +1,66 @@
+server:
+  port: ${FLOWDESK_WORKFLOW_PORT:8083}
+
+spring:
+  application:
+    name: flowdesk-workflow-service
+  datasource:
+    url: ${FLOWDESK_WORKFLOW_DB_URL:jdbc:mysql://127.0.0.1:3306/flowdesk_workflow?sslMode=PREFERRED&allowPublicKeyRetrieval=true&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true}
+    username: fd_workflow_runtime
+    password: ${FLOWDESK_WORKFLOW_DB_PASSWORD}
+  cloud:
+    nacos:
+      discovery:
+        server-addr: ${FLOWDESK_NACOS_SERVER_ADDR:127.0.0.1:8848}
+        namespace: ${FLOWDESK_NACOS_NAMESPACE:}
+        group: ${FLOWDESK_NACOS_GROUP:DEFAULT_GROUP}
+        username: ${FLOWDESK_NACOS_USERNAME:nacos}
+        password: ${FLOWDESK_NACOS_PASSWORD:}
+        enabled: ${FLOWDESK_NACOS_DISCOVERY_ENABLED:true}
+        register-enabled: ${FLOWDESK_NACOS_REGISTER_ENABLED:true}
+    stream:
+      default:
+        consumer:
+          # The M5 binding uses the classic client. Keep any accidental Binder
+          # binding at one invocation so it cannot add an inner retry loop.
+          max-attempts: 1
+      rocketmq:
+        binder:
+          name-server: ${FLOWDESK_ROCKETMQ_NAME_SERVER:127.0.0.1:9876}
+
+flowdesk:
+  health:
+    database-required: ${FLOWDESK_HEALTH_DATABASE_REQUIRED:true}
+    migration-required: ${FLOWDESK_HEALTH_MIGRATION_REQUIRED:true}
+  security:
+    jwt:
+      public-key-pem: ${FLOWDESK_JWT_PUBLIC_KEY_PEM:}
+      public-key-location: ${FLOWDESK_JWT_PUBLIC_KEY_FILE:}
+    cursor-token:
+      hmac-key: ${FLOWDESK_CURSOR_TOKEN_HMAC_KEY:}
+  workflow:
+    notification:
+      outbox:
+        publisher:
+          enabled: ${FLOWDESK_WORKFLOW_NOTIFICATION_OUTBOX_PUBLISHER_ENABLED:false}
+          name-server: ${FLOWDESK_ROCKETMQ_NAME_SERVER:127.0.0.1:9876}
+          access-key: ${FLOWDESK_WORKFLOW_ROCKETMQ_ACCESS_KEY:}
+          secret-key: ${FLOWDESK_WORKFLOW_ROCKETMQ_SECRET_KEY:}
+          poll-interval-millis: ${FLOWDESK_WORKFLOW_NOTIFICATION_OUTBOX_POLL_INTERVAL_MILLIS:500}
+    outbox:
+      publisher:
+        enabled: ${FLOWDESK_WORKFLOW_OUTBOX_PUBLISHER_ENABLED:false}
+        name-server: ${FLOWDESK_ROCKETMQ_NAME_SERVER:127.0.0.1:9876}
+        access-key: ${FLOWDESK_WORKFLOW_ROCKETMQ_ACCESS_KEY:}
+        secret-key: ${FLOWDESK_WORKFLOW_ROCKETMQ_SECRET_KEY:}
+    iam:
+      base-url: ${FLOWDESK_WORKFLOW_IAM_BASE_URL:http://127.0.0.1:8081}
+      service-token-file: ${FLOWDESK_WORKFLOW_IAM_SERVICE_TOKEN_FILE:}
+    start:
+      entry:
+        enabled: ${FLOWDESK_WORKFLOW_START_ENTRY_ENABLED:${FLOWDESK_WORKFLOW_START_CONSUMER_ENABLED:false}}
+      consumer:
+        enabled: ${FLOWDESK_WORKFLOW_START_CONSUMER_ENABLED:false}
+        name-server: ${FLOWDESK_ROCKETMQ_NAME_SERVER:127.0.0.1:9876}
+        access-key: ${FLOWDESK_WORKFLOW_ROCKETMQ_ACCESS_KEY:}
+        secret-key: ${FLOWDESK_WORKFLOW_ROCKETMQ_SECRET_KEY:}

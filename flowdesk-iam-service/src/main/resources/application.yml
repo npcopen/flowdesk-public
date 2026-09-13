@@ -1,0 +1,48 @@
+server:
+  port: ${FLOWDESK_IAM_PORT:8081}
+
+spring:
+  application:
+    name: flowdesk-iam-service
+  datasource:
+    url: ${FLOWDESK_IAM_DB_URL:jdbc:mysql://127.0.0.1:3306/flowdesk_iam?sslMode=PREFERRED&allowPublicKeyRetrieval=true&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true}
+    username: fd_iam_runtime
+    password: ${FLOWDESK_IAM_DB_PASSWORD}
+  jackson:
+    deserialization:
+      fail-on-unknown-properties: true
+  cloud:
+    nacos:
+      discovery:
+        server-addr: ${FLOWDESK_NACOS_SERVER_ADDR:127.0.0.1:8848}
+        namespace: ${FLOWDESK_NACOS_NAMESPACE:}
+        group: ${FLOWDESK_NACOS_GROUP:DEFAULT_GROUP}
+        username: ${FLOWDESK_NACOS_USERNAME:nacos}
+        password: ${FLOWDESK_NACOS_PASSWORD:}
+        enabled: ${FLOWDESK_NACOS_DISCOVERY_ENABLED:true}
+        register-enabled: ${FLOWDESK_NACOS_REGISTER_ENABLED:true}
+
+flowdesk:
+  health:
+    database-required: ${FLOWDESK_HEALTH_DATABASE_REQUIRED:true}
+    migration-required: ${FLOWDESK_HEALTH_MIGRATION_REQUIRED:true}
+  security:
+    cursor-token:
+      hmac-key: ${FLOWDESK_CURSOR_TOKEN_HMAC_KEY:}
+    jwt:
+      private-key-pem: ${FLOWDESK_IAM_JWT_PRIVATE_KEY_PEM:}
+      private-key-location: ${FLOWDESK_IAM_JWT_PRIVATE_KEY_FILE:}
+      service-token-ttl: ${FLOWDESK_SERVICE_JWT_TTL:PT5M}
+      clock-skew: ${FLOWDESK_JWT_CLOCK_SKEW:PT30S}
+      service-jwt-paths:
+        - /api/v1/internal/iam/**
+      allowed-service-ids:
+        - flowdesk-ticket-service
+        - flowdesk-workflow-service
+  iam:
+    service-jwt-bootstrap:
+      enabled: ${FLOWDESK_IAM_SERVICE_JWT_ROTATION_ENABLED:false}
+      exit-after-issue: ${FLOWDESK_IAM_SERVICE_JWT_EXIT_AFTER_ISSUE:true}
+      refresh-interval: ${FLOWDESK_SERVICE_JWT_ROTATION_INTERVAL:PT2M}
+      output-directory: ${FLOWDESK_IAM_SERVICE_JWT_OUTPUT_DIRECTORY:.data/service-tokens}
+      mappings: ${FLOWDESK_IAM_SERVICE_JWT_MAPPINGS:}
