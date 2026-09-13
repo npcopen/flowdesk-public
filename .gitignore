@@ -52,6 +52,4 @@ Desktop.ini
 
 # Public release exclusions
 flowdesk-web/artifacts/
-flowdesk-web/.playwright-browsers/
-flowdesk-gateway/src/main/resources/static/
 

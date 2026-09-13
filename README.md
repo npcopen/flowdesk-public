@@ -17,10 +17,12 @@ FlowDesk 是一个面向多租户团队的服务台系统。它把身份与权�
 ## 环境要求
 
 - Java 17
-- Maven 3.9.9 或更高版本（推荐使用仓库内的 Maven Wrapper）
-- Node.js 22 或更高版本，以及 npm 11 或更高版本
+- 仓库内的 Maven Wrapper（当前为 3.9.16）；自行安装时要求 `>=3.9.9` 且 `<4.0.0`
+- Node.js 22.22.2 或更高的 22.x LTS 版本，推荐 npm 11
 - Docker Desktop（使用 Compose 运行完整本地环境时）
 - OpenSSL（生成本地测试密钥时）
+
+下文使用 PowerShell 7 命令。在 Linux/macOS 中，Maven 命令可改为 `sh mvnw`；环境变量设置方式需要相应调整。
 
 ## 获取代码后先做的准备
 
@@ -30,6 +32,8 @@ FlowDesk 是一个面向多租户团队的服务台系统。它把身份与权�
 Copy-Item .env.example .env
 ```
 
+数据库密码必须为 16–128 位的字母、数字、下划线或连字符；RocketMQ secret 使用至少 16 位字母或数字。各 secret 应独立随机生成。Nacos token 和游标 HMAC key 使用至少 32 个随机字节的 Base64 值，例如 `openssl rand -base64 32`。`FLOWDESK_NACOS_PASSWORD` 与 `FLOWDESK_NACOS_ADMIN_PASSWORD` 使用相同的新密码。
+
 Compose 需要 JWT 密钥和 Gateway 的 PKCS#12 证书。下面的命令会在本地 `.data/keys` 中生成它们；`.data/` 已被忽略：
 
 ```powershell
@@ -38,36 +42,63 @@ openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out .data/keys/flo
 openssl pkey -in .data/keys/flowdesk-jwt-private.pem -pubout -out .data/keys/flowdesk-jwt-public.pem
 openssl req -x509 -newkey rsa:2048 -nodes -days 365 `
   -keyout .data/keys/gateway.key -out .data/keys/gateway.crt `
-  -subj "/CN=localhost"
+  -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost,IP:127.0.0.1"
 openssl pkcs12 -export -out .data/keys/gateway-local.p12 `
-  -inkey .data/keys/gateway.key -in .data/keys/gateway.crt `
-  -passout pass:change-this-keystore-password
+  -inkey .data/keys/gateway.key -in .data/keys/gateway.crt
 ```
 
-在 `.env` 中把以下变量改为实际路径和同一个证书密码，并替换所有密码、token 和 RocketMQ secret：
+最后一条命令会提示输入证书导出密码。将 `.env` 中对应变量改为以下配置，证书密码填入刚才设置的值，并替换模板中的全部凭据占位符：
 
 ```dotenv
 FLOWDESK_IAM_JWT_PRIVATE_KEY_FILE=.data/keys/flowdesk-jwt-private.pem
 FLOWDESK_JWT_PUBLIC_KEY_FILE=.data/keys/flowdesk-jwt-public.pem
 FLOWDESK_GATEWAY_TLS_KEY_STORE_FILE=.data/keys/gateway-local.p12
-FLOWDESK_GATEWAY_TLS_KEY_STORE_PASSWORD=change-this-keystore-password
+FLOWDESK_GATEWAY_TLS_KEY_STORE=/run/secrets/flowdesk-gateway-tls.p12
+FLOWDESK_GATEWAY_TLS_KEY_STORE_PASSWORD=<刚才设置的证书导出密码>
+FLOWDESK_GATEWAY_TLS_ENABLED=true
+FLOWDESK_ROCKETMQ_BROKER_ADVERTISED_HOST=rocketmq-broker
+FLOWDESK_ROCKETMQ_VERIFY_BROKER_HOST=rocketmq-broker
+FLOWDESK_ROCKETMQ_ADMIN_BROKER_HOST=rocketmq-broker
+FLOWDESK_ROCKETMQ_ACL_ENABLED=true
+FLOWDESK_ROCKETMQ_M7_ENABLED=true
+FLOWDESK_ROCKETMQ_M8_ENABLED=true
+FLOWDESK_ALERT_WEBHOOK_TIMESTAMP_WINDOW=PT5M
+FLOWDESK_ALERT_WEBHOOK_SECRETS_FILE=.data/keys/webhook-secrets.json
 ```
+
+Alert 的容器配置还需要 Webhook 密钥注册表。以下命令生成一个可启动的空集成配置：
+
+```powershell
+$webhookRegistry = @{
+  dummySecret = (openssl rand -base64 32).Trim()
+  integrations = @{}
+} | ConvertTo-Json
+Set-Content -LiteralPath .data/keys/webhook-secrets.json -Value $webhookRegistry -Encoding utf8
+```
+
+空的 `integrations` 不接受有效的监控告警。接入监控时，需要在告警数据库中配置集成身份和 API key 的散列，并在此对象中按集成 UUID 设置对应的 Base64 HMAC secret；每个 secret 至少包含 32 个随机字节。上述配置不复用开发环境的凭据。
 
 ## 使用 Docker Compose 运行
 
-完整环境包含 MySQL、Redis、Nacos、RocketMQ、六个 Spring Boot 服务和 Gateway。第一次启动会构建前端并把静态资源打进 Gateway 镜像：
+容器拓扑包含 MySQL、Redis、Nacos、RocketMQ，以及含 Gateway 在内的六个 Spring Boot 服务。先初始化数据库运行权限、Nacos 账号和消息主题/ACL，再启动 Gateway 及其业务服务依赖。按顺序执行，并确认每个初始化命令成功退出：
 
 ```powershell
-docker compose --profile m10 up --build
+docker compose -p flowdesk-public run --rm nacos-initialize
+docker compose -p flowdesk-public run --rm database-permissions
+docker compose -p flowdesk-public run --rm rocketmq-acl-provision
+docker compose -p flowdesk-public --profile m10 up -d --build gateway
+docker compose -p flowdesk-public --profile m10 ps
 ```
 
-Gateway 只绑定到本机回环地址，启动后通过 `https://127.0.0.1:8080/` 访问。上面的证书是本地自签名证书，浏览器会显示证书警告。停止并删除容器：
+`m10` 是现有 Compose 中应用服务的 profile 名。这里显式选择服务，避免启动依赖外部验收文件的辅助容器。首次构建会将前端静态资源打进 Gateway 镜像；业务服务依赖的 Flyway 迁移和演示数据会随依赖链执行。演示账号及租户仅用于本机体验。
+
+Gateway 健康后通过 `https://localhost:8080/` 访问。服务端口使用本机回环绑定；自签名证书需要在本机建立信任。端口占用时请先调整 `.env` 的发布端口。停止并删除这个独立 Compose 项目的容器：
 
 ```powershell
-docker compose --profile m10 down
+docker compose -p flowdesk-public --profile m10 down
 ```
 
-如需同时删除 Compose 创建的数据卷，请明确执行 `docker compose --profile m10 down -v`。这会删除本地数据库和消息系统数据。
+加上 `-v` 会同时删除该 Compose 项目的数据卷，包括本地数据库和消息系统数据。
 
 ## 构建与测试
 
@@ -87,13 +118,17 @@ docker compose --profile m10 down
 
 ```powershell
 Set-Location flowdesk-web
-npm ci
+npm ci --cache .npm-cache
 npm run test:unit
 npm run build
 npm run dev
 ```
 
-开发服务器默认在 `http://127.0.0.1:5173`，并把 `/api/v1` 代理到 `http://127.0.0.1:8080`。可以通过 `VITE_GATEWAY_DEV_URL` 修改代理目标。需要浏览器自动化时再执行 `npm run test:e2e`；Playwright 浏览器会安装到本机缓存，不应提交。
+开发服务器默认在 `http://127.0.0.1:5173`，并把 `/api/v1` 代理到 `http://127.0.0.1:8080`。连接上面的 HTTPS Compose 环境时，在 `flowdesk-web/.env.local` 中设置 `VITE_GATEWAY_DEV_URL=https://localhost:8080`，然后重启 Vite。
+
+只体验前端时，可以在启动 Vite 前设置 `$env:VITE_E2E_BACKEND='mock'`，并将 `VITE_NOTIFICATION_MODE`、`VITE_RECOVERY_MODE`、`VITE_SLA_MODE` 都设为 `mock`。此模式使用浏览器内存数据，刷新后重置；登录可填写组织代码 `SHANCHENG_TECH`、用户名 `requester` 和任意非空测试密码。Gateway 交付构建强制使用真实 API。
+
+浏览器自动化命令是 `npm run test:e2e`，默认运行前端 mock 场景。当前 Playwright 配置使用本机已安装的 Chrome；默认路径为 `C:\Program Files\Google\Chrome\Application\chrome.exe`，可通过 `FLOWDESK_CHROME_PATH` 指定其他路径。它不会自动安装浏览器。报告和截图均为本地生成文件，不应提交。
 
 构建可交付的 Gateway 静态资源和 JAR：
 
@@ -129,4 +164,4 @@ scripts/                         可重复的 Gateway 构建与制品检查
 
 ## 许可证
 
-当前仓库未附带许可证文件。若要向公众授予使用、修改和再分发权限，请在发布前补充与项目所有者意图一致的 LICENSE。
+当前仓库未附带 LICENSE，公开可见不代表已授予额外的使用、修改或再分发许可。
