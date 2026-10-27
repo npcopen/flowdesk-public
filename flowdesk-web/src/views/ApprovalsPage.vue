@@ -1,4 +1,5 @@
 <script setup lang="ts">
+/** 管理待办审批及流程草稿，按保存、验证、发布的顺序推进流程配置。 */
 import { computed, onMounted, ref } from "vue";
 import {
   ArrowUpRight,
@@ -64,6 +65,10 @@ const draftDirty = computed(() => Boolean(draft.value && (draftForm.value.value 
 const approversDiffer = computed(() => Boolean(draftForm.value.level1ApproverUserId && draftForm.value.level2ApproverUserId
   && draftForm.value.level1ApproverUserId !== draftForm.value.level2ApproverUserId));
 
+/**
+ * 按用户权限加载待处理任务和流程实例。
+ * 各集合独立处理失败状态，避免一个请求阻塞其他可见业务数据。
+ */
 async function load(token = ""): Promise<void> {
   loading.value = true;
   error.value = null;
@@ -92,12 +97,20 @@ async function load(token = ""): Promise<void> {
     loading.value = false;
   }
 }
+/**
+ * 保存当前任务游标并加载下一页审批任务。
+ * 无后续游标时不发起额外请求。
+ */
 function nextPage(): void {
   if (nextToken.value) {
     tokenStack.value.push(nextToken.value);
     void load(nextToken.value);
   }
 }
+/**
+ * 恢复任务游标栈中的上一页。
+ * 保留任务筛选和用户访问范围，重新读取对应分页结果。
+ */
 function previousPage(): void {
   if (tokenStack.value.length < 2) {
     tokenStack.value = [];
@@ -107,6 +120,10 @@ function previousPage(): void {
   tokenStack.value.pop();
   void load(tokenStack.value[tokenStack.value.length - 1] || "");
 }
+/**
+ * 加载流程定义及选中定义的草稿、发布版本和审批人候选。
+ * 辅助请求独立处理，缺少草稿时允许后续创建。
+ */
 async function loadWorkflow(): Promise<void> {
   if (!canManage.value) return;
   workflowLoading.value = true;
@@ -158,6 +175,10 @@ async function loadWorkflow(): Promise<void> {
     workflowLoading.value = false;
   }
 }
+/**
+ * 校验并保存服务风险条件与两级审批人配置。
+ * 新建或按当前 ETag 修改草稿，要求审批人不同，并更新已保存表单快照。
+ */
 async function saveDraft(): Promise<void> {
   if (!selectedDefinitionId.value || !canEditWorkflow.value || !approversDiffer.value) return;
   workflowSaving.value = true;
@@ -192,6 +213,11 @@ async function saveDraft(): Promise<void> {
     workflowSaving.value = false;
   }
 }
+// 只验证已经保存的草稿；本地表单变更后需重新保存，避免验证内容与发布内容不一致。
+/**
+ * 校验当前已保存且没有未保存修改的草稿。
+ * 保存后端返回的违规项、校验摘要和新版本，供发布步骤使用。
+ */
 async function validateDraft(): Promise<void> {
   if (!draft.value || !canEditWorkflow.value || draftDirty.value) return;
   workflowSaving.value = true;
@@ -203,6 +229,7 @@ async function validateDraft(): Promise<void> {
         `"lv:${draft.value.lockVersion}"`,
       )
     ).data;
+    // 验证会产生新的摘要和版本号，后续发布必须使用验证后的版本条件。
     draft.value = {
       ...draft.value,
       validationState: validation.value.valid ? "VALID" : "UNVALIDATED",
@@ -215,6 +242,10 @@ async function validateDraft(): Promise<void> {
     workflowSaving.value = false;
   }
 }
+/**
+ * 发布最新已校验的草稿。
+ * 提交当前 ETag、校验摘要及幂等键，成功后刷新草稿和发布版本。
+ */
 async function publishDraft(): Promise<void> {
   if (!draft.value || !canPublishWorkflow.value || draftDirty.value) return;
   workflowSaving.value = true;
@@ -248,7 +279,7 @@ onMounted(() => {
         class="button button--secondary"
         type="button"
         :disabled="loading"
-        @click="load"
+        @click="load()"
       >
         <RefreshCw :size="16" />刷新
       </button>

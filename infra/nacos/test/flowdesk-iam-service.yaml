@@ -1,0 +1,21 @@
+# Namespace: flowdesk-test | Group: FLOWDESK_GROUP | Data ID: flowdesk-iam-service.yaml
+# Startup-loaded configuration; restart instances after publishing a change.
+# Secrets and key/token file paths are supplied by the deployment, never here.
+spring:
+  datasource:
+    url: ${FLOWDESK_IAM_DB_URL:jdbc:mysql://mysql:3306/flowdesk_iam?sslMode=PREFERRED&allowPublicKeyRetrieval=true&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true}
+    username: fd_iam_runtime
+flowdesk:
+  configuration:
+    service-name: flowdesk-iam-service
+  health:
+    database-required: true
+    migration-required: true
+  security:
+    jwt:
+      service-token-ttl: PT30S
+  iam:
+    service-jwt-bootstrap:
+      enabled: true
+      exit-after-issue: false
+      refresh-interval: PT10S

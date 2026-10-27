@@ -1,4 +1,5 @@
 <script setup lang="ts">
+/** 按当前用户的可见权限并行加载工作台摘要和待处理事项。 */
 import { computed, onMounted, ref } from "vue";
 import {
   ArrowUpRight,
@@ -64,6 +65,10 @@ const pendingTickets = ref<number | null>(null);
 const pendingTasks = ref<number | null>(null);
 const activeIncidents = ref<number | null>(null);
 
+/**
+ * 按当前身份权限加载仪表盘汇总及业务列表。
+ * 通知等可选能力单独降级，避免辅助服务异常掩盖主要运营数据。
+ */
 async function load(): Promise<void> {
   loading.value = true;
   error.value = null;

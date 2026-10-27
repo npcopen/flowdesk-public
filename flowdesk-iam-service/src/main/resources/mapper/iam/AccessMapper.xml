@@ -1,0 +1,283 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+  IAM 角色、权限及授权关系 SQL，所有业务数据查询和写入均限定 tenantId。
+  管理查询保留授权状态；有效权限查询要求绑定为 GRANTED 且角色为 ACTIVE。
+  更新使用锁版本防止覆盖，列表以排序字段和主键组合游标分页。
+-->
+<mapper namespace="com.flowdesk.iam.mapper.AccessMapper">
+  <!-- 按构造参数顺序映射角色详情，包含状态、乐观锁版本及创建/更新时间；二进制 ID 转为 UUID。 -->
+  <resultMap id="RoleRow" type="com.flowdesk.iam.model.RoleRow">
+    <constructor>
+      <arg column="role_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg column="role_code" javaType="java.lang.String"/>
+      <arg column="role_name" javaType="java.lang.String"/>
+      <arg column="status" javaType="java.lang.String"/>
+      <arg column="lock_version" javaType="_long"/>
+      <arg column="created_at" javaType="java.time.Instant"/>
+      <arg column="updated_at" javaType="java.time.Instant"/>
+    </constructor>
+  </resultMap>
+  <!-- 将权限 ID、编码、名称和说明映射为权限投影，供权限详情和列表查询复用。 -->
+  <resultMap id="PermissionRow" type="com.flowdesk.iam.model.PermissionRow">
+    <constructor>
+      <arg column="permission_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg column="permission_code" javaType="java.lang.String"/>
+      <arg column="permission_name" javaType="java.lang.String"/>
+      <arg column="description" javaType="java.lang.String"/>
+    </constructor>
+  </resultMap>
+  <!-- 统一映射用户角色、角色权限两类绑定，subject_id/target_id 由各查询别名区分主体与目标。 -->
+  <resultMap id="BindingRow" type="com.flowdesk.iam.model.BindingRow">
+    <constructor>
+      <arg column="subject_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg column="target_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg column="state" javaType="java.lang.String"/>
+      <arg column="granted_at" javaType="java.time.Instant"/>
+      <arg column="revoked_at" javaType="java.time.Instant"/>
+      <arg column="lock_version" javaType="_long"/>
+    </constructor>
+  </resultMap>
+  <!-- 批量授权查询的行投影：每行是一组用户 ID 和有效角色编码，由接口默认方法按用户分组。 -->
+  <resultMap id="GrantedRoleRow" type="com.flowdesk.iam.model.GrantedRoleRow">
+    <constructor>
+      <arg column="user_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg column="role_code" javaType="java.lang.String"/>
+    </constructor>
+  </resultMap>
+  <!-- 角色或权限的通用 ID/编码投影，配合查询中的 id、code 别名构造结果。 -->
+  <resultMap id="IdCodeRow" type="com.flowdesk.iam.model.IdCodeRow">
+    <constructor>
+      <arg column="id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg column="code" javaType="java.lang.String"/>
+    </constructor>
+  </resultMap>
+
+  <!-- 游标比较方向与排序方向一致：升序取游标之后较大的值，降序取较小的值。 -->
+  <sql id="cursorComparator"><choose><when test="ascending">&gt;</when><otherwise>&lt;</otherwise></choose></sql>
+  <!-- 从布尔参数选择固定的 ASC/DESC 关键字，供排序列和主键排序共同使用。 -->
+  <sql id="sortDirection"><choose><when test="ascending">ASC</when><otherwise>DESC</otherwise></choose></sql>
+  <!-- 角色排序列白名单：roleName 对应名称，其余情况回退到角色编码。 -->
+  <sql id="roleSortColumn"><choose><when test="sortColumn == 'roleName'">role_name</when><otherwise>role_code</otherwise></choose></sql>
+  <!-- 权限排序列白名单：permissionName 对应名称，其余情况回退到权限编码。 -->
+  <sql id="permissionSortColumn"><choose><when test="sortColumn == 'permissionName'">permission_name</when><otherwise>permission_code</otherwise></choose></sql>
+
+  <!-- 查询用户已获授的启用角色，并按角色编码排序；租户条件同时约束用户绑定与角色关联。 -->
+  <select id="findGrantedRoleCodes" resultType="string">
+    SELECT r.role_code
+    FROM user_role_assignment ura
+    JOIN role r ON r.tenant_id = ura.tenant_id AND r.role_id = ura.role_id
+    WHERE ura.tenant_id = #{tenantId} AND ura.user_id = #{userId}
+      AND ura.state = 'GRANTED' AND r.status = 'ACTIVE'
+    ORDER BY r.role_code
+  </select>
+
+  <!-- 沿两级授权关系读取有效权限；用户角色、角色权限均须已授予，多个角色共有的权限通过 DISTINCT 去重。 -->
+  <select id="findGrantedPermissionCodes" resultType="string">
+    SELECT DISTINCT p.permission_code
+    FROM user_role_assignment ura
+    JOIN role r ON r.tenant_id = ura.tenant_id AND r.role_id = ura.role_id
+    JOIN role_permission rp
+      ON rp.tenant_id = r.tenant_id AND rp.role_id = r.role_id
+    JOIN permission p
+      ON p.tenant_id = rp.tenant_id AND p.permission_id = rp.permission_id
+    WHERE ura.tenant_id = #{tenantId} AND ura.user_id = #{userId}
+      AND ura.state = 'GRANTED' AND r.status = 'ACTIVE'
+      AND rp.state = 'GRANTED'
+    ORDER BY p.permission_code
+  </select>
+
+  <!-- 按租户和角色 ID 查询详情，不过滤状态，供服务层自行校验角色是否可用。 -->
+  <select id="findRole" resultMap="RoleRow">
+    SELECT role_id, role_code, role_name, status, lock_version, created_at, updated_at
+    FROM role WHERE tenant_id = #{tenantId} AND role_id = #{roleId}
+  </select>
+
+  <!-- 在事务中读取并锁定角色匹配行，避免校验后角色被并发修改；行锁随事务结束释放。 -->
+  <select id="findRoleForUpdate" resultMap="RoleRow">
+    SELECT role_id, role_code, role_name, status, lock_version, created_at, updated_at
+    FROM role WHERE tenant_id = #{tenantId} AND role_id = #{roleId} FOR UPDATE
+  </select>
+
+  <!-- 按租户内角色编码查找角色，包含停用状态，用于编码定位和重复检查。 -->
+  <select id="findRoleByCode" resultMap="RoleRow">
+    SELECT role_id, role_code, role_name, status, lock_version, created_at, updated_at
+    FROM role WHERE tenant_id = #{tenantId} AND role_code = #{roleCode}
+  </select>
+
+  <!-- 按租户和权限 ID 查询权限基础信息；不存在时由 MyBatis 返回空结果。 -->
+  <select id="findPermission" resultMap="PermissionRow">
+    SELECT permission_id, permission_code, permission_name, description
+    FROM permission WHERE tenant_id = #{tenantId} AND permission_id = #{permissionId}
+  </select>
+
+  <!-- 查询指定角色权限绑定，保留 GRANTED/REVOKED 等当前状态及版本，主体为角色、目标为权限。 -->
+  <select id="findRolePermission" resultMap="BindingRow">
+    SELECT role_id AS subject_id, permission_id AS target_id, state, granted_at, revoked_at, lock_version
+    FROM role_permission
+    WHERE tenant_id = #{tenantId} AND role_id = #{roleId} AND permission_id = #{permissionId}
+  </select>
+
+  <!-- 查询并锁定角色权限绑定的匹配行，供事务内授予或撤销前读取最新状态。 -->
+  <select id="findRolePermissionForUpdate" resultMap="BindingRow">
+    SELECT role_id AS subject_id, permission_id AS target_id, state, granted_at, revoked_at, lock_version
+    FROM role_permission
+    WHERE tenant_id = #{tenantId} AND role_id = #{roleId} AND permission_id = #{permissionId}
+    FOR UPDATE
+  </select>
+
+  <!-- 查询指定用户角色绑定，主体为用户、目标为角色；不限制绑定状态。 -->
+  <select id="findUserRole" resultMap="BindingRow">
+    SELECT user_id AS subject_id, role_id AS target_id, state, granted_at, revoked_at, lock_version
+    FROM user_role_assignment
+    WHERE tenant_id = #{tenantId} AND user_id = #{userId} AND role_id = #{roleId}
+  </select>
+
+  <!-- 在事务内锁定用户角色绑定匹配行，使后续授权状态变更基于受锁保护的记录。 -->
+  <select id="findUserRoleForUpdate" resultMap="BindingRow">
+    SELECT user_id AS subject_id, role_id AS target_id, state, granted_at, revoked_at, lock_version
+    FROM user_role_assignment
+    WHERE tenant_id = #{tenantId} AND user_id = #{userId} AND role_id = #{roleId}
+    FOR UPDATE
+  </select>
+
+  <!-- 创建租户角色，锁版本初始化为 0，创建与更新字段使用同一次用户操作的信息。 -->
+  <insert id="insertRole">
+    INSERT INTO role
+      (tenant_id, role_id, role_code, role_name, status, lock_version,
+       created_at, created_by_type, created_by_id,
+       updated_at, updated_by_type, updated_by_id)
+    VALUES (#{tenantId}, #{roleId}, #{roleCode}, #{roleName}, #{status}, 0, #{now}, 'USER', #{actorId}, #{now}, 'USER', #{actorId})
+  </insert>
+
+  <!-- 按预期版本更新角色；null 字段保留原值，更新成功后版本加 1，零影响行表示未匹配记录或版本冲突。 -->
+  <update id="updateRole">
+    UPDATE role
+    SET role_name = COALESCE(#{roleName}, role_name),
+        status = COALESCE(#{status}, status),
+        lock_version = lock_version + 1,
+        updated_at = #{now},
+        updated_by_type = 'USER',
+        updated_by_id = #{actorId}
+    WHERE tenant_id = #{tenantId} AND role_id = #{roleId} AND lock_version = #{expectedLockVersion}
+  </update>
+
+  <!-- 首次授予角色权限，初始化授予信息和版本，将撤销信息置空；重复绑定由调用方处理。 -->
+  <insert id="insertRolePermission">
+    INSERT INTO role_permission
+      (tenant_id, role_id, permission_id, state, granted_at, granted_by_type,
+       granted_by_id, revoked_at, revoked_by_type, revoked_by_id, lock_version)
+    VALUES (#{tenantId}, #{roleId}, #{permissionId}, 'GRANTED', #{now}, 'USER', #{actorId}, NULL, NULL, NULL, 0)
+  </insert>
+
+  <!-- 首次授予用户角色，初始状态固定为 GRANTED，保存操作人及时间，锁版本为 0。 -->
+  <insert id="insertUserRole">
+    INSERT INTO user_role_assignment
+      (tenant_id, user_id, role_id, state, granted_at, granted_by_type,
+       granted_by_id, revoked_at, revoked_by_type, revoked_by_id, lock_version)
+    VALUES (#{tenantId}, #{userId}, #{roleId}, 'GRANTED', #{now}, 'USER', #{actorId}, NULL, NULL, NULL, 0)
+  </insert>
+
+  <!--
+    按版本变更角色权限绑定：GRANTED 分支刷新授予信息并清空撤销信息，其他值走 REVOKED 分支。
+    租户、角色、权限与预期版本须全部匹配；成功后递增锁版本，避免并发覆盖。
+  -->
+  <update id="updateRolePermissionState">
+    UPDATE role_permission SET
+    <choose>
+      <when test="state == 'GRANTED'">
+        state = 'GRANTED', granted_at = #{now}, granted_by_type = 'USER', granted_by_id = #{actorId},
+        revoked_at = NULL, revoked_by_type = NULL, revoked_by_id = NULL,
+      </when>
+      <otherwise>state = 'REVOKED', revoked_at = #{now}, revoked_by_type = 'USER', revoked_by_id = #{actorId},</otherwise>
+    </choose>
+    lock_version = lock_version + 1
+    WHERE tenant_id = #{tenantId} AND role_id = #{roleId} AND permission_id = #{permissionId} AND lock_version = #{expectedLockVersion}
+  </update>
+
+  <!--
+    按版本授予或撤销用户角色，重新授予时清除旧撤销信息，撤销时记录撤销操作人和时间。
+    只有租户内指定绑定与预期版本匹配时才更新并递增版本。
+  -->
+  <update id="updateUserRoleState">
+    UPDATE user_role_assignment SET
+    <choose>
+      <when test="state == 'GRANTED'">
+        state = 'GRANTED', granted_at = #{now}, granted_by_type = 'USER', granted_by_id = #{actorId},
+        revoked_at = NULL, revoked_by_type = NULL, revoked_by_id = NULL,
+      </when>
+      <otherwise>state = 'REVOKED', revoked_at = #{now}, revoked_by_type = 'USER', revoked_by_id = #{actorId},</otherwise>
+    </choose>
+    lock_version = lock_version + 1
+    WHERE tenant_id = #{tenantId} AND user_id = #{userId} AND role_id = #{roleId} AND lock_version = #{expectedLockVersion}
+  </update>
+
+  <!-- 按角色查询权限绑定，state 非空时限定绑定状态，最终按权限 ID 排序。 -->
+  <select id="findRolePermissions" resultMap="BindingRow">
+    SELECT role_id AS subject_id, permission_id AS target_id, state, granted_at, revoked_at, lock_version
+    FROM role_permission WHERE tenant_id = #{tenantId} AND role_id = #{roleId}
+    <if test="state != null">AND state = #{state}</if>
+    ORDER BY permission_id
+  </select>
+
+  <!-- 按用户查询角色绑定，可选过滤状态并按角色 ID 排序，不额外过滤角色启用状态。 -->
+  <select id="findUserRoles" resultMap="BindingRow">
+    SELECT user_id AS subject_id, role_id AS target_id, state, granted_at, revoked_at, lock_version
+    FROM user_role_assignment WHERE tenant_id = #{tenantId} AND user_id = #{userId}
+    <if test="state != null">AND state = #{state}</if>
+    ORDER BY role_id
+  </select>
+
+  <!-- 批量读取用户有效角色；IN 集合须由调用方保证非空，仅返回 GRANTED 绑定及 ACTIVE 角色。 -->
+  <select id="selectGrantedRoleCodesForUsers" resultMap="GrantedRoleRow">
+    SELECT ura.user_id, r.role_code FROM user_role_assignment ura
+    JOIN role r ON r.tenant_id = ura.tenant_id AND r.role_id = ura.role_id
+    WHERE ura.tenant_id = #{tenantId} AND ura.user_id IN
+    <foreach collection="userIds" item="id" open="(" separator="," close=")">#{id}</foreach>
+    AND ura.state = 'GRANTED' AND r.status = 'ACTIVE' ORDER BY r.role_code
+  </select>
+
+  <!-- 批量读取租户内权限 ID/编码，用 foreach 参数绑定生成 IN 列表；调用方须过滤空集合。 -->
+  <select id="selectPermissionCodes" resultMap="IdCodeRow">
+    SELECT permission_id AS id, permission_code AS code FROM permission
+    WHERE tenant_id = #{tenantId} AND permission_id IN
+    <foreach collection="permissionIds" item="id" open="(" separator="," close=")">#{id}</foreach>
+  </select>
+
+  <!-- 批量读取角色 ID/编码，包含停用角色；空集合由接口默认方法提前返回。 -->
+  <select id="selectRoleCodes" resultMap="IdCodeRow">
+    SELECT role_id AS id, role_code AS code FROM role
+    WHERE tenant_id = #{tenantId} AND role_id IN
+    <foreach collection="roleIds" item="id" open="(" separator="," close=")">#{id}</foreach>
+  </select>
+
+  <!--
+    角色列表按可选状态过滤，以选中排序列和 role_id 组成稳定游标，方向共同受 ascending 控制。
+    lastName/lastId 同时存在才追加游标条件；多取 1 条供服务层判断下一页。
+  -->
+  <select id="findRoles" resultMap="RoleRow">
+    <bind name="limit" value="pageSize + 1"/>
+    SELECT role_id, role_code, role_name, status, lock_version, created_at, updated_at FROM role WHERE tenant_id = #{tenantId}
+    <if test="status != null">AND status = #{status}</if>
+    <if test="lastName != null and lastId != null">
+      AND (<include refid="roleSortColumn"/> <include refid="cursorComparator"/> #{lastName}
+        OR (<include refid="roleSortColumn"/> = #{lastName} AND role_id <include refid="cursorComparator"/> #{lastId}))
+    </if>
+    ORDER BY <include refid="roleSortColumn"/> <include refid="sortDirection"/>, role_id <include refid="sortDirection"/>
+    LIMIT #{limit}
+  </select>
+
+  <!-- 权限列表使用排序字段与 permission_id 组合游标，按相同方向排序并读取 pageSize + 1 条。 -->
+  <select id="findPermissions" resultMap="PermissionRow">
+    <bind name="limit" value="pageSize + 1"/>
+    SELECT permission_id, permission_code, permission_name, description FROM permission WHERE tenant_id = #{tenantId}
+
+    <if test="lastName != null and lastId != null">
+      AND (<include refid="permissionSortColumn"/> <include refid="cursorComparator"/> #{lastName}
+        OR (<include refid="permissionSortColumn"/> = #{lastName} AND permission_id <include refid="cursorComparator"/> #{lastId}))
+    </if>
+    ORDER BY <include refid="permissionSortColumn"/> <include refid="sortDirection"/>, permission_id <include refid="sortDirection"/>
+    LIMIT #{limit}
+  </select>
+
+</mapper>

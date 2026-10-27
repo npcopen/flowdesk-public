@@ -25,6 +25,9 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+/**
+ * 通过 Servlet 安全链验证 JWT、权限、租户上下文清理及请求体限制，检查无效输入在业务前被拒绝。
+ */
 class FlowDeskWebSecurityTest {
 
     private static final UUID TENANT = UUID.fromString("11111111-1111-1111-1111-111111111111");
@@ -33,6 +36,9 @@ class FlowDeskWebSecurityTest {
     private static JwtIssuer issuer;
     private static MockMvc mockMvc;
 
+    /**
+     * 初始化当前测试所需签名密钥、认证配置或 Mock MVC 环境，使后续行为断言基于隔离依赖。
+     */
     @BeforeAll
     static void setUp() throws Exception {
         KeyPair keyPair = KeyPairGenerator.getInstance("RSA").generateKeyPair();
@@ -50,11 +56,17 @@ class FlowDeskWebSecurityTest {
                 .build();
     }
 
+    /**
+     * 清除测试线程中的租户及 JWT 主体持有器，避免认证状态影响后续用例。
+     */
     @AfterEach
     void clearHolders() {
         JwtPrincipalHolder.clear();
     }
 
+    /**
+     * 验证有效且有权限的令牌可访问保护接口，响应完成后线程上下文被清理。
+     */
     @Test
     void validTokenWithPermissionPassesAndCleansContext() throws Exception {
         IssuedJwt jwt = issuer.issueHuman(TENANT, USER,
@@ -66,6 +78,9 @@ class FlowDeskWebSecurityTest {
         org.assertj.core.api.Assertions.assertThat(JwtPrincipalHolder.currentOrNull()).isNull();
     }
 
+    /**
+     * 验证有效令牌缺少所需权限时返回拒绝，而非仅凭验签成功放行。
+     */
     @Test
     void validTokenWithoutPermissionIsDenied() throws Exception {
         IssuedJwt jwt = issuer.issueHuman(TENANT, USER,
@@ -75,6 +90,9 @@ class FlowDeskWebSecurityTest {
                 .andExpect(jsonPath("$.error.code").value("ACCESS_DENIED"));
     }
 
+    /**
+     * 验证保护接口缺少令牌时在业务调用前返回认证错误。
+     */
     @Test
     void missingTokenIsRejected() throws Exception {
         mockMvc.perform(get("/api/v1/protected"))
@@ -82,6 +100,9 @@ class FlowDeskWebSecurityTest {
                 .andExpect(jsonPath("$.error.code").value("AUTHENTICATION_REQUIRED"));
     }
 
+    /**
+     * 验证伪造内部租户请求头不能覆盖 JWT 中的可信租户身份。
+     */
     @Test
     void forgedTenantHeadersAreIgnoredAndNotTrusted() throws Exception {
         IssuedJwt jwt = issuer.issueHuman(TENANT, USER,
@@ -94,6 +115,9 @@ class FlowDeskWebSecurityTest {
                 .andExpect(jsonPath("$.ok").value(true));
     }
 
+    /**
+     * 验证超大请求体在业务执行前被拒绝，返回统一体积限制错误。
+     */
     @Test
     void oversizedBodyIsRejectedWithRequestTooLarge() throws Exception {
         mockMvc.perform(post("/api/v1/protected")
@@ -103,6 +127,9 @@ class FlowDeskWebSecurityTest {
                 .andExpect(jsonPath("$.error.code").value("REQUEST_TOO_LARGE"));
     }
 
+    /**
+     * 验证登录请求采用专属的更小报文上限，避免通用上限弱化登录入口保护。
+     */
     @Test
     void loginBodyHasItsOwnSmallerLimit() throws Exception {
         mockMvc.perform(post("/api/v1/auth/login")
@@ -112,6 +139,9 @@ class FlowDeskWebSecurityTest {
                 .andExpect(jsonPath("$.error.code").value("REQUEST_TOO_LARGE"));
     }
 
+    /**
+     * 验证非 identity 内容编码被拒绝，防止压缩报文绕过原始请求大小与解析约束。
+     */
     @Test
     void nonIdentityContentEncodingIsRejected() throws Exception {
         mockMvc.perform(post("/api/v1/protected")
@@ -122,6 +152,9 @@ class FlowDeskWebSecurityTest {
                 .andExpect(jsonPath("$.error.code").value("CONTENT_ENCODING_UNSUPPORTED"));
     }
 
+    /**
+     * 验证签名无效的 JWT 在建立可信业务上下文前被拒绝。
+     */
     @Test
     void invalidSignatureIsRejected() throws Exception {
         mockMvc.perform(get("/api/v1/protected").header("Authorization", "Bearer not-a-jwt"))
@@ -129,9 +162,15 @@ class FlowDeskWebSecurityTest {
                 .andExpect(jsonPath("$.error.code").value("AUTHENTICATION_FAILED"));
     }
 
+    /**
+     * 仅供安全链测试使用的受权限保护端点，返回固定内容以确认请求是否真正到达业务处理。
+     */
     @RestController
     static class ProtectedController {
 
+        /**
+         * 返回固定成功内容，供测试断言带有效 JWT 和权限的请求已通过整个安全链。
+         */
         @GetMapping("/api/v1/protected")
         @RequiresPermission(PermissionCode.IAM_USER_READ)
         public java.util.Map<String, Boolean> get() {

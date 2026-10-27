@@ -1,3 +1,4 @@
+/** 用户权限和工单目录管理页面共用的表格、表单与布局样式。 */
 .management-modal {
   position: fixed;
   z-index: 50;

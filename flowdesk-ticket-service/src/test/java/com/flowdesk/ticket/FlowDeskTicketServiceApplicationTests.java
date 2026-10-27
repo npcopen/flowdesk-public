@@ -24,6 +24,9 @@ import org.springframework.core.env.Environment;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+/**
+ * 工单模块回归测试，覆盖该组件的正常流程、边界条件与关键一致性约束。
+ */
 @SpringBootTest(
         webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT,
         properties = {
@@ -48,6 +51,9 @@ class FlowDeskTicketServiceApplicationTests {
             KEY_PAIR.getPrivate(), "flowdesk-iam-service",
             "flowdesk-api", "flowdesk-internal", 900, 300);
 
+    /**
+     * 注册测试 JWT 公钥，使测试令牌经过真实验证路径。
+     */
     @DynamicPropertySource
     static void jwtVerificationKey(DynamicPropertyRegistry registry) {
         registry.add("flowdesk.security.jwt.public-key-pem", () -> publicKeyPem());
@@ -55,6 +61,9 @@ class FlowDeskTicketServiceApplicationTests {
                 .encodeToString("0123456789abcdef0123456789abcdef".getBytes(java.nio.charset.StandardCharsets.UTF_8)));
     }
 
+    /**
+     * 生成测试专用非对称密钥对，隔离令牌签名与真实环境密钥。
+     */
     private static KeyPair newKeyPair() {
         try {
             return KeyPairGenerator.getInstance("RSA").generateKeyPair();
@@ -63,18 +72,27 @@ class FlowDeskTicketServiceApplicationTests {
         }
     }
 
+    /**
+     * 把测试公钥编码为 PEM，供应用配置中的 JWT 验证使用。
+     */
     private static String publicKeyPem() {
         String nl = System.lineSeparator();
         String base64 = Base64.getEncoder().encodeToString(KEY_PAIR.getPublic().getEncoded());
         return "-----BEGIN PUBLIC KEY-----" + nl + base64 + nl + "-----END PUBLIC KEY-----";
     }
 
+    /**
+     * 验证工单服务启动后使用预期应用名称。
+     */
     @Test
     void startsWithExpectedApplicationName() {
         assertThat(environment.getProperty("spring.application.name"))
                 .isEqualTo("flowdesk-ticket-service");
     }
 
+    /**
+     * 验证服务本地重新校验用户 JWT，并在请求后清理租户上下文。
+     */
     @Test
     void targetServiceLocallyReverifiesHumanJwtAndCleansContext() throws Exception {
         FilterRegistrationBean<?> registration = applicationContext.getBean(

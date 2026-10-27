@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+  通知收件箱持久化接口，保存消费结果并提供消息、业务意图及发布标识查询。
+  普通查询只返回元数据和摘要，重放所需完整消息体由独立恢复数据源读取。
+-->
+<mapper namespace="com.flowdesk.notification.mapper.NotificationInboxMapper">
+  <!-- 将查询列按构造参数映射为 NotificationInboxRow，明确字段、Java 类型及构造顺序，供相应查询复用。 -->
+  <resultMap id="inbox" type="com.flowdesk.notification.model.NotificationInboxRow">
+    <constructor>
+      <arg name="inboxId" column="inbox_id" javaType="java.util.UUID"/>
+      <arg name="producerService" column="producer_service" javaType="java.lang.String"/>
+      <arg name="messageId" column="message_id" javaType="java.util.UUID"/>
+      <arg name="messageKey" column="message_key" javaType="java.lang.String"/>
+      <arg name="businessIntentKey" column="business_intent_key" javaType="[B"/>
+      <arg name="publicationKey" column="publication_key" javaType="[B"/>
+      <arg name="contractRef" column="contract_ref" javaType="java.lang.String"/>
+      <arg name="contractVersion" column="contract_version" javaType="_int"/>
+      <arg name="aggregateType" column="aggregate_type" javaType="java.lang.String"/>
+      <arg name="aggregateId" column="aggregate_id" javaType="java.util.UUID"/>
+      <arg name="bodySha256" column="body_sha256" javaType="[B"/>
+      <arg name="bodyBytes" column="body_bytes" javaType="[B"/>
+      <arg name="topic" column="topic" javaType="java.lang.String"/>
+      <arg name="consumerGroup" column="consumer_group" javaType="java.lang.String"/>
+      <arg name="logicalDestination" column="logical_destination" javaType="java.lang.String"/>
+      <arg name="direction" column="direction" javaType="java.lang.String"/>
+      <arg name="correlationId" column="correlation_id" javaType="java.util.UUID"/>
+      <arg name="causationId" column="causation_id" javaType="java.util.UUID"/>
+      <arg name="occurredAt" column="occurred_at" javaType="java.time.Instant"/>
+      <arg name="status" column="status" javaType="java.lang.String"/>
+      <arg name="resultType" column="result_type" javaType="java.lang.String"/>
+      <arg name="resultId" column="result_id" javaType="java.util.UUID"/>
+      <arg name="attemptCount" column="attempt_count" javaType="_int"/>
+      <arg name="lastErrorCode" column="last_error_code" javaType="java.lang.String"/>
+      <arg name="firstReceivedAt" column="first_received_at" javaType="java.time.Instant"/>
+      <arg name="lastAttemptAt" column="last_attempt_at" javaType="java.time.Instant"/>
+      <arg name="processedAt" column="processed_at" javaType="java.time.Instant"/>
+      <arg name="lockVersion" column="lock_version" javaType="_long"/>
+      <arg name="createdAt" column="created_at" javaType="java.time.Instant"/>
+      <arg name="updatedAt" column="updated_at" javaType="java.time.Instant"/>
+    </constructor>
+  </resultMap>
+  <!-- 按租户、生产服务及消息标识读取收件箱，供传输投递去重；返回元数据及摘要，原文列为空，lock 控制行锁。 -->
+  <select id="findByMessage" resultMap="inbox">
+    <![CDATA[
+SELECT inbox_id,producer_service,message_id,message_key,business_intent_key,publication_key,contract_ref,contract_version,aggregate_type,aggregate_id,body_sha256,NULL AS body_bytes,topic,consumer_group,logical_destination,direction,correlation_id,causation_id,occurred_at,status,result_type,result_id,attempt_count,last_error_code,first_received_at,last_attempt_at,processed_at,lock_version,created_at,updated_at FROM inbox_message WHERE tenant_id=#{tenantId} AND producer_service=#{producerService} AND message_id=#{messageId}
+    ]]>
+    <if test="lock">FOR UPDATE</if>
+  </select>
+  <!-- 按租户、生产服务、契约及业务意图查询收件箱，供业务去重；返回元数据及摘要，原文列为空，lock 控制行锁。 -->
+  <select id="findByIntent" resultMap="inbox">
+    <![CDATA[
+SELECT inbox_id,producer_service,message_id,message_key,business_intent_key,publication_key,contract_ref,contract_version,aggregate_type,aggregate_id,body_sha256,NULL AS body_bytes,topic,consumer_group,logical_destination,direction,correlation_id,causation_id,occurred_at,status,result_type,result_id,attempt_count,last_error_code,first_received_at,last_attempt_at,processed_at,lock_version,created_at,updated_at FROM inbox_message WHERE tenant_id=#{tenantId} AND producer_service=#{producerService} AND contract_ref=#{contractRef} AND business_intent_key=#{businessIntentKey}
+    ]]>
+    <if test="lock">FOR UPDATE</if>
+  </select>
+  <!-- 保存消费消息、路由、契约、发布键与业务意图，并记录原文摘要、处理结果、次数及时间，初始版本为 0。 -->
+  <insert id="insertInbox">
+    <![CDATA[
+INSERT INTO inbox_message
+  (tenant_id,inbox_id,producer_service,message_id,message_key,business_intent_key,
+   publication_key,contract_ref,contract_version,aggregate_type,aggregate_id,
+   body_sha256,body_bytes,topic,consumer_group,logical_destination,direction,
+   correlation_id,causation_id,occurred_at,status,result_type,result_id,
+   attempt_count,last_error_code,first_received_at,last_attempt_at,processed_at,
+   lock_version,created_at,updated_at,updated_by_type,updated_by_id)
+VALUES (#{tenantId},#{inboxId},#{producerService},#{messageId},#{messageKey},#{businessIntentKey},#{publicationKey},#{contractRef},#{version},#{aggregateType},#{aggregateId},#{bodySha256},#{bodyBytes},#{topic},#{consumerGroup},#{logicalDestination},'INBOX',#{correlationId},#{causationId},#{occurredAt},#{status},#{resultType},#{resultId},#{attempts},#{error},#{now},#{now},#{processedAt},0,#{now},#{now},'SERVICE',NULL)
+    ]]>
+  </insert>
+  <!-- 在 RECOVERY_REQUIRED 状态且版本匹配时记录通知结果，转为 PROCESSED，清除错误并增加一次尝试。 -->
+  <update id="completeRecoveredInbox">
+    <![CDATA[
+UPDATE inbox_message SET status='PROCESSED',result_type='NOTIFICATION',result_id=#{resultId},
+  attempt_count=attempt_count+1,last_error_code=NULL,processed_at=#{now},last_attempt_at=#{now},
+  lock_version=lock_version+1,updated_at=#{now},updated_by_type='SERVICE',updated_by_id=NULL
+WHERE tenant_id=#{tenantId} AND inbox_id=#{inboxId} AND status='RECOVERY_REQUIRED' AND lock_version=#{lockVersion}
+    ]]>
+  </update>
+  <!-- 在 RECOVERY_REQUIRED 状态且版本匹配时转为 REJECTED，保存错误及处理时间并增加一次尝试。 -->
+  <update id="rejectRecoveredInbox">
+    <![CDATA[
+UPDATE inbox_message SET status='REJECTED',attempt_count=attempt_count+1,
+  last_error_code=#{code},processed_at=#{now},last_attempt_at=#{now},lock_version=lock_version+1,
+  updated_at=#{now},updated_by_type='SERVICE',updated_by_id=NULL
+WHERE tenant_id=#{tenantId} AND inbox_id=#{inboxId} AND status='RECOVERY_REQUIRED' AND lock_version=#{lockVersion}
+    ]]>
+  </update>
+  <!-- 按租户及发布键查询收件箱元数据和摘要，供发布标识去重；不返回消息原文，lock 控制行锁。 -->
+  <select id="findByPublication" resultMap="inbox">
+    <![CDATA[
+SELECT inbox_id,producer_service,message_id,message_key,business_intent_key,publication_key,contract_ref,contract_version,aggregate_type,aggregate_id,body_sha256,NULL AS body_bytes,topic,consumer_group,logical_destination,direction,correlation_id,causation_id,occurred_at,status,result_type,result_id,attempt_count,last_error_code,first_received_at,last_attempt_at,processed_at,lock_version,created_at,updated_at FROM inbox_message WHERE tenant_id=#{tenantId} AND publication_key=#{publicationKey}
+    ]]>
+    <if test="lock">FOR UPDATE</if>
+  </select>
+  <!-- 按租户及收件箱标识读取元数据与摘要，不返回消息原文；lock 为 true 时加行锁。 -->
+  <select id="findById" resultMap="inbox">
+SELECT inbox_id,producer_service,message_id,message_key,business_intent_key,publication_key,contract_ref,contract_version,aggregate_type,aggregate_id,body_sha256,NULL AS body_bytes,topic,consumer_group,logical_destination,direction,correlation_id,causation_id,occurred_at,status,result_type,result_id,attempt_count,last_error_code,first_received_at,last_attempt_at,processed_at,lock_version,created_at,updated_at FROM inbox_message WHERE tenant_id=#{tenantId} AND inbox_id=#{inboxId}<if test="lock"> FOR UPDATE</if>
+  </select>
+</mapper>

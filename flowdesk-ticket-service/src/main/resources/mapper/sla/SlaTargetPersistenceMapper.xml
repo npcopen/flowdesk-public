@@ -1,0 +1,109 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+  SLA 升级通知接收目标及资格快照的持久化接口。
+  按租户读取有效目标、保存 IAM 资格校验结果，并以目标版本保护资格状态和停用操作的并发更新。
+-->
+<mapper namespace="com.flowdesk.ticket.sla.SlaTargetPersistenceMapper">
+  <!-- 将查询列映射为 SlaEscalationTargetRow 的构造参数，明确 UUID 转换、字段类型及参数顺序。 -->
+  <resultMap id="SlaEscalationTargetRow" type="com.flowdesk.ticket.model.sla.SlaEscalationTargetRow">
+    <constructor>
+      <arg name="targetId" column="target_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="recipientUserId" column="recipient_user_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="purpose" column="purpose" javaType="java.lang.String"/>
+      <arg name="status" column="status" javaType="java.lang.String"/>
+      <arg name="effectiveAt" column="effective_at" javaType="java.time.Instant"/>
+      <arg name="qualificationVersion" column="qualification_version" javaType="java.lang.Long"/>
+      <arg name="qualificationCheckedAt" column="qualification_checked_at" javaType="java.time.Instant"/>
+      <arg name="qualificationValidUntil" column="qualification_valid_until" javaType="java.time.Instant"/>
+      <arg name="qualificationState" column="qualification_state" javaType="java.lang.String"/>
+      <arg name="qualificationReasonCode" column="qualification_reason_code" javaType="java.lang.String"/>
+      <arg name="lockVersion" column="lock_version" javaType="_long"/>
+      <arg name="createdAt" column="created_at" javaType="java.time.Instant"/>
+      <arg name="updatedAt" column="updated_at" javaType="java.time.Instant"/>
+    </constructor>
+  </resultMap>
+  <!-- 将查询列映射为 SlaQualificationRow 的构造参数，明确 UUID 转换、字段类型及参数顺序。 -->
+  <resultMap id="SlaQualificationRow" type="com.flowdesk.ticket.model.sla.SlaQualificationRow">
+    <constructor>
+      <arg name="targetId" column="target_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="recipientUserId" column="recipient_user_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="purpose" column="purpose" javaType="java.lang.String"/>
+      <arg name="qualificationVersion" column="qualification_version" javaType="_long"/>
+      <arg name="checkedAt" column="checked_at" javaType="java.time.Instant"/>
+      <arg name="validUntil" column="valid_until" javaType="java.time.Instant"/>
+      <arg name="eligible" column="eligible" javaType="_boolean"/>
+      <arg name="reasonCode" column="reason_code" javaType="java.lang.String"/>
+    </constructor>
+  </resultMap>
+  <!-- 合并拥有 SLA 时钟或升级目标的租户，去重后按租户标识升序分页枚举，供后台维护遍历。 -->
+  <select id="findTenantIdsForSlaMaintenanceSelect" resultType="java.util.UUID">
+    SELECT tenant_id FROM (SELECT DISTINCT tenant_id FROM sla_clock UNION SELECT DISTINCT tenant_id FROM sla_escalation_target) tenants <if test="afterTenantId != null"> WHERE tenant_id &gt; #{afterTenantId}</if> ORDER BY tenant_id LIMIT #{limit}
+  </select>
+  <!-- 查询租户内 purpose 为 SLA 且状态为 ACTIVE 的升级接收目标，返回资格状态和版本；lock 控制行锁。 -->
+  <select id="findActiveSlaEscalationTargetSelect" resultMap="SlaEscalationTargetRow">
+    SELECT target_id, recipient_user_id, purpose, status, effective_at,
+       qualification_version, qualification_checked_at,
+       qualification_valid_until, qualification_state,
+       qualification_reason_code, lock_version, created_at, updated_at
+FROM sla_escalation_target
+WHERE tenant_id=#{tenantId} AND purpose='SLA' AND status='ACTIVE' <if test="lock"> FOR UPDATE</if>
+  </select>
+  <!-- 按租户和目标标识读取接收目标及资格信息，不限制状态；lock 为 true 时追加 FOR UPDATE。 -->
+  <select id="findSlaEscalationTargetSelect" resultMap="SlaEscalationTargetRow">
+    SELECT target_id, recipient_user_id, purpose, status, effective_at,
+       qualification_version, qualification_checked_at,
+       qualification_valid_until, qualification_state,
+       qualification_reason_code, lock_version, created_at, updated_at
+FROM sla_escalation_target
+WHERE tenant_id=#{tenantId} AND target_id=#{targetId} <if test="lock"> FOR UPDATE</if>
+  </select>
+  <!-- 创建升级接收目标，保存用途、用户、生效时间及资格版本和有效期，初始化版本为 0，并记录创建与更新主体。 -->
+  <insert id="insertSlaEscalationTargetUpdate" >
+    INSERT INTO sla_escalation_target
+  (tenant_id,target_id,purpose,recipient_user_id,status,effective_at,
+   qualification_version,qualification_checked_at,qualification_valid_until,
+   qualification_state,qualification_reason_code,lock_version,
+   created_at,created_by_type,created_by_id,updated_at,updated_by_type,updated_by_id)
+VALUES (#{tenantId},#{targetId},#{purpose},#{recipientUserId},#{status},#{effectiveAt},#{qualificationVersion},#{qualificationCheckedAt},#{qualificationValidUntil},#{qualificationState},#{qualificationReasonCode},0,#{now},#{actorType},#{actorId},#{now2},#{actorType2},#{actorId2})
+  </insert>
+  <!-- 仅在目标仍为 ACTIVE 且 expectedLockVersion 匹配时停用，增加版本并记录操作主体。 -->
+  <update id="deactivateSlaEscalationTargetUpdate" >
+    UPDATE sla_escalation_target
+SET status='INACTIVE',lock_version=lock_version+1,updated_at=#{now},
+    updated_by_type=#{actorType},updated_by_id=#{actorId}
+WHERE tenant_id=#{tenantId} AND target_id=#{targetId} AND status='ACTIVE' AND lock_version=#{expectedLockVersion}
+  </update>
+  <!-- 统计指定租户 purpose 为 SLA 且状态为 ACTIVE 的目标数量，供业务层校验有效目标配置。 -->
+  <select id="countActiveSlaEscalationTargetsSelect" resultType="java.lang.Integer">
+    SELECT COUNT(*) FROM sla_escalation_target
+WHERE tenant_id=#{tenantId} AND purpose='SLA' AND status='ACTIVE'
+  </select>
+  <!-- 按租户及目标新增或覆盖 SLA 资格快照，保存收件人、资格版本、检查和过期时间、可用结论及原因码。 -->
+  <insert id="upsertQualificationSnapshotUpdate" >
+    INSERT INTO sla_qualification_snapshot
+  (tenant_id,target_id,recipient_user_id,purpose,qualification_version,
+   checked_at,valid_until,eligible,reason_code,created_at,created_by_type,created_by_id)
+VALUES (#{tenantId},#{targetId},#{recipientUserId},'SLA',#{qualificationVersion},#{checkedAt},#{validUntil},#{eligible},#{reasonCode},#{now}, 'SERVICE', NULL)
+ON DUPLICATE KEY UPDATE recipient_user_id=VALUES(recipient_user_id),
+   qualification_version=VALUES(qualification_version),
+   checked_at=VALUES(checked_at),valid_until=VALUES(valid_until),
+   eligible=VALUES(eligible),reason_code=VALUES(reason_code)
+  </insert>
+  <!-- 按租户和目标读取已保存的 SLA 资格校验快照；lock 为 true 时追加 FOR UPDATE。 -->
+  <select id="findQualificationSnapshotSelect" resultMap="SlaQualificationRow">
+    SELECT target_id,recipient_user_id,purpose,qualification_version,checked_at,valid_until,
+       eligible,reason_code
+FROM sla_qualification_snapshot
+WHERE tenant_id=#{tenantId} AND target_id=#{targetId} <if test="lock"> FOR UPDATE</if>
+  </select>
+  <!-- 仅在目标用途为 SLA、状态为 ACTIVE 且 expectedVersion 匹配时刷新资格版本、有效期、状态和原因，并增加目标版本。 -->
+  <update id="updateSlaTargetQualificationUpdate" >
+    UPDATE sla_escalation_target
+SET qualification_version=#{qualificationVersion},qualification_checked_at=#{checkedAt},qualification_valid_until=#{validUntil},
+    qualification_state=#{state},qualification_reason_code=#{reason},lock_version=lock_version+1,
+    updated_at=#{now},updated_by_type='SERVICE',updated_by_id=NULL
+WHERE tenant_id=#{tenantId} AND target_id=#{targetId} AND purpose='SLA' AND status='ACTIVE'
+  AND lock_version=#{expectedVersion}
+  </update>
+</mapper>

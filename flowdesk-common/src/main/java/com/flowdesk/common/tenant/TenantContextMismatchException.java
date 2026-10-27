@@ -9,6 +9,9 @@ import java.util.UUID;
  */
 public class TenantContextMismatchException extends IllegalStateException {
 
+    /**
+     * 保存期望租户与实际租户的差异，标记当前资源访问违反租户一致性约束。
+     */
     public TenantContextMismatchException(UUID expected, UUID actual) {
         super("TenantContext tenant mismatch: expected " + expected + " but current context is " + actual);
     }

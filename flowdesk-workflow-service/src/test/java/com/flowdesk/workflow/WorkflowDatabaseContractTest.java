@@ -25,6 +25,9 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+/**
+ * 工作流数据库契约测试，检查冻结字段、约束、索引与租户范围内的唯一业务事实。
+ */
 @SpringBootTest(
         webEnvironment = SpringBootTest.WebEnvironment.NONE,
         properties = {
@@ -55,12 +58,18 @@ class WorkflowDatabaseContractTest {
     @Autowired
     private DataSource dataSource;
 
+    /**
+     * 注入测试 JWT 验签公钥，供模拟身份经过真实认证路径。
+     */
     @DynamicPropertySource
     static void jwtVerificationKey(DynamicPropertyRegistry registry) {
         registry.add("flowdesk.security.jwt.public-key-pem",
                 () -> readResource("test-jwt-public-key.pem"));
     }
 
+    /**
+     * 清空本用例涉及的数据库事实，确保约束和并发断言不受其他用例影响。
+     */
     @BeforeEach
     void cleanDatabase() {
         for (String table : List.of("message_recovery", "audit_record", "inbox_message",
@@ -70,6 +79,9 @@ class WorkflowDatabaseContractTest {
         }
     }
 
+    /**
+     * 验证可恢复 Inbox 和恢复表具备冻结列、约束与索引，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void recoverableInboxAndRecoveryExposeFrozenColumnsConstraintsAndIndexes() throws Exception {
         assertThat(columnNames("inbox_message")).contains(
@@ -94,6 +106,9 @@ class WorkflowDatabaseContractTest {
                 "idx_wf_37_recovery_queue", "idx_wf_38_dead_letter");
     }
 
+    /**
+     * 验证Inbox 强制保留可恢复信封事实及租户内去重键，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void inboxRequiresRecoverableEnvelopeFactsAndTenantScopedDuplicateKeys() {
         Instant now = Instant.now().truncatedTo(ChronoUnit.MICROS);
@@ -142,6 +157,9 @@ class WorkflowDatabaseContractTest {
                 .isInstanceOf(DataIntegrityViolationException.class);
     }
 
+    /**
+     * 验证恢复要求重放链路且每个来源只保留一条生命周期，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void recoveryRequiresReplayCorrelationAndKeepsOneLifecyclePerSource() {
         Instant requiredAt = Instant.now().truncatedTo(ChronoUnit.MICROS);
@@ -192,6 +210,9 @@ class WorkflowDatabaseContractTest {
                 .isInstanceOf(DataIntegrityViolationException.class);
     }
 
+    /**
+     * 验证启动唯一性约束只允许一个实例及对应待办，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void workflowStartUniquenessAllowsOnlyOneInstanceAndPendingTask() {
         Instant now = Instant.now().truncatedTo(ChronoUnit.MICROS);
@@ -217,6 +238,9 @@ class WorkflowDatabaseContractTest {
                 .isInstanceOf(DataIntegrityViolationException.class);
     }
 
+    /**
+     * 建立当前测试场景的持久化前置事实，保留指定租户、身份和状态供后续业务路径验证。
+     */
     private void insertProcessedInbox(UUID tenantId, UUID inboxId, UUID messageId,
                                       byte[] businessIntent, UUID resultId, Instant now) {
         jdbc.update("""
@@ -233,6 +257,9 @@ class WorkflowDatabaseContractTest {
                 Timestamp.from(now));
     }
 
+    /**
+     * 建立当前测试场景的持久化前置事实，保留指定租户、身份和状态供后续业务路径验证。
+     */
     private void insertOpenRecovery(UUID tenantId, UUID recoveryId, UUID sourceId,
                                     byte[] businessIntent, Instant requiredAt) {
         jdbc.update("""
@@ -246,6 +273,9 @@ class WorkflowDatabaseContractTest {
                 Timestamp.from(requiredAt.minusSeconds(1)), Timestamp.from(requiredAt));
     }
 
+    /**
+     * 建立当前测试场景的持久化前置事实，保留指定租户、身份和状态供后续业务路径验证。
+     */
     private void seedPublishedVersion(UUID tenantId, Instant now) {
         jdbc.update("""
                 INSERT INTO workflow_definition
@@ -278,6 +308,9 @@ class WorkflowDatabaseContractTest {
                 uuid(APPROVER_1), uuid(APPROVER_2), bytes(32, (byte) 0x62), Timestamp.from(now));
     }
 
+    /**
+     * 建立当前测试场景的持久化前置事实，保留指定租户、身份和状态供后续业务路径验证。
+     */
     private void insertRunningInstance(UUID tenantId, UUID instanceId, UUID ticketId,
                                        byte[] startIntent, Instant now) {
         jdbc.update("""
@@ -292,6 +325,9 @@ class WorkflowDatabaseContractTest {
                 bytes(32, (byte) 0x63), Timestamp.from(now));
     }
 
+    /**
+     * 建立当前测试场景的持久化前置事实，保留指定租户、身份和状态供后续业务路径验证。
+     */
     private void insertPendingTask(UUID tenantId, UUID taskId, UUID instanceId,
                                    int level, UUID approverId) {
         jdbc.update("""
@@ -302,6 +338,9 @@ class WorkflowDatabaseContractTest {
                 """, uuid(tenantId), uuid(taskId), uuid(instanceId), level, uuid(approverId));
     }
 
+    /**
+     * 查询表列元信息，供冻结数据库字段契约断言。
+     */
     private Set<String> columnNames(String table) {
         return new HashSet<>(jdbc.queryForList("""
                 SELECT LOWER(column_name) FROM information_schema.columns
@@ -309,6 +348,9 @@ class WorkflowDatabaseContractTest {
                 """, String.class, table));
     }
 
+    /**
+     * 读取指定列是否允许空值，供原始消息及重放字段约束检查。
+     */
     private boolean nullable(String table, String column) {
         return "YES".equalsIgnoreCase(jdbc.queryForObject("""
                 SELECT is_nullable FROM information_schema.columns
@@ -316,6 +358,9 @@ class WorkflowDatabaseContractTest {
                 """, String.class, table, column));
     }
 
+    /**
+     * 查询表约束名称，供唯一性和一致性数据库契约断言。
+     */
     private Set<String> constraintNames(String table) {
         return new HashSet<>(jdbc.queryForList("""
                 SELECT LOWER(constraint_name) FROM information_schema.table_constraints
@@ -323,6 +368,9 @@ class WorkflowDatabaseContractTest {
                 """, String.class, table));
     }
 
+    /**
+     * 查询表索引名称，核对恢复扫描与幂等查找要求的索引。
+     */
     private Set<String> indexNames(String table) throws Exception {
         Set<String> names = new HashSet<>();
         try (Connection connection = dataSource.getConnection();
@@ -338,6 +386,9 @@ class WorkflowDatabaseContractTest {
         return names;
     }
 
+    /**
+     * 在 UUID 与持久化表示之间转换，保持标识高低位的编码顺序一致。
+     */
     private static byte[] uuid(UUID value) {
         ByteBuffer buffer = ByteBuffer.allocate(16);
         buffer.putLong(value.getMostSignificantBits());
@@ -345,12 +396,18 @@ class WorkflowDatabaseContractTest {
         return buffer.array();
     }
 
+    /**
+     * 构造按固定字节填充的测试数组，用于生成可重复的摘要、意图键和非法内容变体。
+     */
     private static byte[] bytes(int size, byte value) {
         byte[] result = new byte[size];
         java.util.Arrays.fill(result, value);
         return result;
     }
 
+    /**
+     * 从测试类路径读取 UTF-8 资源，缺失或读取失败直接使当前用例失败。
+     */
     private static String readResource(String name) {
         try (var in = WorkflowDatabaseContractTest.class.getClassLoader()
                 .getResourceAsStream(name)) {

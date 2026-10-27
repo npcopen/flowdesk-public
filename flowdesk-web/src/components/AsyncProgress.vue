@@ -1,4 +1,5 @@
 <script setup lang="ts">
+/** 展示已提交操作的异步副作用进度，区分请求成功与后台处理完成。 */
 import { Clock3 } from "lucide-vue-next";
 import type { AsyncProgress } from "@/types/api";
 import StatusBadge from "./StatusBadge.vue";

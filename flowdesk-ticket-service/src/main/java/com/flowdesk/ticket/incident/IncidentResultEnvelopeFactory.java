@@ -10,12 +10,19 @@ import java.util.HexFormat;
 import java.util.LinkedHashMap;
 import java.util.Locale;
 
+/** 基于持久化的 Incident 建单结果组装消息信封，发送前验证原始字节、摘要和契约边界。 */
 final class IncidentResultEnvelopeFactory {
     private static final DateTimeFormatter MICROS = new DateTimeFormatterBuilder()
             .appendInstant(6).toFormatter(Locale.ROOT);
+    /**
+     * 私有构造方法，阻止工具类实例化，调用方应使用静态入口。
+     */
     private IncidentResultEnvelopeFactory() { }
 
-    static IncidentResultMessage create(IncidentResultOutboxRepository.Claimed row) {
+    /**
+     * 校验告警建单创建请求并保存事实，按接口约定处理幂等及版本条件。
+     */
+    static IncidentResultMessage create(com.flowdesk.ticket.model.incident.result.Claimed row) {
         byte[] body = row.body();
         if (body.length == 0 || body.length > IncidentMessageContract.MAX_BODY_BYTES
                 || row.intent().length != 32 || row.publicationKey().length != 32) {

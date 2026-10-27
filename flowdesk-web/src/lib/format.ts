@@ -1,3 +1,4 @@
+/** 集中维护业务状态、权限与时间的展示格式，避免各页面文案不一致。 */
 import type { TicketStatus, RoleCode, PermissionCode } from "@/types/api";
 
 export const statusLabels: Record<string, string> = {
@@ -166,15 +167,27 @@ export const permissionLabels: Record<PermissionCode, string> = {
   NOTIFICATION_WRITE_SELF: "更新我的通知",
 };
 
+/**
+ * 将通用状态值转换为中文文案。
+ * 空值和未知状态分别使用稳定占位，避免直接暴露不可读的枚举码。
+ */
 export function label(value: string | null | undefined): string {
   if (!value) return "未提供";
   return statusLabels[value] ?? "状态待确认";
 }
 
+/**
+ * 返回工单状态的中文展示名称。
+ * 复用通用状态映射，使列表、详情和汇总中的用词一致。
+ */
 export function ticketStatusLabel(value: TicketStatus): string {
   return label(value);
 }
 
+/**
+ * 按中文区域格式展示日期和时间。
+ * 空值及非法日期分别返回明确占位，避免出现无效时间文本。
+ */
 export function formatDate(value: string | null | undefined): string {
   if (!value) return "未发生";
   const date = new Date(value);
@@ -185,41 +198,73 @@ export function formatDate(value: string | null | undefined): string {
   }).format(date);
 }
 
+/**
+ * 把较长标识缩略为前八位和后四位。
+ * 短标识原样返回，空值使用占位符，便于紧凑列表展示。
+ */
 export function shortId(value: string | null | undefined): string {
   if (!value) return "—";
   return value.length > 12 ? `${value.slice(0, 8)}…${value.slice(-4)}` : value;
 }
 
+/**
+ * 提取显示名称的首个字符并转为大写。
+ * 缺少名称时使用问号，供头像或人员标记统一显示。
+ */
 export function initials(value: string | null | undefined): string {
   const source = (value || "?").trim();
   return source.slice(0, 1).toUpperCase();
 }
 
+/**
+ * 将工单来源码转换为中文名称。
+ * 对缺失或未知来源提供通用说明，保持页面可读性。
+ */
 export function originLabel(value: string | null | undefined): string {
   if (!value) return "未说明来源";
   return originLabels[value] ?? "其他来源";
 }
 
+/**
+ * 将异步副作用状态转换为中文说明。
+ * 未知值使用处理中提示，供页面表达请求之后尚未完成的后续动作。
+ */
 export function asyncEffectLabel(value: string | null | undefined): string {
   if (!value) return "后续更新";
   return asyncEffectLabels[value] ?? "后续更新";
 }
 
+/**
+ * 转换告警接入事件类型的展示名称。
+ * 缺失和未知类型回退为通用告警事件说明。
+ */
 export function eventTypeLabel(value: string | null | undefined): string {
   if (!value) return "告警事件";
   return eventTypeLabels[value] ?? "告警事件";
 }
 
+/**
+ * 转换告警接入事件的处置结果。
+ * 未识别的结果保留待确认提示，避免误判为处理成功。
+ */
 export function dispositionLabel(value: string | null | undefined): string {
   if (!value) return "待处理";
   return dispositionLabels[value] ?? "待处理";
 }
 
+/**
+ * 将通知或时间线的来源域转换为中文名称。
+ * 无法识别时显示系统来源，保持展示文案一致。
+ */
 export function sourceDomainLabel(value: string | null | undefined): string {
   if (!value) return "系统";
   return sourceDomainLabels[value] ?? "系统";
 }
 
+/**
+ * 将通知种类转换为中文名称。
+ * 缺失或未知种类使用通用消息标签。
+ */
 export function notificationKindLabel(
   value: string | null | undefined,
 ): string {
@@ -227,11 +272,19 @@ export function notificationKindLabel(
   return notificationKindLabels[value] ?? "消息";
 }
 
+/**
+ * 将消息恢复所属服务转换为中文名称。
+ * 未知服务使用通用名称，避免页面出现内部枚举码。
+ */
 export function recoveryOwnerLabel(value: string | null | undefined): string {
   if (!value) return "相关服务";
   return recoveryOwnerLabels[value] ?? "相关服务";
 }
 
+/**
+ * 将消息恢复方向转换为中文业务说明。
+ * 缺失或未知方向使用通用后台任务标签。
+ */
 export function recoveryDirectionLabel(
   value: string | null | undefined,
 ): string {
@@ -239,11 +292,19 @@ export function recoveryDirectionLabel(
   return recoveryDirectionLabels[value] ?? "后续处理";
 }
 
+/**
+ * 把工单时间线事件码转换为中文说明。
+ * 未知事件回退为状态更新，使新增服务端事件仍能正常展示。
+ */
 export function timelineLabel(value: string | null | undefined): string {
   if (!value) return "状态更新";
   return timelineLabels[value] ?? "状态更新";
 }
 
+/**
+ * 返回权限码对应的中文展示文案。
+ * 缺少权限码时使用传入名称，其他未知权限使用通用标签。
+ */
 export function permissionDisplayLabel(
   code: string | null | undefined,
   name?: string | null,

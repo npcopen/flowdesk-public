@@ -1,0 +1,57 @@
+server {
+    listen 8080;
+    server_name _;
+    root /usr/share/nginx/html;
+    index index.html;
+
+    # Re-resolve the Compose service after an independent Gateway rollout.
+    resolver 127.0.0.11 valid=10s ipv6=off;
+    set $gateway_upstream https://gateway:${FLOWDESK_GATEWAY_PORT};
+
+    location = /healthz {
+        access_log off;
+        default_type text/plain;
+        return 200 'ok\n';
+    }
+
+    # Signed webhooks retain their direct HTTPS Gateway entrypoint.
+    location = /api/v1/webhooks {
+        return 404;
+    }
+    location ^~ /api/v1/webhooks/ {
+        return 404;
+    }
+
+    location = /api {
+        return 404;
+    }
+    location /api/ {
+        proxy_pass $gateway_upstream$request_uri;
+        proxy_http_version 1.1;
+        proxy_set_header Connection '';
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $remote_addr;
+        proxy_set_header X-Forwarded-Host $http_host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_ssl_server_name on;
+        proxy_ssl_name ${FLOWDESK_GATEWAY_TLS_SERVER_NAME};
+        proxy_ssl_trusted_certificate /run/secrets/flowdesk-gateway-ca.crt;
+        proxy_ssl_verify on;
+        proxy_ssl_verify_depth 3;
+        proxy_connect_timeout 5s;
+        proxy_read_timeout 60s;
+        proxy_intercept_errors off;
+    }
+
+    location = /index.html {
+        add_header Cache-Control 'no-store' always;
+    }
+    location /assets/ {
+        try_files $uri =404;
+        add_header Cache-Control 'public, max-age=31536000, immutable';
+    }
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+}

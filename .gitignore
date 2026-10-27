@@ -1,4 +1,6 @@
 # Maven
+__pycache__/
+*.pyc
 target/
 *.class
 *.jar
@@ -38,7 +40,7 @@ test-results/
 .npm-cache/
 .playwright-browsers/
 
-# Generated SPA bundle (rebuild with flowdesk-web/npm run build:gateway)
+# Legacy generated SPA bundle; frontend builds now use flowdesk-web/dist/.
 flowdesk-gateway/src/main/resources/static/
 
 # Local infrastructure data
@@ -53,3 +55,5 @@ Desktop.ini
 # Public release exclusions
 flowdesk-web/artifacts/
 
+# Local migration baselines and scratch files
+/tmp/

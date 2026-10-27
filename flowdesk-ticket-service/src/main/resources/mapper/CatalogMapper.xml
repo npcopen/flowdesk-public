@@ -1,0 +1,161 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper
+  PUBLIC '-//mybatis.org//DTD Mapper 3.0//EN'
+  'https://mybatis.org/dtd/mybatis-3-mapper.dtd'>
+<!--
+  服务目录条目的持久化接口，负责目录查询、局部更新和审批流程配置落库。
+  语句与同名 Java Mapper 方法对应；租户参数、状态条件和并发版本共同限定数据访问。
+-->
+<mapper namespace="com.flowdesk.ticket.mapper.CatalogMapper">
+  <!--
+    将查询列按构造参数映射为 CatalogItemRow，参数顺序、字段别名及类型须与对应模型一致。 UUID 字段通过二进制类型处理器转换。
+  -->
+  <resultMap id="CatalogItemRow" type="com.flowdesk.ticket.model.CatalogItemRow">
+    <constructor>
+      <arg column="catalog_item_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg column="item_code" javaType="java.lang.String"/>
+      <arg column="item_name" javaType="java.lang.String"/>
+      <arg column="description" javaType="java.lang.String"/>
+      <arg column="risk_level" javaType="java.lang.String"/>
+      <arg column="requires_approval" javaType="_boolean"/>
+      <arg column="workflow_definition_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg column="workflow_version_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg column="workflow_version_no" javaType="java.lang.Integer"/>
+      <arg column="sla_policy_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg column="status" javaType="java.lang.String"/>
+      <arg column="lock_version" javaType="_long"/>
+      <arg column="created_at" javaType="java.time.Instant"/>
+      <arg column="updated_at" javaType="java.time.Instant"/>
+    </constructor>
+  </resultMap>
+  <!--
+    根据 ascending 选择固定的 ASC 或 DESC，供排序字段及 ID 次序共用。
+  -->
+  <sql id="sortDirection">
+    <choose>
+      <when test="ascending">ASC</when>
+      <otherwise>DESC</otherwise>
+    </choose>
+  </sql>
+  <!--
+    根据排序方向选择游标比较符，保证后续页与当前排序方向一致。
+  -->
+  <sql id="cursorComparator">
+    <choose>
+      <when test="ascending">&gt;</when>
+      <otherwise>&lt;</otherwise>
+    </choose>
+  </sql>
+  <!--
+    从固定分支选择允许的排序列，避免将任意输入直接拼接为列名。
+  -->
+  <sql id="sortColumn">
+    <choose>
+      <when test="sortColumn == 'itemName'">item_name</when>
+      <otherwise>item_code</otherwise>
+    </choose>
+  </sql>
+  <!--
+    按状态、风险等级筛选目录条目，以名称或编码和条目 ID 组成游标排序，多取一条判断下一页。
+  -->
+  <select id="findCatalogItems" resultMap="CatalogItemRow">
+    <bind name="limit" value="pageSize + 1"/>
+    SELECT catalog_item_id, item_code, item_name, description, risk_level, requires_approval, workflow_definition_id, workflow_version_id, workflow_version_no, sla_policy_id, status, lock_version, created_at, updated_at FROM service_catalog_item WHERE tenant_id = #{tenantId}
+    <if test="status != null">AND status = #{status}</if>
+    <if test="riskLevel != null">AND risk_level = #{riskLevel}</if>
+    <if test="cursorValue != null and cursorId != null">
+      AND (
+      <include refid="sortColumn"/>
+      <include refid="cursorComparator"/>
+       #{cursorValue}
+        OR (
+      <include refid="sortColumn"/>
+       = #{cursorValue} AND catalog_item_id
+      <include refid="cursorComparator"/>
+       #{cursorId}))
+    </if>
+    ORDER BY
+    <include refid="sortColumn"/>
+    <include refid="sortDirection"/>
+    , catalog_item_id
+    <include refid="sortDirection"/>
+    LIMIT #{limit}
+  </select>
+  <!--
+    按租户和目录条目 ID 查询目录详情，包含审批流程引用和 SLA 策略关联。
+  -->
+  <select id="findCatalogItem" resultMap="CatalogItemRow">
+    SELECT catalog_item_id, item_code, item_name, description, risk_level,
+           requires_approval, workflow_definition_id, workflow_version_id,
+           workflow_version_no, sla_policy_id, status, lock_version,
+           created_at, updated_at
+    FROM service_catalog_item
+    WHERE tenant_id = #{tenantId} AND catalog_item_id = #{catalogItemId}
+  </select>
+  <!--
+    查询目录详情并锁定该行，供同一事务内校验和修改配置使用。
+    查询使用 FOR UPDATE 行锁，应在调用方事务内执行。
+  -->
+  <select id="findCatalogItemForUpdate" resultMap="CatalogItemRow">
+    SELECT catalog_item_id, item_code, item_name, description, risk_level,
+           requires_approval, workflow_definition_id, workflow_version_id,
+           workflow_version_no, sla_policy_id, status, lock_version,
+           created_at, updated_at
+    FROM service_catalog_item
+    WHERE tenant_id = #{tenantId} AND catalog_item_id = #{catalogItemId} FOR UPDATE
+  </select>
+  <!--
+    按预期版本局部更新目录；descriptionPresent 区分未传描述与显式清空，其他可选字段为空时保留原值。
+    WHERE 同时校验锁版本；受影响行数为 0 时，调用方需处理记录缺失或并发状态变化。
+  -->
+  <update id="updateCatalogItem">
+    UPDATE service_catalog_item
+    SET item_name = COALESCE(#{itemName}, item_name),
+        description = CASE WHEN #{descriptionPresent} THEN #{description} ELSE description END,
+        sla_policy_id = COALESCE(#{slaPolicyId}, sla_policy_id),
+        status = COALESCE(#{status}, status),
+        lock_version = lock_version + 1,
+        updated_at = #{now},
+        updated_by_type = 'USER',
+        updated_by_id = #{actorId}
+    WHERE tenant_id = #{tenantId} AND catalog_item_id = #{catalogItemId} AND lock_version = #{expectedLockVersion}
+  </update>
+  <!--
+    根据是否提供 workflowRef 同时生成审批开关和流程引用值，未提供时写入空引用。
+  -->
+  <sql id="workflowValues">
+    <choose>
+      <when test="r.workflowRef != null">TRUE, #{r.workflowRef.definitionId}, #{r.workflowRef.workflowVersionId}, #{r.workflowRef.versionNo}</when>
+      <otherwise>FALSE, NULL, NULL, NULL</otherwise>
+    </choose>
+  </sql>
+  <!--
+    保存完整目录配置；存在工作流引用时启用审批，否则清空流程引用并初始化版本。
+  -->
+  <insert id="insertCatalogConfiguration">
+    INSERT INTO service_catalog_item
+      (tenant_id, catalog_item_id, item_code, item_name, description, risk_level, requires_approval,
+       workflow_definition_id, workflow_version_id, workflow_version_no, sla_policy_id, status, lock_version,
+       created_at, created_by_type, created_by_id, updated_at, updated_by_type, updated_by_id)
+    VALUES (#{tenant}, #{id}, #{r.itemCode}, #{r.itemName}, #{r.description}, #{r.riskLevel},
+    <include refid="workflowValues"/>
+    , #{r.slaPolicyId}, #{r.status}, 0, #{now}, 'USER', #{actor}, #{now}, 'USER', #{actor})
+  </insert>
+  <!--
+    按预期版本覆盖目录配置，根据工作流引用设置审批开关及流程版本，并递增锁版本。
+    WHERE 同时校验锁版本；受影响行数为 0 时，调用方需处理记录缺失或并发状态变化。
+  -->
+  <update id="updateCatalogConfiguration">
+    UPDATE service_catalog_item SET item_name=#{r.itemName}, description=#{r.description}, risk_level=#{r.riskLevel},
+    <choose>
+      <when test="r.workflowRef != null">
+        requires_approval=TRUE, workflow_definition_id=#{r.workflowRef.definitionId},
+        workflow_version_id=#{r.workflowRef.workflowVersionId}, workflow_version_no=#{r.workflowRef.versionNo},
+      </when>
+      <otherwise>requires_approval=FALSE, workflow_definition_id=NULL, workflow_version_id=NULL, workflow_version_no=NULL,</otherwise>
+    </choose>
+    sla_policy_id=#{r.slaPolicyId}, status=#{r.status}, lock_version=lock_version+1,
+    updated_at=#{now}, updated_by_type='USER', updated_by_id=#{actor}
+    WHERE tenant_id=#{tenant} AND catalog_item_id=#{id} AND lock_version=#{version}
+  </update>
+</mapper>

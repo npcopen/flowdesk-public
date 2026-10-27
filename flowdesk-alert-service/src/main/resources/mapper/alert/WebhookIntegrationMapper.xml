@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+  Webhook 认证候选查询接口，按 API Key 选择器摘要定位监控集成配置。
+  认证尚未确定租户，返回所属租户、密钥校验、签名版本及有效期供调用方核验。
+-->
+<mapper namespace="com.flowdesk.alert.mapper.WebhookIntegrationMapper">
+  <!-- 将查询列按构造参数映射为 WebhookIntegrationCandidate，明确字段、Java 类型及构造顺序，供相应查询复用。 -->
+  <resultMap id="candidate" type="com.flowdesk.alert.model.WebhookIntegrationCandidate">
+    <constructor>
+      <arg name="tenantId" column="tenant_id" javaType="java.util.UUID"/>
+      <arg name="integrationId" column="integration_id" javaType="java.util.UUID"/>
+      <arg name="integrationCode" column="integration_code" javaType="java.lang.String"/>
+      <arg name="integrationName" column="integration_name" javaType="java.lang.String"/>
+      <arg name="status" column="status" javaType="java.lang.String"/>
+      <arg name="apiKeyVerifier" column="api_key_verifier" javaType="[B"/>
+      <arg name="verifierScheme" column="api_key_verifier_scheme" javaType="java.lang.String"/>
+      <arg name="signingVersion" column="signing_scheme_version" javaType="_int"/>
+      <arg name="validFrom" column="valid_from" javaType="java.time.Instant"/>
+      <arg name="validUntil" column="valid_until" javaType="java.time.Instant"/>
+    </constructor>
+  </resultMap>
+  <!-- 按 API Key 选择器摘要读取候选配置，含租户、状态、校验器、签名版本及有效期，按租户和集成标识排序；最终认证由调用方执行。 -->
+  <select id="findCandidates" resultMap="candidate">
+    <![CDATA[
+SELECT tenant_id,integration_id,integration_code,integration_name,status,
+       api_key_verifier,api_key_verifier_scheme,signing_scheme_version,
+       valid_from,valid_until
+FROM monitoring_integration
+WHERE api_key_selector_hash=#{selectorHash}
+ORDER BY tenant_id,integration_id
+    ]]>
+  </select>
+</mapper>

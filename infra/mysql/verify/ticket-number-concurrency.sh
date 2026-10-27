@@ -4,6 +4,7 @@ set -Eeuo pipefail
 : "${FLOWDESK_MYSQL_ROOT_PASSWORD:?set FLOWDESK_MYSQL_ROOT_PASSWORD}"
 : "${FLOWDESK_TICKET_DB_PASSWORD:?set FLOWDESK_TICKET_DB_PASSWORD}"
 
+# 使用指定账号通过 TCP 执行 SQL，以环境变量传递密码并返回无表头的批量结果。
 mysql_exec() {
   local user="$1"
   local password="$2"
@@ -19,6 +20,7 @@ mysql_exec() {
     --execute="$statement"
 }
 
+# 执行预期无权限的 SQL，只有明确的 MySQL 授权错误才算通过，普通连接或语法错误不能替代权限验证。
 expect_denied() {
   local statement="$1"
   local output
@@ -41,6 +43,7 @@ business_date="$(mysql_exec fd_ticket_runtime "$FLOWDESK_TICKET_DB_PASSWORD" "SE
 date_segment="${business_date//-/}"
 work_dir="$(mktemp -d)"
 
+# 清理本次临时租户的工单、编号计数及工作目录，作为退出钩子防止并发探针残留。
 cleanup() {
   mysql_exec root "$FLOWDESK_MYSQL_ROOT_PASSWORD" "
     DELETE FROM flowdesk_ticket.ticket
@@ -76,6 +79,7 @@ if [[ "$rolled_back_rows" != "0" ]]; then
   exit 1
 fi
 
+# 在单个事务中竞争租户日期计数，锁定序号后生成并插入工单，用并行调用验证编号唯一性。
 allocate_ticket() {
   local worker="$1"
   mysql_exec fd_ticket_runtime "$FLOWDESK_TICKET_DB_PASSWORD" "

@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper
+  PUBLIC '-//mybatis.org//DTD Mapper 3.0//EN'
+  'https://mybatis.org/dtd/mybatis-3-mapper.dtd'>
+<!--
+  工单时间线持久化接口，保存业务事件、查询副作用记录并分页读取历史。
+  语句与同名 Java Mapper 方法对应；租户参数、状态条件和并发版本共同限定数据访问。
+-->
+<mapper namespace="com.flowdesk.ticket.mapper.TicketTimelineMapper">
+  <!--
+    将查询列按构造参数映射为 TimelineRow，参数顺序、字段别名及类型须与对应模型一致。 UUID 字段通过二进制类型处理器转换。
+  -->
+  <resultMap id="TimelineRow" type="com.flowdesk.ticket.model.TimelineRow">
+    <constructor>
+      <arg name="timelineId" column="timeline_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="ticketId" column="ticket_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="effectKey" column="effect_key" javaType="[B"/>
+      <arg name="eventType" column="event_type" javaType="java.lang.String"/>
+      <arg name="summary" column="summary" javaType="java.lang.String"/>
+      <arg name="relatedRefType" column="related_ref_type" javaType="java.lang.String"/>
+      <arg name="relatedRefId" column="related_ref_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="actorType" column="actor_type" javaType="java.lang.String"/>
+      <arg name="actorId" column="actor_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="occurredAt" column="occurred_at" javaType="java.time.Instant"/>
+      <arg name="correlationId" column="correlation_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+    </constructor>
+  </resultMap>
+  <!--
+    写入工单业务事件、关联对象、副作用键和链路信息，分别保留业务发生时间及实际记录时间。
+  -->
+  <insert id="insertTimeline">
+    <bind name="recordTime" value="recordedAt == null ? occurredAt : recordedAt"/>
+    INSERT INTO ticket_timeline_entry
+  (tenant_id, timeline_id, ticket_id, effect_key, event_type, summary,
+   related_ref_type, related_ref_id, actor_type, actor_id, occurred_at,
+   correlation_id, causation_id, created_at)
+ VALUES (#{tenantId}, #{timelineId}, #{ticketId}, #{effectKey}, #{eventType}, #{summary}, #{relatedRefType}, #{relatedRefId}, #{actorType}, #{actorId}, #{occurredAt}, #{correlationId}, #{causationId}, #{recordTime})
+  </insert>
+  <!--
+    按租户、工单和副作用键查找已有时间线记录，供重复业务效果校验。
+  -->
+  <select id="findTimelineByEffectKey" resultMap="TimelineRow">
+    SELECT timeline_id, ticket_id, effect_key, event_type, summary,
+       related_ref_type, related_ref_id, actor_type, actor_id,
+       occurred_at, correlation_id
+FROM ticket_timeline_entry
+WHERE tenant_id = #{tenantId} AND ticket_id = #{ticketId} AND effect_key = #{effectKey}
+  </select>
+  <!--
+    按事件类型及发生时间范围筛选工单时间线，以发生时间和时间线 ID 组成游标并多取一条。
+  -->
+  <select id="findTimelineEntries" resultMap="TimelineRow">
+    <bind name="pageSizePlusOne" value="pageSize + 1"/>
+    SELECT timeline_id, ticket_id, effect_key, event_type, summary, related_ref_type, related_ref_id, actor_type, actor_id, occurred_at, correlation_id FROM ticket_timeline_entry WHERE tenant_id = #{tenantId} AND ticket_id = #{ticketId}
+    <if test="eventType != null">AND event_type = #{eventType}</if>
+    <if test="occurredFrom != null">AND occurred_at &gt;= #{occurredFrom}</if>
+    <if test="occurredTo != null">AND occurred_at &lt;= #{occurredTo}</if>
+    <if test="cursorValue != null and cursorId != null">
+       AND (occurred_at
+      <choose>
+        <when test="ascending">&gt;</when>
+        <otherwise>&lt;</otherwise>
+      </choose>
+       #{cursorValue} OR (occurred_at = #{cursorValue} AND timeline_id
+      <choose>
+        <when test="ascending">&gt;</when>
+        <otherwise>&lt;</otherwise>
+      </choose>
+       #{cursorId}))
+    </if>
+     ORDER BY occurred_at
+    <choose>
+      <when test="ascending">ASC</when>
+      <otherwise>DESC</otherwise>
+    </choose>
+    , timeline_id
+    <choose>
+      <when test="ascending">ASC</when>
+      <otherwise>DESC</otherwise>
+    </choose>
+     LIMIT #{pageSizePlusOne}
+  </select>
+</mapper>

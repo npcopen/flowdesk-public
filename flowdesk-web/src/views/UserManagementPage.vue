@@ -1,4 +1,5 @@
 <script setup lang="ts">
+/** 管理用户、角色和权限绑定，使用幂等意图与版本条件保护写入。 */
 import '@/management.css'
 import { computed, onMounted, ref } from 'vue'
 import { iamApi } from '@/api/endpoints'
@@ -11,6 +12,10 @@ import ErrorNotice from '@/components/ErrorNotice.vue'
 import ResourceState from '@/components/ResourceState.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
 const auth=useAuthStore()
+/**
+ * 把角色码转换为适合页面展示的名称。
+ * 若后端名称与内部码相同，则使用统一中文枚举标签。
+ */
 const roleName=(role:Role)=>role.roleName===role.roleCode?roleLabels[role.roleCode]:role.roleName
 const users=ref<UserSummary[]>([]), roles=ref<Role[]>([]), permissions=ref<Permission[]>([])
 const loading=ref(true), saving=ref(false), error=ref<unknown>(null), actionError=ref<unknown>(null)
@@ -20,6 +25,10 @@ const showCreate=ref(false), form=ref({ username:'', displayName:'', initialPass
 const intent=mutationIntent(), bindingIntent=mutationIntent()
 const selectablePermissions=computed(()=>permissions.value.filter(p=>!selectedRole.value||!p.allowedRoles||p.allowedRoles.includes(selectedRole.value.roleCode)))
 const visibleUsers=computed(()=>users.value.filter(u=>`${u.displayName} ${u.username}`.toLowerCase().includes(search.value.toLowerCase())))
+/**
+ * 按管理权限读取全部用户、角色和权限页。
+ * 避免授权选择器仅包含第一页数据，并分别保留请求反馈。
+ */
 async function load() {
  loading.value=true; error.value=null
  try {
@@ -31,27 +40,51 @@ async function load() {
   users.value=result[0]; roles.value=result[1]; permissions.value=result[2]
  } catch(e) {error.value=e} finally {loading.value=false}
 }
+/**
+ * 提交新增用户并复用同载荷的幂等键。
+ * 成功后重置输入和写入意图，再刷新管理集合。
+ */
 async function create() {
  saving.value=true;actionError.value=null
  try { await iamApi.createUser(form.value,intent.key(form.value)); intent.reset(); showCreate.value=false;form.value={username:'',displayName:'',initialPassword:'',status:'ACTIVE'};await load() }
  catch(e){actionError.value=e}finally{saving.value=false}
 }
+/**
+ * 切换用户的启用状态。
+ * 携带用户当前锁版本构造的 ETag，成功后重新读取列表。
+ */
 async function status(user:UserSummary) {
  saving.value=true;actionError.value=null
  try {await iamApi.patchUser(user.userId,{status:user.status==='ACTIVE'?'INACTIVE':'ACTIVE'},`"lv:${user.lockVersion}"`);await load()}
  catch(e){actionError.value=e}finally{saving.value=false}
 }
+/**
+ * 选择用户并读取其全部角色绑定。
+ * 准备授权弹窗所需的当前状态和版本信息。
+ */
 async function editRoles(user:UserSummary) {
  selected.value=user;bindings.value=[];saving.value=true;actionError.value=null
  try {bindings.value=await allPages(t=>iamApi.userRoles(user.userId,{pageSize:100,pageToken:t,sort:'roleCode'}))}
  catch(e){actionError.value=e;selected.value=null}finally{saving.value=false}
 }
+/**
+ * 选择角色并读取其全部权限绑定。
+ * 供权限编辑界面显示已经授予或撤销的条目。
+ */
 async function editPermissions(role:Role) {
  selectedRole.value=role;permissionBindings.value=[];saving.value=true;actionError.value=null
  try {permissionBindings.value=await allPages(t=>iamApi.rolePermissions(role.roleId,{pageSize:100,pageToken:t,sort:'permissionCode'}))}
  catch(e){actionError.value=e;selectedRole.value=null}finally{saving.value=false}
 }
+/**
+ * 判断目标绑定是否存在且处于已授予状态。
+ * 仅匹配目标标识，避免把已撤销记录误认为有效授权。
+ */
 function isGranted(list:AccessBinding[],id:string){return list.some(b=>b.targetId===id&&b.state==='GRANTED')}
+/**
+ * 授予或撤销用户角色或角色权限绑定。
+ * 区分创建条件与版本更新，并按操作载荷复用稳定幂等键。
+ */
 async function toggle(targetId:string,kind:'role'|'permission') {
  const subject=kind==='role'?selected.value:selectedRole.value
  if(!subject)return

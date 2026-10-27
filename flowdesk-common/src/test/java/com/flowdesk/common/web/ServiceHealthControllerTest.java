@@ -23,16 +23,16 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /**
- * Unit coverage for the service-local API-063/API-064 probes.
- *
- * <p>The probe deliberately uses a narrow JDBC contract so these tests keep the
- * liveness dependency-free and ensure readiness failures stay opaque.</p>
- */
-class ServiceHealthControllerTest {
+  * 验证服务本地存活与就绪探针；存活不依赖数据库，就绪按配置检查数据库和迁移且不泄露底层失败细节。
+  */
+ class ServiceHealthControllerTest {
 
     private static final UUID CORRELATION =
             UUID.fromString("11111111-1111-1111-1111-111111111111");
 
+    /**
+     * 验证存活探针始终返回 UP 且不访问数据源，使进程存活与数据库依赖解耦。
+     */
     @Test
     void livenessIsAlwaysUpAndDoesNotTouchDatasource() {
         ObjectProvider<DataSource> provider = mock();
@@ -52,6 +52,9 @@ class ServiceHealthControllerTest {
         verifyNoInteractions(provider);
     }
 
+    /**
+     * 验证有效关联标识在响应头和统一信封中一致保留。
+     */
     @Test
     void validCorrelationIsPropagatedAcrossHeaderAndEnvelope() {
         ObjectProvider<DataSource> provider = mock();
@@ -67,6 +70,9 @@ class ServiceHealthControllerTest {
         verifyNoInteractions(provider);
     }
 
+    /**
+     * 验证配置不要求数据库时就绪探针不访问数据源，并仍返回正确就绪结构。
+     */
     @Test
     void readinessCanBeConfiguredWithoutARequiredDatabase() {
         ObjectProvider<DataSource> provider = mock();
@@ -83,6 +89,9 @@ class ServiceHealthControllerTest {
         verifyNoInteractions(provider);
     }
 
+    /**
+     * 验证必须数据库但数据源缺失时就绪失败，不能误报可接流量。
+     */
     @Test
     void readinessFailsClosedWhenDatasourceIsUnavailable() {
         ObjectProvider<DataSource> provider = mock();
@@ -101,6 +110,9 @@ class ServiceHealthControllerTest {
                 });
     }
 
+    /**
+     * 验证数据源提供器异常被统一映射为服务未就绪错误。
+     */
     @Test
     void readinessMapsDatasourceProviderFailureToServiceNotReady() {
         ObjectProvider<DataSource> provider = mock();
@@ -117,6 +129,9 @@ class ServiceHealthControllerTest {
                 });
     }
 
+    /**
+     * 验证就绪成功同时要求数据库可访问和迁移状态完整成功。
+     */
     @Test
     void readinessRequiresHealthyDatabaseAndSuccessfulMigration() throws Exception {
         ObjectProvider<DataSource> provider = mock();
@@ -155,6 +170,9 @@ class ServiceHealthControllerTest {
                 "SELECT 1 FROM flyway_schema_history WHERE success = 1 LIMIT 1");
     }
 
+    /**
+     * 验证数据库失败导致就绪拒绝，同时对外响应不泄露连接或 SQL 错误细节。
+     */
     @Test
     void readinessFailsClosedWithoutLeakingDatabaseFailureDetails() throws Exception {
         ObjectProvider<DataSource> provider = mock();
@@ -175,6 +193,9 @@ class ServiceHealthControllerTest {
                 });
     }
 
+    /**
+     * 验证关闭迁移检查后不会访问迁移历史表，避免引入未要求的数据库依赖。
+     */
     @Test
     void readinessDoesNotQueryMigrationTableWhenMigrationCheckIsDisabled() throws Exception {
         ObjectProvider<DataSource> provider = mock();
@@ -201,6 +222,9 @@ class ServiceHealthControllerTest {
                 "SELECT 1 FROM flyway_schema_history WHERE success = 1 LIMIT 1");
     }
 
+    /**
+     * 构造带可选关联标识属性的模拟 Servlet 请求，供探针响应头与信封一致性测试使用。
+     */
     private static HttpServletRequest request(UUID correlation) {
         MockHttpServletRequest request = new MockHttpServletRequest();
         if (correlation != null) {

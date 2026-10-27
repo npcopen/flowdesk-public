@@ -14,6 +14,9 @@ public final class TenantContextHolder {
 
     private static final ThreadLocal<TenantContext> CONTEXT = new ThreadLocal<>();
 
+    /**
+     * 禁止直接实例化该工具类型，统一通过静态方法或工厂入口使用。
+     */
     private TenantContextHolder() {
     }
 

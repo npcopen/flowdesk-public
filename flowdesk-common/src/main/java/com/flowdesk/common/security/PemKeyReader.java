@@ -13,11 +13,8 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
- * Minimal PEM reader for the RSA key formats used by FlowDesk.
- *
- * <p>Supports PKCS#8 {@code PRIVATE KEY}, traditional PKCS#1 {@code RSA PRIVATE KEY},
- * X.509 {@code PUBLIC KEY} and PKCS#1 {@code RSA PUBLIC KEY}. The key material is
- * parsed from PEM text; private key text is never logged.</p>
+ * 读取 FlowDesk 使用的 RSA PEM 密钥。
+ * 支持 PKCS#8 私钥、PKCS#1 RSA 私钥、X.509 公钥和 PKCS#1 RSA 公钥；不记录私钥文本。
  */
 public final class PemKeyReader {
 
@@ -26,9 +23,15 @@ public final class PemKeyReader {
 
     private static final byte[] RSA_OID = {0x2A, (byte) 0x86, 0x48, (byte) 0x86, (byte) 0xF7, 0x0D, 0x01, 0x01, 0x01};
 
+    /**
+     * 禁止直接实例化该工具类型，统一通过静态方法或工厂入口使用。
+     */
     private PemKeyReader() {
     }
 
+    /**
+     * 识别 PKCS#8 或传统 PKCS#1 RSA 私钥，必要时补充 PKCS#8 包装后交由 RSA KeyFactory 解析。
+     */
     public static PrivateKey readPrivateKey(String pem) {
         byte[] der = decodeDer(pem);
         String blockLabel = label(pem);
@@ -45,6 +48,9 @@ public final class PemKeyReader {
         }
     }
 
+    /**
+     * 识别 X.509 或传统 PKCS#1 RSA 公钥，必要时补充 SubjectPublicKeyInfo 结构后解析。
+     */
     public static PublicKey readPublicKey(String pem) {
         byte[] der = decodeDer(pem);
         String blockLabel = label(pem);
@@ -61,6 +67,9 @@ public final class PemKeyReader {
         }
     }
 
+    /**
+     * 提取 PEM 边界标签并规范化为大写，未找到合法块时拒绝输入。
+     */
     public static String label(String pem) {
         Matcher matcher = PEM_BLOCK.matcher(pem);
         if (!matcher.find()) {
@@ -69,6 +78,9 @@ public final class PemKeyReader {
         return matcher.group(1).toUpperCase(Locale.ROOT);
     }
 
+    /**
+     * 提取 PEM 的 Base64 内容、去除空白并解码为 DER 字节。
+     */
     private static byte[] decodeDer(String pem) {
         Matcher matcher = PEM_BLOCK.matcher(pem);
         if (!matcher.find()) {
@@ -78,6 +90,9 @@ public final class PemKeyReader {
         return Base64.getMimeDecoder().decode(base64);
     }
 
+    /**
+     * 为 PKCS#1 私钥添加版本和 RSA 算法标识，形成标准 PKCS#8 PrivateKeyInfo。
+     */
     private static byte[] wrapRsaPrivateKeyInPkcs8(byte[] rsaPrivateKeyDer) {
         return derSequence(
                 derInteger(BigInteger.ZERO),
@@ -85,33 +100,51 @@ public final class PemKeyReader {
                 derOctetString(rsaPrivateKeyDer));
     }
 
+    /**
+     * 为 PKCS#1 公钥补充 RSA 算法标识和 BIT STRING，形成 X.509 公钥结构。
+     */
     private static byte[] wrapRsaPublicKeyInSubjectPublicKeyInfo(byte[] rsaPublicKeyDer) {
         return derSequence(
                 derSequence(derOid(RSA_OID), derNull()),
                 derBitString(rsaPublicKeyDer));
     }
 
-    /** Deterministic definite-length DER writer; no marker scanning or length patching. */
+    /** 按确定长度编码 DER，不依赖标记扫描或事后修补长度。 */
     private static byte[] derSequence(byte[]... contents) {
         return der((byte) 0x30, concat(contents));
     }
 
+    /**
+     * 用 ASN.1 INTEGER 标签包装整数的有符号字节表示。
+     */
     private static byte[] derInteger(BigInteger value) {
         return der((byte) 0x02, value.toByteArray());
     }
 
+    /**
+     * 用 OBJECT IDENTIFIER 标签包装已经编码的算法 OID。
+     */
     private static byte[] derOid(byte[] oid) {
         return der((byte) 0x06, oid);
     }
 
+    /**
+     * 生成 RSA 算法参数所需的 ASN.1 NULL 编码。
+     */
     private static byte[] derNull() {
         return new byte[]{0x05, 0x00};
     }
 
+    /**
+     * 将 DER 字节包装为 OCTET STRING，供 PKCS#8 私钥结构使用。
+     */
     private static byte[] derOctetString(byte[] bytes) {
         return der((byte) 0x04, bytes);
     }
 
+    /**
+     * 在公钥内容前写入零个未使用位，再生成 BIT STRING 编码。
+     */
     private static byte[] derBitString(byte[] bytes) {
         byte[] content = new byte[bytes.length + 1];
         content[0] = 0x00; // zero unused bits
@@ -119,6 +152,9 @@ public final class PemKeyReader {
         return der((byte) 0x03, content);
     }
 
+    /**
+     * 依次写入 ASN.1 标签、DER 长度与内容，构造单个元素。
+     */
     private static byte[] der(byte tag, byte[] content) {
         ByteArrayOutputStream out = new ByteArrayOutputStream(content.length + 8);
         out.write(tag);
@@ -127,6 +163,9 @@ public final class PemKeyReader {
         return out.toByteArray();
     }
 
+    /**
+     * 按 DER 规则写入短长度或长长度，支持超过 127 字节的密钥内容。
+     */
     private static void writeDerLength(ByteArrayOutputStream out, int length) {
         if (length < 0x80) {
             out.write(length);
@@ -144,6 +183,9 @@ public final class PemKeyReader {
         }
     }
 
+    /**
+     * 按顺序拼接子元素字节数组，供 ASN.1 SEQUENCE 构造使用。
+     */
     private static byte[] concat(byte[]... arrays) {
         int total = 0;
         for (byte[] array : arrays) {

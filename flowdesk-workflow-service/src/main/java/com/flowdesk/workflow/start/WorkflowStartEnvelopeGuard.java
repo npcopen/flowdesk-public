@@ -20,8 +20,7 @@ import java.util.UUID;
 import java.util.regex.Pattern;
 
 /**
- * Complete deterministic transport guard. It must run before a Broker
- * {@code TenantContext} is constructed and never reads tenant-owned state.
+ * 确定性的传输契约校验器；必须在建立 Broker 租户上下文前执行，且不读取租户业务数据。
  */
 public final class WorkflowStartEnvelopeGuard {
 
@@ -71,20 +70,32 @@ public final class WorkflowStartEnvelopeGuard {
             "serviceRiskLevel",
             "requesterUserId");
 
+    /**
+     * 核验冻结 Topic、身份、保留属性、载荷和摘要，通过全部约束后才返回可信启动消息。
+     */
     public AcceptedWorkflowStart validate(WorkflowStartTransportMessage message) {
         return validateMain(message);
     }
 
+    /**
+     * 按主队列绑定校验信封、载荷和摘要，全部通过后才返回可信消息。
+     */
     public AcceptedWorkflowStart validateMain(WorkflowStartTransportMessage message) {
         return validate(message, WorkflowStartContract.TOPIC,
                 WorkflowStartContract.CONSUMER_GROUP);
     }
 
+    /**
+     * 按死信绑定核对原始消息，防止错误队列或不完整信封进入恢复。
+     */
     public AcceptedWorkflowStart validateDlq(WorkflowStartTransportMessage message) {
         return validate(message, WorkflowStartContract.DLQ_TOPIC,
                 WorkflowStartContract.DLQ_ACCEPTOR_GROUP);
     }
 
+    /**
+     * 核验冻结 Topic、身份、保留属性、载荷和摘要，通过全部约束后才返回可信启动消息。
+     */
     private AcceptedWorkflowStart validate(WorkflowStartTransportMessage message,
                                            String expectedTopic,
                                            String expectedConsumerGroup) {
@@ -94,6 +105,7 @@ public final class WorkflowStartEnvelopeGuard {
                 "CONSUMER_DIRECTION_MISMATCH");
         require(message.tags() == null, "TAG_FORBIDDEN");
 
+        // 固定的 fd_ 属性采用白名单，缺失必填项或夹带未知字段都视为确定性契约错误。
         Map<String, String> properties = message.userProperties();
         for (String required : REQUIRED_ENVELOPE) {
             require(properties.containsKey(required),
@@ -142,6 +154,7 @@ public final class WorkflowStartEnvelopeGuard {
         String bodyHashText = properties.get("fd_body_sha256");
         require(bodyHashText != null && SHA256_HEX.matcher(bodyHashText).matches(),
                 "BODY_HASH_FORMAT_INVALID");
+        // 先校验原始消息字节的摘要，再解析 JSON，避免重序列化掩盖内容变化。
         byte[] actualBodyHash = sha256(body);
         require(MessageDigest.isEqual(HexFormat.of().parseHex(bodyHashText), actualBodyHash),
                 "BODY_HASH_MISMATCH");
@@ -167,6 +180,7 @@ public final class WorkflowStartEnvelopeGuard {
         String businessIntentText = properties.get("fd_business_intent_key");
         require(businessIntentText != null && SHA256_HEX.matcher(businessIntentText).matches(),
                 "BUSINESS_INTENT_KEY_FORMAT_INVALID");
+        // 业务意图必须与租户和工单派生值一致，不能仅相信发送方声明的去重键。
         byte[] businessIntentKey = HexFormat.of().parseHex(businessIntentText);
         require(MessageDigest.isEqual(
                         businessIntentKey,
@@ -194,6 +208,9 @@ public final class WorkflowStartEnvelopeGuard {
                 actualBodyHash);
     }
 
+    /**
+     * 严格解码 UTF-8 JSON 并检查结构，避免自动探测编码放过非法消息。
+     */
     private static JsonNode parseUtf8Json(byte[] body) {
         try {
             String utf8 = StandardCharsets.UTF_8.newDecoder()
@@ -215,24 +232,36 @@ public final class WorkflowStartEnvelopeGuard {
         }
     }
 
+    /**
+     * 核对字段与冻结值一致，阻止不兼容消息继续处理。
+     */
     private static void requireFixed(Map<String, String> properties,
                                      String name,
                                      String expected) {
         require(expected.equals(properties.get(name)), "ENVELOPE_VALUE_INVALID:" + name);
     }
 
+    /**
+     * 读取并核验契约必填文本，缺失或格式错误转换为确定性契约异常。
+     */
     private static void requireText(JsonNode payload, String field, String expected) {
         JsonNode value = payload.get(field);
         require(value.isString(), "PAYLOAD_TYPE_INVALID:" + field);
         require(expected.equals(value.stringValue()), "PAYLOAD_VALUE_INVALID:" + field);
     }
 
+    /**
+     * 解析载荷 UUID 并检查规范格式，非法值转换为确定性契约错误。
+     */
     private static UUID payloadUuid(JsonNode payload, String field) {
         JsonNode value = payload.get(field);
         require(value.isString(), "PAYLOAD_TYPE_INVALID:" + field);
         return canonicalUuid(value.stringValue(), field);
     }
 
+    /**
+     * 解析并核验 UUID 的规范文本，避免不同表示干扰消息身份校验。
+     */
     private static UUID canonicalUuid(String value, String field) {
         require(value != null && CANONICAL_UUID.matcher(value).matches(),
                 "UUID_FORMAT_INVALID:" + field);
@@ -246,6 +275,9 @@ public final class WorkflowStartEnvelopeGuard {
         }
     }
 
+    /**
+     * 按固定命名域和组成部分派生业务键，避免不同用途间的键值碰撞。
+     */
     private static byte[] derivedKey(String namespace, UUID tenantId, UUID ticketId) {
         ByteArrayOutputStream framed = new ByteArrayOutputStream();
         appendFramed(framed, namespace.getBytes(StandardCharsets.UTF_8));
@@ -254,11 +286,17 @@ public final class WorkflowStartEnvelopeGuard {
         return sha256(framed.toByteArray());
     }
 
+    /**
+     * 追加带长度边界的字段，使摘要输入能明确表示每个业务组成部分。
+     */
     private static void appendFramed(ByteArrayOutputStream target, byte[] field) {
         target.writeBytes(ByteBuffer.allocate(Integer.BYTES).putInt(field.length).array());
         target.writeBytes(field);
     }
 
+    /**
+     * 将 UUID 编码为高位在前的十六字节值，供存储及摘要计算使用。
+     */
     private static byte[] uuidBytes(UUID uuid) {
         return ByteBuffer.allocate(16)
                 .putLong(uuid.getMostSignificantBits())
@@ -266,6 +304,9 @@ public final class WorkflowStartEnvelopeGuard {
                 .array();
     }
 
+    /**
+     * 计算输入字节的 SHA-256 摘要，用于内容一致性核对及稳定业务键派生。
+     */
     private static byte[] sha256(byte[] value) {
         try {
             return MessageDigest.getInstance("SHA-256").digest(value);
@@ -275,16 +316,25 @@ public final class WorkflowStartEnvelopeGuard {
         }
     }
 
+    /**
+     * 检查消息契约布尔条件，失败时以指定稳定错误码抛出契约异常。
+     */
     private static void require(boolean condition, String code) {
         if (!condition) {
             throw violation(code);
         }
     }
 
+    /**
+     * 构造带稳定错误码的契约异常，供入口统一选择传输处置。
+     */
     private static WorkflowStartContractViolation violation(String code) {
         return new WorkflowStartContractViolation(code);
     }
 
+    /**
+     * 构造带稳定错误码的契约异常，供入口统一选择传输处置。
+     */
     private static WorkflowStartContractViolation violation(String code, Throwable cause) {
         return new WorkflowStartContractViolation(code, cause);
     }

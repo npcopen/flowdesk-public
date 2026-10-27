@@ -10,12 +10,7 @@ import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
 
 /**
- * Rejects NUL and non-necessary ISO control characters in validated strings.
- *
- * <p>API-SPEC §2.8 requires every accepted string to reject NUL and control characters
- * that have no protocol necessity. Horizontal tab, LF and CR remain allowed so text
- * values such as ticket descriptions are not silently rewritten; NUL, C1 controls and
- * all other C0 controls are rejected before any business use.</p>
+ * 拒绝 NUL 及非必要的 ISO 控制字符；保留制表符、换行和回车，以支持工单描述等多行文本。
  */
 @Documented
 @Constraint(validatedBy = NoControlCharactersValidator.class)
@@ -24,9 +19,18 @@ import java.lang.annotation.Target;
 @Retention(RetentionPolicy.RUNTIME)
 public @interface NoControlCharacters {
 
+    /**
+     * 定义校验失败的默认提示，供 Bean Validation 输出字段错误。
+     */
     String message() default "字符串包含不允许的控制字符。";
 
+    /**
+     * 指定此约束参与的校验分组，默认遵循标准分组规则。
+     */
     Class<?>[] groups() default {};
 
+    /**
+     * 声明附加校验元信息类型，遵循 Bean Validation 注解契约。
+     */
     Class<? extends Payload>[] payload() default {};
 }

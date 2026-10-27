@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+  工作流通知意图的本地发件箱写入接口。
+  在调用方业务事务内保存通知正文、摘要及幂等身份，为异步通知投递保留完整消息事实。
+-->
+<mapper namespace="com.flowdesk.workflow.notification.WorkflowNotificationIntentMapper">
+  <!--
+    写入工作流任务对应的通知请求消息。
+    保存 publicationKey、businessIntentKey、契约版本、正文和 SHA-256 摘要，初始化为可立即领取的 PENDING 记录。
+  -->
+  <insert id="insertNotificationOutbox">
+    INSERT INTO outbox_event
+      (tenant_id, outbox_id, message_id, publication_key, business_intent_key,
+       aggregate_type, aggregate_id, contract_ref, contract_version, body_bytes,
+       body_sha256, correlation_id, causation_id, status, attempt_count,
+       next_attempt_at, lock_version, created_at, created_by_type, created_by_id,
+       updated_at, updated_by_type, updated_by_id)
+    VALUES (#{tenantId}, #{outboxId}, #{messageId}, #{publicationKey}, #{businessIntentKey},
+            'NOTIFICATION_REQUEST', #{taskId}, 'flowdesk.workflow.notification-requested.v1',
+            #{contractVersion}, #{bodyBytes}, #{bodySha256}, #{correlationId}, #{causationId},
+            'PENDING', 0, #{now}, 0, #{now}, 'SERVICE', NULL, #{now}, 'SERVICE', NULL)
+  </insert>
+</mapper>

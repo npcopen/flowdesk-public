@@ -11,12 +11,18 @@ import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+/**
+ * 工单模块回归测试，覆盖该组件的正常流程、边界条件与关键一致性约束。
+ */
 class WorkflowReverseV1ConsumerContractFixtureTest {
     private static final String ESTABLISHED =
             "contracts/flowdesk-workflow-instance-established-v1-wire.properties";
     private static final String FINALIZED =
             "contracts/flowdesk-workflow-approval-finalized-v1-wire.properties";
 
+    /**
+     * 验证独立工单守卫接受精确的实例建立契约夹具。
+     */
     @Test
     void independentTicketGuardAcceptsTheExactInstanceEstablishedFixture() throws Exception {
         AcceptedWorkflowReverse accepted = validate(ESTABLISHED,
@@ -27,6 +33,9 @@ class WorkflowReverseV1ConsumerContractFixtureTest {
         assertThat(accepted.outcome()).isNull();
     }
 
+    /**
+     * 验证独立工单守卫接受精确的审批终态契约夹具。
+     */
     @Test
     void independentTicketGuardAcceptsTheExactApprovalFinalizedFixture() throws Exception {
         AcceptedWorkflowReverse accepted = validate(FINALIZED,
@@ -37,6 +46,9 @@ class WorkflowReverseV1ConsumerContractFixtureTest {
         assertThat(accepted.outcome()).isEqualTo("PASSED");
     }
 
+    /**
+     * 验证两个绑定各自固定主消费与接收器重试预算。
+     */
     @Test
     void bothTicketBindingsFreezeTheirOwnMainAndAcceptorRetryBudgets() {
         assertThat(WorkflowReverseContract.MAX_RECONSUME_TIMES).isEqualTo(5);
@@ -48,6 +60,9 @@ class WorkflowReverseV1ConsumerContractFixtureTest {
                 .isEqualTo("%DLQ%flowdesk_workflow_approval_finalized_v1_ticket_cg");
     }
 
+    /**
+     * 核验工作流反向结果输入结构、身份与契约字段，拒绝不完整或不兼容内容。
+     */
     private static AcceptedWorkflowReverse validate(String path,
                                                       WorkflowReverseContract.Binding binding)
             throws Exception {
@@ -70,6 +85,9 @@ class WorkflowReverseV1ConsumerContractFixtureTest {
         return accepted;
     }
 
+    /**
+     * 读取冻结契约资源，供独立消费守卫验证消息兼容性。
+     */
     private static Properties load(String path) throws Exception {
         Properties value = new Properties();
         try (InputStream input = WorkflowReverseV1ConsumerContractFixtureTest.class
@@ -79,6 +97,9 @@ class WorkflowReverseV1ConsumerContractFixtureTest {
         }
         return value;
     }
+    /**
+     * 读取测试夹具必需字段，缺失时立即失败以避免不完整测试输入。
+     */
     private static String required(Properties fixture, String name) {
         String value = fixture.getProperty(name);
         if (value == null || value.isBlank()) throw new IllegalStateException(name);

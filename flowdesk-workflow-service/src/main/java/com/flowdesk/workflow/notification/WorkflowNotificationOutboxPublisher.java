@@ -1,13 +1,14 @@
 package com.flowdesk.workflow.notification;
 
+import com.flowdesk.workflow.model.WorkflowNotificationOutboxModels;
+import com.flowdesk.workflow.service.WorkflowNotificationOutboxService;
+
 import com.flowdesk.common.notification.NotificationEventContract;
 import com.flowdesk.common.tenant.ActorRef;
 import com.flowdesk.common.tenant.TenantContext;
 import com.flowdesk.common.tenant.TenantContextHolder;
 import com.flowdesk.common.tenant.TenantContextScope;
-import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionSynchronizationManager;
-import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.Clock;
 import java.time.Duration;
@@ -18,34 +19,44 @@ import java.util.Objects;
 import java.util.Optional;
 import java.util.UUID;
 
-/** Bounded at-least-once publisher for Workflow Notification requests. */
+/**
+ * 以有限批次和重试次数发布审批通知；采用至少一次投递语义，接收方需按业务身份去重。
+ */
 public final class WorkflowNotificationOutboxPublisher {
     static final String RESULT_UNKNOWN = "BROKER_RESULT_UNKNOWN";
     static final String INVALID_CONTRACT = "OUTBOX_CONTRACT_INVALID";
-    private final WorkflowNotificationOutboxRepository repository;
+    private final WorkflowNotificationOutboxService service;
     private final WorkflowNotificationOutboxTransport transport;
-    private final TransactionTemplate transactions;
     private final Clock clock;
 
-    public WorkflowNotificationOutboxPublisher(WorkflowNotificationOutboxRepository repository,
+    /**
+     * 初始化组件依赖与运行参数，使后续调用使用一致的协作对象。
+     */
+    public WorkflowNotificationOutboxPublisher(WorkflowNotificationOutboxService service,
                                                WorkflowNotificationOutboxTransport transport,
-                                               PlatformTransactionManager manager, Clock clock) {
-        this.repository = Objects.requireNonNull(repository); this.transport = Objects.requireNonNull(transport);
-        this.transactions = new TransactionTemplate(Objects.requireNonNull(manager)); this.clock = Objects.requireNonNull(clock);
+                                               Clock clock) {
+        this.service = Objects.requireNonNull(service); this.transport = Objects.requireNonNull(transport);
+        this.clock = Objects.requireNonNull(clock);
     }
-    public WorkflowNotificationOutboxPublisher(WorkflowNotificationOutboxRepository repository,
-                                               WorkflowNotificationOutboxTransport transport,
-                                               PlatformTransactionManager manager) {
-        this(repository, transport, manager, Clock.systemUTC());
+    /**
+     * 初始化组件依赖与运行参数，使后续调用使用一致的协作对象。
+     */
+    public WorkflowNotificationOutboxPublisher(WorkflowNotificationOutboxService service,
+                                               WorkflowNotificationOutboxTransport transport) {
+        this(service, transport, Clock.systemUTC());
     }
 
+    /**
+     * 执行一轮有界投递，逐条领取、发送和结算，返回不可变的本轮统计。
+     */
     public PublishResult publishOnce() {
+        // 扫描必须在外层事务和租户上下文之外开始，每条记录随后恢复自己的持久化租户身份。
         if (TransactionSynchronizationManager.isActualTransactionActive()
                 || TenantContextHolder.currentOrNull() != null) {
             throw new IllegalStateException("Workflow Notification publisher must start outside context/transaction");
         }
         Instant now = instant();
-        List<WorkflowNotificationOutboxRepository.Candidate> candidates = repository.findCandidates(
+        List<WorkflowNotificationOutboxModels.Candidate> candidates = service.findCandidates(
                 now, now.minus(NotificationEventContract.OUTBOX_CLAIM_LEASE),
                 NotificationEventContract.OUTBOX_MAX_CLAIMS);
         Mutable result = new Mutable(candidates.size());
@@ -62,12 +73,15 @@ public final class WorkflowNotificationOutboxPublisher {
         return result.freeze();
     }
 
-    private void send(WorkflowNotificationOutboxRepository.Candidate candidate, Mutable result) {
+    /**
+     * 领取通知消息后校验冻结信封并发送，所有结算携带当前租约身份以隔离旧处理者。
+     */
+    private void send(WorkflowNotificationOutboxModels.Candidate candidate, Mutable result) {
         Instant claimedAt = instant(); String token = UUID.randomUUID().toString();
-        Optional<WorkflowNotificationOutboxRepository.Claimed> claim = transactions.execute(tx ->
-                repository.claimForSend(candidate, token, claimedAt,
-                        claimedAt.minus(NotificationEventContract.OUTBOX_CLAIM_LEASE)));
+        Optional<WorkflowNotificationOutboxModels.Claimed> claim = service.claimForSend(candidate, token, claimedAt,
+                        claimedAt.minus(NotificationEventContract.OUTBOX_CLAIM_LEASE));
         if (claim == null || claim.isEmpty()) { result.lostClaim++; return; }
+        // 短事务完成带租约的认领后才进行网络发送，避免持有数据库事务等待 Broker。
         result.claimedForSend++;
         var row = claim.get(); WorkflowNotificationOutboxSendResult outcome;
         try {
@@ -76,10 +90,10 @@ public final class WorkflowNotificationOutboxPublisher {
         }
         catch (WorkflowNotificationOutboxEnvelopeFactory.InvalidContract invalid) {
             WorkflowNotificationOutboxSendResult failed = WorkflowNotificationOutboxSendResult.notConfirmed(INVALID_CONTRACT, null);
-            Boolean recovered = transactions.execute(tx -> repository.rejectContract(row, instant(),
+            Boolean recovered = service.rejectContract(row, instant(),
                     instant().minus(NotificationEventContract.OUTBOX_CLAIM_LEASE), failed.errorCode(),
                     "Persisted Notification contract failed validation",
-                    WorkflowNotificationOutboxRepository.recoveryId(row)));
+                    WorkflowNotificationOutboxModels.recoveryId(row));
             if (Boolean.TRUE.equals(recovered)) result.recovered++; else result.lostCompletion++;
             return;
         }
@@ -88,51 +102,72 @@ public final class WorkflowNotificationOutboxPublisher {
         }
         catch (Exception unknown) { outcome = WorkflowNotificationOutboxSendResult.notConfirmed(RESULT_UNKNOWN, null); }
         Instant completed = instant(); Instant cutoff = completed.minus(NotificationEventContract.OUTBOX_CLAIM_LEASE);
+        // 只有 Broker 明确确认才标记已发布；超时和未知结果仍可能已送达，重试依赖接收方幂等。
         if (outcome.status() == WorkflowNotificationOutboxSendResult.Status.SEND_OK) {
-            Boolean done = transactions.execute(tx -> repository.markPublished(row, completed, cutoff));
+            Boolean done = service.markPublished(row, completed, cutoff);
             if (Boolean.TRUE.equals(done)) result.published++; else result.lostCompletion++;
         } else if (row.attemptCount() < NotificationEventContract.OUTBOX_MAX_ATTEMPTS) {
             Duration backoff = NotificationEventContract.FAILURE_BACKOFFS.get(row.attemptCount() - 1);
             WorkflowNotificationOutboxSendResult failed = outcome;
-            Boolean done = transactions.execute(tx -> repository.markPending(row, completed, cutoff,
-                    completed.plus(backoff), failed.errorCode()));
+            Boolean done = service.markPending(row, completed, cutoff,
+                    completed.plus(backoff), failed.errorCode());
             if (Boolean.TRUE.equals(done)) result.rescheduled++; else result.lostCompletion++;
         } else {
             WorkflowNotificationOutboxSendResult failed = outcome;
-            Boolean done = transactions.execute(tx -> repository.moveToRecovery(row, completed, cutoff,
+            Boolean done = service.moveToRecovery(row, completed, cutoff,
                     failed.errorCode(), sanitize(failed.safeErrorSummary()),
-                    WorkflowNotificationOutboxRepository.recoveryId(row)));
+                    WorkflowNotificationOutboxModels.recoveryId(row));
             if (Boolean.TRUE.equals(done)) result.recovered++; else result.lostCompletion++;
         }
     }
 
-    private void recover(WorkflowNotificationOutboxRepository.Candidate candidate, Mutable result) {
+    /**
+     * 领取耗尽发送次数的通知消息处理权，再按当前租约提交恢复状态。
+     */
+    private void recover(WorkflowNotificationOutboxModels.Candidate candidate, Mutable result) {
         Instant claimedAt = instant(); String token = UUID.randomUUID().toString();
-        Optional<WorkflowNotificationOutboxRepository.Claimed> claim = transactions.execute(tx ->
-                repository.claimForRecovery(candidate, token, claimedAt,
-                        claimedAt.minus(NotificationEventContract.OUTBOX_CLAIM_LEASE)));
+        Optional<WorkflowNotificationOutboxModels.Claimed> claim = service.claimForRecovery(candidate, token, claimedAt,
+                        claimedAt.minus(NotificationEventContract.OUTBOX_CLAIM_LEASE));
         if (claim == null || claim.isEmpty()) { result.lostClaim++; return; }
         result.claimedForRecovery++;
         Instant completed = instant();
-        Boolean done = transactions.execute(tx -> repository.moveToRecovery(claim.get(), completed,
+        Boolean done = service.moveToRecovery(claim.get(), completed,
                 completed.minus(NotificationEventContract.OUTBOX_CLAIM_LEASE), RESULT_UNKNOWN, null,
-                WorkflowNotificationOutboxRepository.recoveryId(claim.get())));
+                WorkflowNotificationOutboxModels.recoveryId(claim.get()));
         if (Boolean.TRUE.equals(done)) result.recovered++; else result.lostCompletion++;
     }
 
+    /**
+     * 读取发布器注入时钟并截断为微秒，用于租约和消息结算时间比较。
+     */
     private Instant instant() { return clock.instant().truncatedTo(ChronoUnit.MICROS); }
+    /**
+     * 清理并缩减错误摘要，避免把无界或超长异常文本写入恢复记录。
+     */
     private static String sanitize(String value) {
         if (value == null) return null; String clean = value.replaceAll("[\\p{Cntrl}\\s]+", " ").trim();
         return clean.isEmpty() ? null : clean.substring(0, Math.min(1000, clean.length()));
     }
 
+    /**
+     * 工作流处理结果封装，组合业务快照及分页或幂等元信息供调用入口使用。
+     */
     public record PublishResult(int scanned, int claimedForSend, int claimedForRecovery,
                                 int published, int rescheduled, int recovered,
                                 int lostClaim, int lostCompletion) { }
+    /**
+     * 单轮发布的内部可变计数器，结束后冻结为不可变结果供调用方读取。
+     */
     private static final class Mutable {
         private final int scanned; private int claimedForSend, claimedForRecovery, published,
                 rescheduled, recovered, lostClaim, lostCompletion;
+        /**
+         * 初始化组件依赖与运行参数，使后续调用使用一致的协作对象。
+         */
         Mutable(int scanned) { this.scanned = scanned; }
+        /**
+         * 将本轮可变计数转为不可变结果，避免后续变更影响调用方统计。
+         */
         PublishResult freeze() { return new PublishResult(scanned, claimedForSend, claimedForRecovery,
                 published, rescheduled, recovered, lostClaim, lostCompletion); }
     }

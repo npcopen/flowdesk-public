@@ -1,7 +1,7 @@
 package com.flowdesk.common.authz;
 
 /**
- * The five frozen P0 persona roles (API-SPEC §3.2).
+ * 系统支持的五种固定业务角色；角色决定可授予权限的上限。
  */
 public enum RoleCode {
     REQUESTER,

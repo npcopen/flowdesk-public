@@ -1,6 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 
+# 仅在启用 ACL 时验证管理凭据，并以严格文件权限生成 mqadmin 工具配置，不在日志中输出密钥。
 configure_admin_credentials() {
   [ "${FLOWDESK_ROCKETMQ_ACL_ENABLED:-false}" = "true" ] || return 0
   : "${FLOWDESK_ROCKETMQ_ADMIN_ACCESS_KEY:?set FLOWDESK_ROCKETMQ_ADMIN_ACCESS_KEY}"
@@ -61,6 +62,7 @@ m8_workflow_notification_acceptor_group="flowdesk_workflow_notification_requeste
 message_key="flowdesk-container-smoke-key"
 message_body='{"eventType":"flowdesk.infrastructure.container-smoke","eventVersion":1,"payload":{"source":"broker-network"}}'
 
+# 输出当前脚本的稳定失败标记及诊断并退出，阻止后续初始化或验证继续执行。
 fail() {
   echo "FLOWDESK_ROCKETMQ_VERIFY_FAILED: $*" >&2
   exit 1
@@ -68,6 +70,7 @@ fail() {
 
 configure_admin_credentials
 
+# 在 Broker 网络命名空间尝试建立指定 TCP 端口连接，不可达时终止基础设施验证。
 assert_tcp_port() {
   port="$1"
   if ! bash -c "exec 3<>/dev/tcp/127.0.0.1/$port; exec 3>&-; exec 3<&-"; then
@@ -75,6 +78,7 @@ assert_tcp_port() {
   fi
 }
 
+# 按参数创建主题读写队列及无序消费组，并设置最大重试次数，为探针或业务绑定准备拓扑。
 initialize_topic_and_group() {
   topic="$1"
   group="$2"
@@ -89,6 +93,7 @@ initialize_topic_and_group() {
     -s true -o false -r "$retry_max_times" >/dev/null
 }
 
+# 创建指定无序消费组并设置重试次数，供业务消费或死信接收器使用。
 initialize_subscription_group() {
   group="$1"
   retry_max_times="$2"
@@ -97,6 +102,7 @@ initialize_subscription_group() {
     -s true -o false -r "$retry_max_times" >/dev/null
 }
 
+# 创建单读单写队列的内部主题，供消费组重试与死信投递使用。
 initialize_internal_topic() {
   topic="$1"
   sh mqadmin updateTopic \
@@ -104,6 +110,7 @@ initialize_internal_topic() {
     -r 1 -w 1 >/dev/null
 }
 
+# 按固定契约创建四读四写业务主题、消费组和死信接收器，并补齐两组重试及死信主题。
 initialize_frozen_binding() {
   frozen_topic="$1"
   frozen_group="$2"
@@ -116,6 +123,7 @@ initialize_frozen_binding() {
   initialize_internal_topic "%DLQ%$frozen_acceptor"
 }
 
+# 读回消费组配置，要求组存在、重试次数为五且采用无序消费。
 assert_subscription_group() {
   group="$1"
   group_config="$(sh mqadmin getConsumerConfig \
@@ -129,6 +137,7 @@ assert_subscription_group() {
     fail "Consumer Group $group must remain unordered."
 }
 
+# 检查业务及内部主题完整性、四读四写路由以及两类消费组配置，任一偏差都拒绝通过。
 assert_frozen_binding() {
   frozen_topic="$1"
   frozen_group="$2"

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+/** 将业务状态映射为统一的文字和颜色，兼容未知或缺失状态。 */
 import { computed } from "vue";
 import { label } from "@/lib/format";
 

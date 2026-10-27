@@ -19,7 +19,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Pattern;
 
-/** Strict pre-tenant transport and payload guard for both reverse events. */
+/** 在信任租户字段前，严格校验两类流程反向事件的传输身份、受保护属性和载荷。 */
 public final class WorkflowReverseEnvelopeGuard {
     private static final ObjectMapper JSON = JsonMapper.builder()
             .enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION).build();
@@ -39,16 +39,25 @@ public final class WorkflowReverseEnvelopeGuard {
             "fd_business_intent_key", "fd_aggregate_type", "fd_aggregate_id",
             "fd_correlation_id", "fd_causation_id", "fd_occurred_at", "fd_body_sha256");
 
+    /**
+     * 校验主消息路由、生产者及信封，生成可进入租户业务处理的验证结果。
+     */
     public AcceptedWorkflowReverse validateMain(WorkflowReverseTransportMessage message) {
         WorkflowReverseContract.Binding binding = bindingForMain(message);
         return validate(message, binding, binding.topic(), binding.consumerGroup());
     }
 
+    /**
+     * 校验死信原始消息契约，供接收器建立可恢复 Inbox。
+     */
     public AcceptedWorkflowReverse validateDlq(WorkflowReverseTransportMessage message) {
         WorkflowReverseContract.Binding binding = bindingForDlq(message);
         return validate(message, binding, binding.dlqTopic(), binding.dlqAcceptorGroup());
     }
 
+    /**
+     * 按主消息主题定位契约绑定，供路由和信封校验。
+     */
     private static WorkflowReverseContract.Binding bindingForMain(
             WorkflowReverseTransportMessage message) {
         require(message != null, "DELIVERY_MISSING");
@@ -61,6 +70,9 @@ public final class WorkflowReverseEnvelopeGuard {
         throw violation("CONSUMER_DIRECTION_MISMATCH");
     }
 
+    /**
+     * 按死信主题定位原始绑定，供恢复接收校验。
+     */
     private static WorkflowReverseContract.Binding bindingForDlq(
             WorkflowReverseTransportMessage message) {
         require(message != null, "DELIVERY_MISSING");
@@ -73,6 +85,9 @@ public final class WorkflowReverseEnvelopeGuard {
         throw violation("CONSUMER_DIRECTION_MISMATCH");
     }
 
+    /**
+     * 核验工作流反向结果输入结构、身份与契约字段，拒绝不完整或不兼容内容。
+     */
     private AcceptedWorkflowReverse validate(WorkflowReverseTransportMessage message,
                                                WorkflowReverseContract.Binding binding,
                                                String topic, String group) {
@@ -183,6 +198,9 @@ public final class WorkflowReverseEnvelopeGuard {
                 correlationId, causationId, envelopeOccurred, body, bodyHash);
     }
 
+    /**
+     * 解析规范输入并核验结构，拒绝无法恢复为契约字段的内容。
+     */
     private static JsonNode parse(byte[] body) {
         try {
             String text = StandardCharsets.UTF_8.newDecoder()
@@ -199,36 +217,60 @@ public final class WorkflowReverseEnvelopeGuard {
         catch (Exception invalid) { throw violation("PAYLOAD_INVALID_JSON", invalid); }
     }
 
+    /**
+     * 验证字段等于冻结契约值，防止不兼容消息进入业务处理。
+     */
     private static void fixed(Map<String, String> values, String field, String expected) {
         require(expected.equals(values.get(field)), "ENVELOPE_VALUE_INVALID:" + field);
     }
+    /**
+     * 读取必需文本字段，拒绝缺失或错误类型穿透消息边界。
+     */
     private static void text(JsonNode node, String field, String expected) {
         require(node.get(field).isString(), "PAYLOAD_TYPE_INVALID:" + field);
         require(expected.equals(node.get(field).stringValue()), "PAYLOAD_VALUE_INVALID:" + field);
     }
+    /**
+     * 读取文本并验证属于冻结枚举集合，拒绝未知业务状态。
+     */
     private static String textOneOf(JsonNode node, String field, String... allowed) {
         require(node.get(field).isString(), "PAYLOAD_TYPE_INVALID:" + field);
         String value = node.get(field).stringValue();
         require(java.util.Arrays.asList(allowed).contains(value), "PAYLOAD_VALUE_INVALID:" + field);
         return value;
     }
+    /**
+     * 解析载荷 UUID 字段，校验格式并拒绝不允许的占位值。
+     */
     private static UUID payloadUuid(JsonNode node, String field) {
         require(node.get(field).isString(), "PAYLOAD_TYPE_INVALID:" + field);
         return uuid(node.get(field).stringValue(), field);
     }
+    /**
+     * 解析载荷十六进制字段并校验长度，供业务键和摘要核验。
+     */
     private static byte[] payloadHex(JsonNode node, String field) {
         require(node.get(field).isString(), "PAYLOAD_TYPE_INVALID:" + field);
         return hex(node.get(field).stringValue(), field);
     }
+    /**
+     * 解析载荷时间字段，验证格式后恢复为 Instant。
+     */
     private static Instant payloadInstant(JsonNode node, String field) {
         require(node.get(field).isString(), "PAYLOAD_TYPE_INVALID:" + field);
         return instant(node.get(field).stringValue(), field);
     }
+    /**
+     * 解析时间文本或转换数据库时间值，遵循空值约定并保留业务精度。
+     */
     private static Instant instant(String value, String field) {
         require(value != null && MICROS.matcher(value).matches(), "UTC_FORMAT_INVALID:" + field);
         try { return Instant.parse(value); }
         catch (RuntimeException invalid) { throw violation("UTC_FORMAT_INVALID:" + field, invalid); }
     }
+    /**
+     * 转换业务标识与规范 UUID 字节表示，遵循既有空值与格式校验约定。
+     */
     private static UUID uuid(String value, String field) {
         require(value != null && UUID_TEXT.matcher(value).matches(), "UUID_FORMAT_INVALID:" + field);
         try {
@@ -238,20 +280,35 @@ public final class WorkflowReverseEnvelopeGuard {
         }
         catch (RuntimeException invalid) { throw violation("UUID_FORMAT_INVALID:" + field, invalid); }
     }
+    /**
+     * 校验或转换十六进制内容，确保业务键与摘要具有预期表示。
+     */
     private static byte[] hex(String value, String field) {
         require(value != null && HEX.matcher(value).matches(), "SHA256_FORMAT_INVALID:" + field);
         return HexFormat.of().parseHex(value);
     }
+    /**
+     * 计算输入内容 SHA-256 摘要，供消息完整性和业务意图核验。
+     */
     private static byte[] sha256(byte[] value) {
         try { return MessageDigest.getInstance("SHA-256").digest(value); }
         catch (NoSuchAlgorithmException impossible) { throw new IllegalStateException(impossible); }
     }
+    /**
+     * 校验当前步骤要求的权限或契约条件，不满足时立即拒绝继续处理。
+     */
     private static void require(boolean condition, String code) {
         if (!condition) throw violation(code);
     }
+    /**
+     * 构造带稳定错误码的契约异常，说明结构或内容不满足约束的原因。
+     */
     private static WorkflowReverseContractViolation violation(String code) {
         return new WorkflowReverseContractViolation(code);
     }
+    /**
+     * 构造带稳定错误码的契约异常，说明结构或内容不满足约束的原因。
+     */
     private static WorkflowReverseContractViolation violation(String code, Throwable cause) {
         return new WorkflowReverseContractViolation(code, cause);
     }

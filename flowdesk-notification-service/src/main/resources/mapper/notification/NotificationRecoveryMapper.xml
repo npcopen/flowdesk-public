@@ -1,0 +1,127 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+  通知收件箱恢复记录持久化接口，维护人工重放、失败重开及终态收敛。
+  查询限定租户，状态流转以预期版本控制并发，消息原文由独立恢复 Mapper 读取。
+-->
+<mapper namespace="com.flowdesk.notification.mapper.NotificationRecoveryMapper">
+  <!-- 将查询列按构造参数映射为 NotificationRecoveryRow，明确字段、Java 类型及构造顺序，供相应查询复用。 -->
+  <resultMap id="recovery" type="com.flowdesk.notification.model.NotificationRecoveryRow">
+    <constructor>
+      <arg name="recoveryId" column="recovery_id" javaType="java.util.UUID"/>
+      <arg name="direction" column="direction" javaType="java.lang.String"/>
+      <arg name="sourceRecordId" column="source_record_id" javaType="java.util.UUID"/>
+      <arg name="businessIntentKey" column="business_intent_key" javaType="[B"/>
+      <arg name="state" column="state" javaType="java.lang.String"/>
+      <arg name="attemptCount" column="attempt_count" javaType="_int"/>
+      <arg name="nextAttemptAt" column="next_attempt_at" javaType="java.time.Instant"/>
+      <arg name="lastErrorCode" column="last_error_code" javaType="java.lang.String"/>
+      <arg name="lastErrorSummary" column="last_error_summary" javaType="java.lang.String"/>
+      <arg name="deadLetteredAt" column="dead_lettered_at" javaType="java.time.Instant"/>
+      <arg name="recoveryRequiredAt" column="recovery_required_at" javaType="java.time.Instant"/>
+      <arg name="replayCount" column="replay_count" javaType="_int"/>
+      <arg name="lastReplayedAt" column="last_replayed_at" javaType="java.time.Instant"/>
+      <arg name="lastReplayedByType" column="last_replayed_by_type" javaType="java.lang.String"/>
+      <arg name="lastReplayedById" column="last_replayed_by_id" javaType="java.util.UUID"/>
+      <arg name="lastReplayReason" column="last_replay_reason" javaType="java.lang.String"/>
+      <arg name="lastReplayCorrelationId" column="last_replay_correlation_id" javaType="java.util.UUID"/>
+      <arg name="resolvedAt" column="resolved_at" javaType="java.time.Instant"/>
+      <arg name="lockVersion" column="lock_version" javaType="_long"/>
+      <arg name="createdAt" column="created_at" javaType="java.time.Instant"/>
+      <arg name="updatedAt" column="updated_at" javaType="java.time.Instant"/>
+    </constructor>
+  </resultMap>
+  <!-- 为收件箱登记 INBOX 方向 OPEN 恢复记录，保留实际投递次数、业务意图及错误摘要，初始化重放次数和版本。 -->
+  <insert id="insertRecovery">
+    <![CDATA[
+INSERT INTO message_recovery
+  (tenant_id,recovery_id,direction,source_record_id,business_intent_key,state,
+   attempt_count,next_attempt_at,last_error_code,last_error_summary,dead_lettered_at,
+   recovery_required_at,replay_count,last_replayed_at,last_replayed_by_type,
+   last_replayed_by_id,last_replay_reason,last_replay_correlation_id,resolved_at,
+   lock_version,created_at,updated_at,updated_by_type,updated_by_id)
+VALUES (#{tenantId},#{recoveryId},'INBOX',#{inboxId},#{businessIntent},'OPEN',#{delivery_attempts},NULL,#{errorCode},#{summary},NULL,#{now},0,NULL,NULL,NULL,NULL,NULL,NULL,0,#{now},#{now},'SERVICE',NULL)
+    ]]>
+  </insert>
+  <!-- 按租户及恢复标识读取详情，lock 为 true 时使用 FOR UPDATE，供同一事务内重放决策。 -->
+  <select id="findRecovery" resultMap="recovery">
+    <![CDATA[
+SELECT recovery_id,direction,source_record_id,business_intent_key,state,attempt_count,next_attempt_at,last_error_code,last_error_summary,dead_lettered_at,recovery_required_at,replay_count,last_replayed_at,last_replayed_by_type,last_replayed_by_id,last_replay_reason,last_replay_correlation_id,resolved_at,lock_version,created_at,updated_at FROM message_recovery WHERE tenant_id=#{tenantId} AND recovery_id=#{recoveryId}
+    ]]>
+    <if test="lock">FOR UPDATE</if>
+  </select>
+  <!-- 以 OPEN 状态及 expectedVersion 领取人工重放，转为 REPLAYING，保存租约、操作人、理由及本次重放关联标识。 -->
+  <update id="claimReplay">
+    <![CDATA[
+UPDATE message_recovery
+SET state='REPLAYING',next_attempt_at=#{leaseUntil},replay_count=replay_count+1,
+    last_replayed_at=#{now},last_replayed_by_type='USER',last_replayed_by_id=#{actorId},
+    last_replay_reason=#{reason},last_replay_correlation_id=#{replayCorrelation},lock_version=lock_version+1,
+    updated_at=#{now},updated_by_type='USER',updated_by_id=#{actorId}
+WHERE tenant_id=#{tenantId} AND recovery_id=#{recoveryId} AND state='OPEN' AND lock_version=#{expectedVersion}
+    ]]>
+  </update>
+  <!-- 在 OPEN 或 REPLAYING 状态且版本匹配时解决记录，记录解决时间并清除下次执行时间。 -->
+  <update id="resolveRecovery">
+    <![CDATA[
+UPDATE message_recovery SET state='RESOLVED',resolved_at=#{now},next_attempt_at=NULL,
+  lock_version=lock_version+1,updated_at=#{now},updated_by_type='SERVICE',updated_by_id=NULL
+WHERE tenant_id=#{tenantId} AND recovery_id=#{recoveryId} AND state IN ('OPEN','REPLAYING')
+  AND lock_version=#{expectedVersion}
+    ]]>
+  </update>
+  <!-- 仅在对应 INBOX 源消息已为 PROCESSED 或 REJECTED，且恢复状态及版本匹配时收敛为 RESOLVED。 -->
+  <update id="resolveIfSourceTerminal">
+    <![CDATA[
+UPDATE message_recovery r
+SET r.state='RESOLVED',r.resolved_at=#{now},r.next_attempt_at=NULL,
+    r.lock_version=r.lock_version+1,r.updated_at=#{now},
+    r.updated_by_type='SERVICE',r.updated_by_id=NULL
+WHERE r.tenant_id=#{tenantId} AND r.recovery_id=#{recoveryId} AND r.direction='INBOX'
+  AND r.state IN ('OPEN','REPLAYING') AND r.lock_version=#{expectedVersion}
+  AND EXISTS (
+    SELECT 1 FROM inbox_message i
+    WHERE i.tenant_id=r.tenant_id AND i.inbox_id=r.source_record_id
+      AND i.direction='INBOX' AND i.status IN ('PROCESSED','REJECTED')
+  )
+    ]]>
+  </update>
+  <!-- 在 REPLAYING 状态且版本匹配时重开为 OPEN，更新错误码及摘要并清除租约时间。 -->
+  <update id="reopenRecovery">
+    <![CDATA[
+UPDATE message_recovery SET state='OPEN',next_attempt_at=NULL,last_error_code=#{errorCode},
+  last_error_summary=#{summary},lock_version=lock_version+1,updated_at=#{now},
+  updated_by_type='SERVICE',updated_by_id=NULL
+WHERE tenant_id=#{tenantId} AND recovery_id=#{recoveryId} AND state='REPLAYING' AND lock_version=#{expectedVersion}
+    ]]>
+  </update>
+  <!-- 在 OPEN 或 REPLAYING 状态且版本匹配时终结不可重放记录，保留错误码及摘要说明原因。 -->
+  <update id="markNonReplayable">
+    <![CDATA[
+UPDATE message_recovery
+SET state='RESOLVED',resolved_at=#{now},next_attempt_at=NULL,
+    last_error_code=#{errorCode},last_error_summary=#{summary},lock_version=lock_version+1,
+    updated_at=#{now},updated_by_type='SERVICE',updated_by_id=NULL
+WHERE tenant_id=#{tenantId} AND recovery_id=#{recoveryId} AND state IN ('OPEN','REPLAYING')
+  AND lock_version=#{expectedVersion}
+    ]]>
+  </update>
+  <!-- 按租户及源收件箱读取 INBOX 恢复记录，供登记恢复时识别已有记录；lock 控制行锁。 -->
+  <select id="findRecoveryBySource" resultMap="recovery">
+    <![CDATA[
+SELECT recovery_id,direction,source_record_id,business_intent_key,state,attempt_count,next_attempt_at,last_error_code,last_error_summary,dead_lettered_at,recovery_required_at,replay_count,last_replayed_at,last_replayed_by_type,last_replayed_by_id,last_replay_reason,last_replay_correlation_id,resolved_at,lock_version,created_at,updated_at FROM message_recovery WHERE tenant_id=#{tenantId} AND direction='INBOX' AND source_record_id=#{sourceRecordId}
+    ]]>
+    <if test="lock">FOR UPDATE</if>
+  </select>
+  <!-- 查询租户内 INBOX 恢复记录，按方向、状态、死信、错误及时间筛选，以恢复要求时间和恢复标识进行稳定游标分页。 -->
+  <select id="listRecoveries" resultMap="recovery">
+SELECT recovery_id,direction,source_record_id,business_intent_key,state,attempt_count,next_attempt_at,last_error_code,last_error_summary,dead_lettered_at,recovery_required_at,replay_count,last_replayed_at,last_replayed_by_type,last_replayed_by_id,last_replay_reason,last_replay_correlation_id,resolved_at,lock_version,created_at,updated_at FROM message_recovery WHERE tenant_id=#{tenantId} AND direction='INBOX'
+<if test="direction != null">AND direction=#{direction}</if>
+<if test="state != null">AND state=#{state}</if>
+<if test="deadLettered != null"><choose><when test="deadLettered">AND dead_lettered_at IS NOT NULL</when><otherwise>AND dead_lettered_at IS NULL</otherwise></choose></if>
+<if test="errorCode != null">AND last_error_code=#{errorCode}</if>
+<if test="from != null">AND recovery_required_at &gt;= #{from}</if>
+<if test="to != null">AND recovery_required_at &lt;= #{to}</if>
+<if test="cursorValue != null and cursorId != null">AND (recovery_required_at<choose><when test="ascending"> &gt; </when><otherwise> &lt; </otherwise></choose>#{cursorValue} OR (recovery_required_at=#{cursorValue} AND recovery_id<choose><when test="ascending"> &gt; </when><otherwise> &lt; </otherwise></choose>#{cursorId}))</if> ORDER BY recovery_required_at<choose><when test="ascending"> ASC</when><otherwise> DESC</otherwise></choose>,recovery_id<choose><when test="ascending"> ASC</when><otherwise> DESC</otherwise></choose> LIMIT #{limit}
+  </select>
+</mapper>

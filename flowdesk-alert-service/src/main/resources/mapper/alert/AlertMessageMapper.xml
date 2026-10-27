@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+  事件与工单关联及告警发件箱持久化接口，保存建单意图和待发布消息。
+  默认入口校验当前租户，跨表写入的事务由调用方组织。
+-->
+<mapper namespace="com.flowdesk.alert.mapper.AlertMessageMapper">
+  <!-- 为事件实例建立 REQUESTED 状态的工单关联，保存建单业务意图，初始化重试次数和版本。 -->
+  <insert id="sqlInsertTicketLink">
+INSERT INTO incident_ticket_link
+                  (tenant_id,incident_id,create_ticket_intent_key,status,ticket_id,
+                   requested_at,established_at,recovery_required_at,recovery_reason_code,
+                   retry_count,last_attempt_at,lock_version,created_at,created_by_type,
+                   created_by_id,updated_at,updated_by_type,updated_by_id)
+                VALUES (#{tenantId},#{incidentId},#{intent},'REQUESTED',NULL,#{now},NULL,NULL,NULL,0,NULL,0,#{now},
+                        'SERVICE',NULL,#{now},'SERVICE',NULL)
+  </insert>
+  <!-- 保存以事件实例为聚合根的版本 1 消息，包含发布键、业务意图、原文及摘要；初始为 PENDING，now 为首次可发送时间。 -->
+  <insert id="sqlInsertOutbox">
+INSERT INTO outbox_event
+                  (tenant_id,outbox_id,message_id,publication_key,business_intent_key,
+                   aggregate_type,aggregate_id,contract_ref,contract_version,body_bytes,
+                   body_sha256,correlation_id,causation_id,status,attempt_count,next_attempt_at,
+                   locked_by,locked_at,last_error_code,broker_confirmed_at,lock_version,
+                   created_at,created_by_type,created_by_id,updated_at,updated_by_type,updated_by_id)
+                VALUES (#{tenantId},#{outboxId},#{messageId},#{publicationKey},#{businessIntent},'INCIDENT',#{incidentId},#{contractRef},1,#{body},#{bodyHash},#{correlationId},#{causationId}, 'PENDING',0,#{now},NULL,NULL,NULL,NULL,0,
+                        #{now},#{creatorType},NULL,#{now},'SERVICE',NULL)
+  </insert>
+  <!-- 按租户和事件实例读取工单关联及重试状态；lock 为 true 时追加 FOR UPDATE，供同一事务内更新关联。 -->
+  <select id="sqlFindLink" resultType="com.flowdesk.alert.model.LinkRow">
+SELECT incident_id,create_ticket_intent_key AS create_intent,status,ticket_id,requested_at,
+                       established_at,recovery_required_at,recovery_reason_code,retry_count,
+                       last_attempt_at,lock_version,created_at,updated_at
+                FROM incident_ticket_link WHERE tenant_id=#{tenantId} AND incident_id=#{incidentId}
+<if test="lock">FOR UPDATE</if>
+  </select>
+</mapper>

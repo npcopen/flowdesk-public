@@ -12,18 +12,23 @@ import org.springframework.core.io.ResourceLoader;
 import java.time.Clock;
 
 /**
- * IAM-only signing configuration. The private key never leaves this deployment unit.
+ * IAM 专属的 JWT 签发配置；私钥保留在 IAM 部署单元内。
  */
 @Configuration(proxyBeanMethods = false)
 @EnableConfigurationProperties({LoginSecurityProperties.class, CursorTokenProperties.class, ServiceJwtBootstrapProperties.class})
 public class IamSecurityConfiguration {
 
-    /** All IAM business timestamps are derived from one UTC wall clock. */
+    /**
+     * IAM 业务时间统一来自同一个 UTC 时钟。
+     */
     @Bean
     public Clock flowDeskIamClock() {
         return Clock.systemUTC();
     }
 
+    /**
+     * 向 Spring 容器提供 JwtIssuer 组件，集中绑定持久化、认证配置或后台处理依赖，供对应业务入口复用。
+     */
     @Bean
     public JwtIssuer iamJwtIssuer(FlowDeskJwtProperties properties, ResourceLoader resourceLoader) {
         String privatePem = PemKeyMaterial.resolve(

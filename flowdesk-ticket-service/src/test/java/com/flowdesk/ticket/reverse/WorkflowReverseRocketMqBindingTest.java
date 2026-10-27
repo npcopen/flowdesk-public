@@ -1,6 +1,6 @@
 package com.flowdesk.ticket.reverse;
 
-import com.flowdesk.ticket.recovery.TicketRecoveryController;
+import com.flowdesk.ticket.controller.TicketRecoveryController;
 import org.apache.rocketmq.client.consumer.DefaultMQPushConsumer;
 import org.apache.rocketmq.client.consumer.listener.ConsumeConcurrentlyContext;
 import org.apache.rocketmq.client.consumer.listener.ConsumeConcurrentlyStatus;
@@ -17,7 +17,13 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+/**
+ * 工单模块回归测试，覆盖该组件的正常流程、边界条件与关键一致性约束。
+ */
 class WorkflowReverseRocketMqBindingTest {
+    /**
+     * 验证各绑定使用独立主消费和死信接收组，并采用无序单消息处理。
+     */
     @Test
     void bothBindingsUseIndependentUnorderedSingleMessageMainAndAcceptorGroups()
             throws Exception {
@@ -32,6 +38,9 @@ class WorkflowReverseRocketMqBindingTest {
         }
     }
 
+    /**
+     * 验证接收器重试恢复逻辑死信主题，并使用独立短延迟。
+     */
     @Test
     void acceptorRetryRestoresTheLogicalDlqTopicAndUsesAFreshShortDelay() {
         var binding = WorkflowReverseContract.INSTANCE_ESTABLISHED;
@@ -54,6 +63,9 @@ class WorkflowReverseRocketMqBindingTest {
                 .isEqualTo(WorkflowReverseContract.DLQ_ACCEPTOR_RETRY_DELAY_LEVEL);
     }
 
+    /**
+     * 验证 ACL 身份或恢复原文不符合约束时拒绝处理。
+     */
     @Test
     void ticketAclIdentityAndRecoveryBodyFailClosed() throws Exception {
         WorkflowReverseRocketMqProperties properties = new WorkflowReverseRocketMqProperties();
@@ -64,15 +76,18 @@ class WorkflowReverseRocketMqBindingTest {
 
         properties.setAccessKey("flowdeskworkflow");
         assertThatThrownBy(properties::validateEnabled).isInstanceOf(IllegalStateException.class);
-        assertThat(TicketRecoveryController.ReplayCommand.class.getRecordComponents())
+        assertThat(com.flowdesk.ticket.dto.TicketRecoveryReplayCommand.class.getRecordComponents())
                 .extracting(java.lang.reflect.RecordComponent::getName)
                 .containsExactly("reason");
         assertThatThrownBy(() -> new ObjectMapper().readValue(
                 "{\"reason\":\"retry\",\"topic\":\"forbidden\"}",
-                TicketRecoveryController.ReplayCommand.class))
+                com.flowdesk.ticket.dto.TicketRecoveryReplayCommand.class))
                 .hasMessageContaining("topic");
     }
 
+    /**
+     * 装配带测试替身的消费者，供检查路由及消息处理行为。
+     */
     private static DefaultMQPushConsumer consumer(WorkflowReverseContract.Binding binding,
                                                    boolean acceptor) throws Exception {
         return WorkflowReverseRocketMqConsumers.createConsumer(
@@ -81,6 +96,9 @@ class WorkflowReverseRocketMqBindingTest {
                 null, "127.0.0.1:9876", delivery -> WorkflowReverseConsumeResult.ack("ACK"));
     }
 
+    /**
+     * 断言消费组、主题及重试参数符合冻结消息契约。
+     */
     private static void assertFrozen(DefaultMQPushConsumer consumer, String group,
                                      int maxReconsumeTimes) {
         assertThat(consumer.getConsumerGroup()).isEqualTo(group);

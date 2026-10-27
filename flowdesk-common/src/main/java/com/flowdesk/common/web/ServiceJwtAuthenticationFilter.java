@@ -20,7 +20,7 @@ import java.util.List;
 import java.util.UUID;
 
 /**
- * Service-identity JWT filter for protected internal endpoints (e.g. IAM API-016).
+ * 为受保护的内部接口验证服务身份 JWT，例如 IAM 的资格预检查接口。
  */
 public class ServiceJwtAuthenticationFilter extends OncePerRequestFilter {
 
@@ -30,12 +30,18 @@ public class ServiceJwtAuthenticationFilter extends OncePerRequestFilter {
     private final ObjectMapper mapper;
     private final AntPathMatcher pathMatcher = new AntPathMatcher();
 
+    /**
+     * 注入服务验签器，复制内部路径与服务白名单，保存认证失败响应所需映射器。
+     */
     public ServiceJwtAuthenticationFilter(JwtVerifier verifier,
                                           List<String> serviceJwtPaths,
                                           List<String> allowedServiceIds) {
         this(verifier, serviceJwtPaths, allowedServiceIds, new ObjectMapper());
     }
 
+    /**
+     * 注入服务验签器，复制内部路径与服务白名单，保存认证失败响应所需映射器。
+     */
     public ServiceJwtAuthenticationFilter(JwtVerifier verifier,
                                           List<String> serviceJwtPaths,
                                           List<String> allowedServiceIds,
@@ -46,6 +52,9 @@ public class ServiceJwtAuthenticationFilter extends OncePerRequestFilter {
         this.mapper = mapper;
     }
 
+    /**
+     * 根据配置路径决定是否执行服务 JWT 校验，避免不同身份入口混用。
+     */
     @Override
     protected boolean shouldNotFilter(HttpServletRequest request) {
         if (serviceJwtPaths.isEmpty()) {
@@ -54,6 +63,10 @@ public class ServiceJwtAuthenticationFilter extends OncePerRequestFilter {
         return !matches(serviceJwtPaths, request.getRequestURI());
     }
 
+    /**
+     * 提取唯一 Bearer、复验服务 JWT，并要求服务名位于当前内部接口允许名单；空名单同样拒绝访问。
+     * 认证失败返回统一 401，成功则建立服务租户作用域，并在调用结束时清理线程主体。
+     */
     @Override
     protected void doFilterInternal(HttpServletRequest request,
                                     HttpServletResponse response,
@@ -92,6 +105,9 @@ public class ServiceJwtAuthenticationFilter extends OncePerRequestFilter {
         }
     }
 
+    /**
+     * 仅接受唯一且格式为 Bearer 的 Authorization 头，缺失、重复或类型错误返回 null。
+     */
     private String bearerToken(HttpServletRequest request) {
         List<String> headers = enumerationList(request.getHeaders("Authorization"));
         if (headers.size() != 1) {
@@ -104,6 +120,9 @@ public class ServiceJwtAuthenticationFilter extends OncePerRequestFilter {
         return header.substring("Bearer ".length()).trim();
     }
 
+    /**
+     * 按配置的 Ant 路径模式匹配 URI，命中任一模式即返回 true。
+     */
     private boolean matches(List<String> patterns, String uri) {
         for (String pattern : patterns) {
             if (pathMatcher.match(pattern, uri)) {
@@ -113,11 +132,17 @@ public class ServiceJwtAuthenticationFilter extends OncePerRequestFilter {
         return false;
     }
 
+    /**
+     * 读取上游写入请求属性的 UUID，缺失则生成新标识供认证错误追踪。
+     */
     private static UUID correlationId(HttpServletRequest request) {
         Object value = request.getAttribute(FlowDeskRequestAttributes.CORRELATION_ID);
         return value instanceof UUID uuid ? uuid : UUID.randomUUID();
     }
 
+    /**
+     * 将请求头枚举复制为列表，供认证入口检测重复 Authorization 头。
+     */
     private static List<String> enumerationList(Enumeration<String> enumeration) {
         List<String> values = new ArrayList<>();
         while (enumeration.hasMoreElements()) {

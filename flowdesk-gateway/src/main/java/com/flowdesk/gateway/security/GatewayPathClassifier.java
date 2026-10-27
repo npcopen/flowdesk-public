@@ -5,15 +5,9 @@ import org.springframework.web.util.pattern.PathPattern;
 import org.springframework.web.util.pattern.PathPatternParser;
 
 /**
- * Single source of truth for gateway route classification (ARCHITECTURE §7.4).
- *
- * <p>The route table matches {@code /api/v1/webhooks/**} and
- * {@code /api/v1/internal/health/**} with Spring path patterns, which also match the
- * bare paths ({@code /api/v1/webhooks}, {@code /api/v1/internal/health}). Filters that
- * classify requests must use the same matching semantics, otherwise a bare-path webhook
- * request would be treated as a protected human API and stripped of its security headers.
- * All gateway components derive their classification from here so predicate and filters
- * can never drift apart.</p>
+ * 网关路由与过滤器共用的路径分类规则。
+ * 采用与路由表一致的 Spring 路径匹配语义，兼容 Webhook、健康探针的无尾斜杠路径，
+ * 防止路由与过滤器分类不一致而误删安全头或错误要求人类 JWT。
  */
 public final class GatewayPathClassifier {
 
@@ -21,8 +15,10 @@ public final class GatewayPathClassifier {
     private static final PathPattern LOGIN = PARSER.parse("/api/v1/auth/login");
     private static final PathPattern WEBHOOKS = PARSER.parse("/api/v1/webhooks/**");
     private static final PathPattern INTERNAL_HEALTH = PARSER.parse("/api/v1/internal/health/**");
-    private static final PathPattern SPA_ASSETS = PARSER.parse("/assets/**");
 
+    /**
+     * 禁止直接实例化该工具类型，统一通过静态方法或工厂入口使用。
+     */
     private GatewayPathClassifier() {
     }
 
@@ -41,39 +37,20 @@ public final class GatewayPathClassifier {
         return matches(INTERNAL_HEALTH, path);
     }
 
-    /** Public static files emitted by the Vue build. */
-    public static boolean isSpaAsset(String path) {
-        return matches(SPA_ASSETS, path);
-    }
-
-    /** Browser history routes handled by the SPA shell. */
-    public static boolean isSpaRoute(String path) {
-        if (path == null || path.startsWith("/api/")) {
-            return false;
-        }
-        if ("/".equals(path) || "/login".equals(path)
-                || "/tickets".equals(path) || "/approvals".equals(path)
-                || "/alerts".equals(path) || "/notifications".equals(path)
-                || "/settings/users".equals(path) || "/settings/catalog".equals(path)) {
-            return true;
-        }
-        return matches(PARSER.parse("/tickets/**"), path)
-                || matches(PARSER.parse("/approvals/**"), path)
-                || matches(PARSER.parse("/alerts/**"), path);
-    }
-
     /**
-     * 人类受保护 API：deny-by-default。除登录、Webhook、健康探针外，所有路径
-     * （含未来的非 /api/v1 路由）都要求人类 JWT；未分类路径默认拒绝。
+     * 除登录、Webhook 和健康探针外，所有路径都归为需要人类 JWT 的保护范围，空路径也不豁免。
+     * 未分类路径不会匿名放行；最终是否存在可转发的业务端点仍由路由表决定。
      */
     public static boolean requiresHumanJwt(String path) {
         if (path == null) {
             return true;
         }
-        return !isLogin(path) && !isWebhook(path) && !isInternalHealth(path)
-                && !isSpaAsset(path) && !isSpaRoute(path);
+        return !isLogin(path) && !isWebhook(path) && !isInternalHealth(path);
     }
 
+    /**
+     * 用预解析的路径模式匹配请求路径，空路径直接返回 false。
+     */
     private static boolean matches(PathPattern pattern, String path) {
         return path != null && pattern.matches(PathContainer.parsePath(path));
     }

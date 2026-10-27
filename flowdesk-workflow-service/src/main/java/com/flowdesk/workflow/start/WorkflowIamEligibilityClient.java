@@ -2,9 +2,6 @@ package com.flowdesk.workflow.start;
 
 import com.flowdesk.common.tenant.TenantContext;
 import com.flowdesk.common.tenant.TenantContextHolder;
-import org.springframework.http.MediaType;
-import org.springframework.http.client.SimpleClientHttpRequestFactory;
-import org.springframework.web.client.RestClient;
 import tools.jackson.databind.JsonNode;
 import tools.jackson.databind.ObjectMapper;
 
@@ -12,29 +9,31 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.Map;
 import java.util.UUID;
 
-/** Strict service-JWT HTTP adapter for IAM API-016. */
+/**
+ * 使用服务 JWT 调用 IAM API-016，严格区分资格不满足与暂时无法确定资格。
+ * HTTP 传输交给独立的 Feign 客户端；本类保留逐请求令牌读取、租户核对、响应校验及异常语义。
+ */
 final class WorkflowIamEligibilityClient implements WorkflowApproverEligibilityChecker {
 
     private static final ObjectMapper JSON = new ObjectMapper();
 
-    private final RestClient restClient;
+    private final WorkflowIamEligibilityFeignClient client;
     private final WorkflowIamClientProperties properties;
 
-    WorkflowIamEligibilityClient(RestClient.Builder builder,
+    /**
+     * 初始化组件依赖与运行参数，使后续调用使用一致的协作对象。
+     */
+    WorkflowIamEligibilityClient(WorkflowIamEligibilityFeignClient client,
                                  WorkflowIamClientProperties properties) {
+        this.client = client;
         this.properties = properties;
-        SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
-        requestFactory.setConnectTimeout(properties.getConnectTimeout());
-        requestFactory.setReadTimeout(properties.getReadTimeout());
-        this.restClient = builder
-                .baseUrl(properties.getBaseUrl())
-                .requestFactory(requestFactory)
-                .build();
     }
 
+    /**
+     * 查询目标用户的租户内审批资格，调用路径区分不合格与暂时依赖故障。
+     */
     @Override
     public boolean isEligibleApprover(UUID tenantId, UUID approverUserId) {
         TenantContext context = TenantContextHolder.current();
@@ -46,17 +45,10 @@ final class WorkflowIamEligibilityClient implements WorkflowApproverEligibilityC
 
         String response;
         try {
-            response = restClient.post()
-                    .uri("/api/v1/internal/iam/eligibility-checks")
-                    .header("Authorization", "Bearer " + token)
-                    .header("X-Correlation-Id", context.correlationId().toString())
-                    .contentType(MediaType.APPLICATION_JSON)
-                    .body(Map.of(
-                            "subjectUserId", approverUserId.toString(),
-                            "requiredRoleCode", "APPROVER",
-                            "purpose", "WORKFLOW_APPROVER"))
-                    .retrieve()
-                    .body(String.class);
+            response = client.check(
+                    "Bearer " + token, context.correlationId().toString(),
+                    new WorkflowIamEligibilityFeignClient.EligibilityRequest(
+                            approverUserId.toString(), "APPROVER", "WORKFLOW_APPROVER"));
         }
         catch (RuntimeException dependencyFailure) {
             throw new WorkflowIamUnavailableException(dependencyFailure);
@@ -88,6 +80,9 @@ final class WorkflowIamEligibilityClient implements WorkflowApproverEligibilityC
         }
     }
 
+    /**
+     * 读取配置文件的服务 JWT，供 IAM 请求携带当前服务身份。
+     */
     private String readServiceToken(UUID tenantId) {
         String location = properties.getServiceTokenFile();
         if (location == null || location.isBlank()) {

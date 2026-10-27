@@ -1,0 +1,110 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+  租户用户账户 SQL：按 tenantId 隔离详情、写入和列表查询。
+  写入保留操作人信息，更新使用乐观锁，分页使用排序列与用户 ID 组合游标。
+-->
+<mapper namespace="com.flowdesk.iam.mapper.UserMapper">
+  <!-- 当前用户展示投影，包含用户资料以及所属租户的编码、名称；二进制用户 ID 转为 UUID。 -->
+  <resultMap id="CurrentUserRow" type="com.flowdesk.iam.model.CurrentUserRow">
+    <constructor>
+      <arg column="user_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg column="username" javaType="java.lang.String"/>
+      <arg column="display_name" javaType="java.lang.String"/>
+      <arg column="status" javaType="java.lang.String"/>
+      <arg column="tenant_code" javaType="java.lang.String"/>
+      <arg column="tenant_display_name" javaType="java.lang.String"/>
+    </constructor>
+  </resultMap>
+  <!-- 用户管理投影，按构造参数映射账户资料、状态、锁版本及创建/更新时间。 -->
+  <resultMap id="UserRow" type="com.flowdesk.iam.model.UserRow">
+    <constructor>
+      <arg column="user_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg column="username" javaType="java.lang.String"/>
+      <arg column="display_name" javaType="java.lang.String"/>
+      <arg column="status" javaType="java.lang.String"/>
+      <arg column="lock_version" javaType="_long"/>
+      <arg column="created_at" javaType="java.time.Instant"/>
+      <arg column="updated_at" javaType="java.time.Instant"/>
+    </constructor>
+  </resultMap>
+
+  <!-- 根据排序方向选择固定比较符，使游标筛选与 ORDER BY 的方向保持一致。 -->
+  <sql id="cursorComparator"><choose><when test="ascending">&gt;</when><otherwise>&lt;</otherwise></choose></sql>
+  <!-- 排序方向片段同时用于选定业务字段与用户 ID，保证同名用户的翻页顺序稳定。 -->
+  <sql id="sortDirection"><choose><when test="ascending">ASC</when><otherwise>DESC</otherwise></choose></sql>
+  <!-- 排序列白名单：displayName 使用展示名，其余值回退到用户名，不直接拼接传入列名。 -->
+  <sql id="userSortColumn"><choose><when test="sortColumn == 'displayName'">u.display_name</when><otherwise>u.username</otherwise></choose></sql>
+
+  <!-- 按租户和用户 ID 联表读取用户及租户展示信息，不在此处过滤账户状态。 -->
+  <select id="findCurrentUser" resultMap="CurrentUserRow">
+    SELECT u.user_id, u.username, u.display_name, u.status,
+           t.tenant_code, t.display_name AS tenant_display_name
+    FROM user_account u
+    JOIN tenant t ON t.tenant_id = u.tenant_id
+    WHERE u.tenant_id = #{tenantId} AND u.user_id = #{userId}
+  </select>
+
+  <!-- 查询租户内用户详情与锁版本，供服务层执行状态校验或准备乐观锁更新。 -->
+  <select id="findUser" resultMap="UserRow">
+    SELECT user_id, username, display_name, status, lock_version, created_at, updated_at
+    FROM user_account WHERE tenant_id = #{tenantId} AND user_id = #{userId}
+  </select>
+
+  <!-- 在事务内读取并锁定用户匹配行，行锁随事务结束释放，用于需要串行校验的修改流程。 -->
+  <select id="findUserForUpdate" resultMap="UserRow">
+    SELECT user_id, username, display_name, status, lock_version, created_at, updated_at
+    FROM user_account WHERE tenant_id = #{tenantId} AND user_id = #{userId} FOR UPDATE
+  </select>
+
+  <!-- 判断用户名在租户内是否已占用，包含停用账户，避免按状态过滤后误判可用。 -->
+  <select id="usernameExists" resultType="boolean">
+    SELECT COUNT(*) FROM user_account WHERE tenant_id = #{tenantId} AND username = #{username}
+  </select>
+
+  <!-- 创建账户并将锁版本初始化为 0，创建与更新审计字段均使用调用方提供的用户和时间。 -->
+  <insert id="insertUser">
+    INSERT INTO user_account
+      (tenant_id, user_id, username, display_name, status, lock_version,
+       created_at, created_by_type, created_by_id,
+       updated_at, updated_by_type, updated_by_id)
+    VALUES (#{tenantId}, #{userId}, #{username}, #{displayName}, #{status}, 0, #{now}, 'USER', #{actorId}, #{now}, 'USER', #{actorId})
+  </insert>
+
+  <!-- 按租户、用户 ID 和预期版本更新，null 展示名/状态保留原值；成功后版本加 1。 -->
+  <update id="updateUser">
+    UPDATE user_account
+    SET display_name = COALESCE(#{displayName}, display_name),
+        status = COALESCE(#{status}, status),
+        lock_version = lock_version + 1,
+        updated_at = #{now},
+        updated_by_type = 'USER',
+        updated_by_id = #{actorId}
+    WHERE tenant_id = #{tenantId} AND user_id = #{userId} AND lock_version = #{expectedLockVersion}
+  </update>
+
+  <!--
+    按可选状态和有效角色筛选用户；只有传入 roleCode 才连接授权表，并用 DISTINCT 避免重复账户。
+    排序字段与 user_id 共同组成游标，lastName 为实际排序字段值，多取 1 条判断下一页。
+  -->
+  <select id="findUsers" resultMap="UserRow">
+    <bind name="limit" value="pageSize + 1"/>
+    SELECT DISTINCT u.user_id, u.username, u.display_name, u.status, u.lock_version, u.created_at, u.updated_at
+    FROM user_account u
+    <if test="roleCode != null">
+      JOIN user_role_assignment ura ON ura.tenant_id = u.tenant_id AND ura.user_id = u.user_id
+      JOIN role r ON r.tenant_id = ura.tenant_id AND r.role_id = ura.role_id
+    </if>
+    WHERE u.tenant_id = #{tenantId}
+    <if test="status != null">AND u.status = #{status}</if>
+    <if test="roleCode != null">AND ura.state = 'GRANTED' AND r.status = 'ACTIVE' AND r.role_code = #{roleCode}</if>
+    <if test="lastName != null and lastId != null">
+      AND (<include refid="userSortColumn"/> <include refid="cursorComparator"/> #{lastName}
+        OR (<include refid="userSortColumn"/> = #{lastName}
+          AND u.user_id <include refid="cursorComparator"/> #{lastId}))
+    </if>
+    ORDER BY <include refid="userSortColumn"/> <include refid="sortDirection"/>, u.user_id <include refid="sortDirection"/>
+    LIMIT #{limit}
+  </select>
+
+</mapper>

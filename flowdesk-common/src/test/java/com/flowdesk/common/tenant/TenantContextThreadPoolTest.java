@@ -27,19 +27,31 @@ class TenantContextThreadPoolTest {
     private static final UUID USER_1 = UUID.fromString("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
     private static final UUID CORR_1 = UUID.fromString("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
 
+    /**
+     * 创建租户 A 的可信测试上下文，供作用域可见性及线程隔离断言使用。
+     */
     private static TenantContext contextA() {
         return TenantContext.ofHumanJwt(TENANT_A, USER_1, CORR_1);
     }
 
+    /**
+     * 创建租户 B 的可信测试上下文，验证嵌套切换及线程复用时不会误用租户 A。
+     */
     private static TenantContext contextB() {
         return TenantContext.ofHumanJwt(TENANT_B, USER_1, CORR_1);
     }
 
+    /**
+     * 创建已验证 Broker 消息来源的测试上下文，供消费者线程复用及异常清理测试使用。
+     */
     private static TenantContext brokerContext() {
         return TenantContext.ofValidatedBrokerMessage(
                 TENANT_A, "flowdesk-ticket-service", CORR_1);
     }
 
+    /**
+     * 验证包装任务使用提交时上下文快照执行，并在结束后恢复工作线程状态。
+     */
     @Test
     void wrappedTaskRunsWithSnapshotAndCleansUp() throws Exception {
         ExecutorService pool = Executors.newSingleThreadExecutor();
@@ -58,6 +70,9 @@ class TenantContextThreadPoolTest {
         }
     }
 
+    /**
+     * 验证线程池复用同一工作线程时，上一个任务的租户不会泄露到后续任务。
+     */
     @Test
     void threadPoolReuseDoesNotLeakTenantBetweenTasks() throws Exception {
         ExecutorService pool = Executors.newSingleThreadExecutor();
@@ -79,6 +94,9 @@ class TenantContextThreadPoolTest {
         }
     }
 
+    /**
+     * 验证同一线程池中不同租户任务各自使用正确上下文，避免并发混淆。
+     */
     @Test
     void differentTenantsInSamePoolAreIsolated() throws Exception {
         ExecutorService pool = Executors.newFixedThreadPool(2);
@@ -113,6 +131,9 @@ class TenantContextThreadPoolTest {
         }
     }
 
+    /**
+     * 验证可信租户上下文不会通过线程继承自动传播，异步任务须显式携带快照。
+     */
     @Test
     void contextDoesNotFlowByThreadInheritance() throws Exception {
         ExecutorService pool = Executors.newSingleThreadExecutor();
@@ -127,6 +148,9 @@ class TenantContextThreadPoolTest {
         }
     }
 
+    /**
+     * 验证包装任务抛异常时仍清理工作线程上下文。
+     */
     @Test
     void wrappedTaskThrowingStillCleansUp() throws Exception {
         ExecutorService pool = Executors.newSingleThreadExecutor();
@@ -150,6 +174,9 @@ class TenantContextThreadPoolTest {
         }
     }
 
+    /**
+     * 验证消息处理异常不把生产者或租户泄露到复用的消费线程。
+     */
     @Test
     void brokerMessageExceptionDoesNotLeakProducerOrTenantIntoReusedConsumerThread() throws Exception {
         ExecutorService pool = Executors.newSingleThreadExecutor();

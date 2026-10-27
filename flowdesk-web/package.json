@@ -8,12 +8,13 @@
   },
   "scripts": {
     "dev": "vite",
-    "build": "vue-tsc --noEmit && vite build",
-    "build:gateway": "vite build --mode gateway",
-    "build:gateway:verified": "node ../scripts/build-gateway.mjs",
+    "typecheck": "vue-tsc --noEmit -p tsconfig.app.json && vue-tsc --noEmit -p tsconfig.node.json",
+    "build": "npm run typecheck && vite build",
+    "build:verified": "node ../scripts/build-web.mjs",
+    "verify:artifact": "node ../scripts/verify-web-artifact.mjs",
     "preview": "vite preview",
     "test:unit": "vitest run",
-    "test:gateway-build": "node --test ../scripts/verify-gateway-artifact.test.mjs",
+    "test:build": "node --test ../scripts/verify-web-artifact.test.mjs",
     "test:unit:watch": "vitest",
     "test:e2e": "playwright test",
     "test:e2e:ui": "playwright test --ui"

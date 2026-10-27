@@ -8,13 +8,15 @@ import java.lang.annotation.RetentionPolicy;
 import java.lang.annotation.Target;
 
 /**
- * Declares the permission(s) a controller method requires. All listed permissions are
- * required. Endpoints with several alternative roles/permissions should use
- * {@link com.flowdesk.common.authz.PermissionPolicy#requireAny} directly.
+ * 声明控制器所需的权限，列表中的权限必须全部满足。
+ * 允许多种角色或权限择一通过的接口应直接使用 {@link com.flowdesk.common.authz.PermissionPolicy#requireAny}。
  */
 @Target({ElementType.METHOD, ElementType.TYPE})
 @Retention(RetentionPolicy.RUNTIME)
 public @interface RequiresPermission {
 
+    /**
+     * 声明目标控制器或方法要求的权限集合，由权限拦截器在业务执行前检查。
+     */
     PermissionCode[] value();
 }

@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+  工作流人工操作审计的持久化接口。
+  按租户保存、读取审计事实，保留操作人、执行结果及关联链路；具体 SQL 定义在同名 XML 中。
+-->
+<mapper namespace="com.flowdesk.workflow.mapper.WorkflowAuditMapper">
+<!--
+  审计结果映射：组装操作、对象、执行人、错误、关联链路及发生时间。
+-->
+<resultMap id="AuditRow" type="com.flowdesk.workflow.model.persistence.AuditRow">
+<constructor>
+    <arg column="audit_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+    <arg column="action_code" javaType="java.lang.String"/>
+    <arg column="target_type" javaType="java.lang.String"/>
+    <arg column="target_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+    <arg column="outcome" javaType="java.lang.String"/>
+    <arg column="actor_type" javaType="java.lang.String"/>
+    <arg column="actor_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+    <arg column="reason" javaType="java.lang.String"/>
+    <arg column="error_code" javaType="java.lang.String"/>
+    <arg column="correlation_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+    <arg column="causation_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+    <arg column="occurred_at" javaType="java.time.Instant"/>
+</constructor>
+</resultMap>
+
+<!--
+  保存一次工作流人工操作的审计事实。
+  记录租户、操作对象、操作人、执行结果、原因和 correlationId/causationId，发生时间使用调用方传入的 now。
+-->
+<insert id="insertAudit">
+<![CDATA[
+INSERT INTO audit_record
+  (tenant_id, audit_id, action_code, target_type, target_id, outcome,
+   actor_type, actor_id, reason, error_code, correlation_id,
+   causation_id, occurred_at)
+VALUES (#{tenantId}, #{auditId}, #{actionCode}, #{targetType}, #{targetId}, #{outcome}, 'USER', #{actorId}, #{reason}, #{errorCode}, #{correlationId}, #{causationId}, #{now})
+]]>
+</insert>
+
+<!--
+  按租户和审计标识读取审计明细。
+  返回操作对象、执行结果和关联链路等原始事实；不存在时返回空 Optional。
+-->
+<select id="findAudit" resultMap="AuditRow">
+SELECT audit_id,action_code,target_type,target_id,outcome,actor_type,actor_id,reason,error_code,correlation_id,causation_id,occurred_at FROM audit_record WHERE tenant_id=#{tenantId} AND audit_id=#{auditId}
+</select>
+</mapper>

@@ -8,6 +8,9 @@ package com.flowdesk.common.tenant;
  */
 public class NoTenantContextException extends IllegalStateException {
 
+    /**
+     * 标记当前作用域缺少受信任租户上下文，让调用方停止资源访问而非使用默认租户。
+     */
     public NoTenantContextException() {
         super("No trusted TenantContext is present in the current scope");
     }

@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!-- 用户资格查询 SQL：按租户加载用户、角色和授权事实，由服务层决定是否满足具体业务资格。 -->
+<mapper namespace="com.flowdesk.iam.mapper.EligibilityMapper">
+  <!-- 映射用户状态、角色状态、绑定状态及资格版本；左连接缺失的角色/绑定状态可为空。 -->
+  <resultMap id="EligibilityFacts" type="com.flowdesk.iam.model.EligibilityFacts">
+    <constructor>
+      <arg column="user_status" javaType="java.lang.String"/>
+      <arg column="role_status" javaType="java.lang.String"/>
+      <arg column="assignment_state" javaType="java.lang.String"/>
+      <arg column="qualification_version" javaType="_long"/>
+    </constructor>
+  </resultMap>
+
+  <!-- 读取指定租户用户的真实状态，包含停用账户，不存在时不产生结果行。 -->
+  <select id="findUserStatus" resultType="string">
+    SELECT status FROM user_account WHERE tenant_id = #{tenantId} AND user_id = #{userId}
+  </select>
+
+  <!-- 查询已授予角色的状态，只限制绑定为 GRANTED，保留停用角色供服务层识别资格失效原因。 -->
+  <select id="findGrantedRoleStatus" resultType="string">
+    SELECT r.status
+    FROM user_role_assignment ura
+    JOIN role r ON r.tenant_id = ura.tenant_id AND r.role_id = ura.role_id
+    WHERE ura.tenant_id = #{tenantId} AND ura.user_id = #{userId} AND ura.state = 'GRANTED'
+      AND r.role_code = #{roleCode}
+  </select>
+
+  <!--
+    以用户为主表左连接指定编码角色与授权绑定，用户存在时即返回一组事实，不提前过滤状态。
+    资格版本累加用户/角色/绑定锁版本及记录存在标记，用于表达这组资格事实的版本。
+  -->
+  <select id="findEligibilityFacts" resultMap="EligibilityFacts">
+    SELECT u.status AS user_status,
+           r.status AS role_status,
+           ura.state AS assignment_state,
+           1 + COALESCE(u.lock_version,0)
+             + CASE WHEN r.role_id IS NULL THEN 0 ELSE 1 END
+             + COALESCE(r.lock_version,0)
+             + CASE WHEN ura.role_id IS NULL THEN 0 ELSE 1 END
+             + COALESCE(ura.lock_version,0) AS qualification_version
+    FROM user_account u
+    LEFT JOIN role r
+      ON r.tenant_id=u.tenant_id AND r.role_code=#{roleCode}
+    LEFT JOIN user_role_assignment ura
+      ON ura.tenant_id=u.tenant_id AND ura.user_id=u.user_id
+     AND ura.role_id=r.role_id
+    WHERE u.tenant_id=#{tenantId} AND u.user_id=#{userId}
+  </select>
+
+  <!-- 判断是否存在已授予且角色启用的绑定；不连接用户表，因此用户状态需由服务层单独判断。 -->
+  <select id="hasGrantedRoleCode" resultType="boolean">
+    SELECT COUNT(*)
+    FROM user_role_assignment ura
+    JOIN role r ON r.tenant_id = ura.tenant_id AND r.role_id = ura.role_id
+    WHERE ura.tenant_id = #{tenantId} AND ura.user_id = #{userId} AND ura.state = 'GRANTED'
+      AND r.status = 'ACTIVE' AND r.role_code = #{roleCode}
+  </select>
+
+</mapper>

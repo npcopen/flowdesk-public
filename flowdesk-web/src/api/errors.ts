@@ -1,5 +1,10 @@
+/** 统一识别 API 错误，并将业务错误码转换为可展示的中文信息。 */
 import type { FieldViolation } from "@/types/api";
 
+/**
+ * 表示已标准化的 API 请求错误。
+ * 统一保留 HTTP 状态、业务码、关联标识、重试提示、详细信息和响应头供页面判断。
+ */
 export class ApiClientError extends Error {
   readonly status: number;
   readonly code: string;
@@ -8,6 +13,10 @@ export class ApiClientError extends Error {
   readonly details: FieldViolation[];
   readonly headers: Headers;
 
+  /**
+   * 根据错误类型初始化诊断信息和错误消息。
+   * 保留服务端关联标识及响应头，便于提示用户并定位请求故障。
+   */
   constructor(args: {
     status: number;
     code: string;
@@ -28,10 +37,18 @@ export class ApiClientError extends Error {
   }
 }
 
+/**
+ * 表示某项可选能力当前没有启用。
+ * 保留能力名称与运行模式，使页面能够提供明确的降级说明。
+ */
 export class FeatureUnavailableError extends Error {
   readonly feature: string;
   readonly mode: string;
 
+  /**
+   * 根据错误类型初始化诊断信息和错误消息。
+   * 保留服务端关联标识及响应头，便于提示用户并定位请求故障。
+   */
   constructor(feature: string, mode = "disabled") {
     super(`${feature} is not enabled (${mode})`);
     this.name = "FeatureUnavailableError";
@@ -40,10 +57,18 @@ export class FeatureUnavailableError extends Error {
   }
 }
 
+/**
+ * 判断未知异常是否为统一 API 错误。
+ * 作为类型守卫让调用方安全读取状态码、业务码和关联信息。
+ */
 export function isApiClientError(error: unknown): error is ApiClientError {
   return error instanceof ApiClientError;
 }
 
+/**
+ * 判断未知异常是否表示能力未启用。
+ * 作为类型守卫供页面区分功能降级与普通请求失败。
+ */
 export function isFeatureUnavailableError(
   error: unknown,
 ): error is FeatureUnavailableError {
@@ -51,9 +76,8 @@ export function isFeatureUnavailableError(
 }
 
 /**
- * A stable transport/service failure that means the requested capability cannot
- * currently answer.  Permission and resource errors deliberately stay out of
- * this set so the UI does not hide an authorization decision as an outage.
+ * 判断错误是否属于网络或服务暂时不可达。
+ * 仅涵盖传输和服务中断，不把权限不足或资源不存在当作临时故障。
  */
 export function isTransientServiceError(error: unknown): boolean {
   if (!isApiClientError(error)) return false;
@@ -68,9 +92,8 @@ export function isTransientServiceError(error: unknown): boolean {
 }
 
 /**
- * Classifies capability-level outages for optional M8 surfaces. `scope` is
- * important: a normal detail 404 is not an outage, while an unmounted optional
- * route is. Callers still render all non-capability errors through ErrorNotice.
+ * 判断可选能力能否在当前页面按不可用状态降级。
+ * 结合能力、集合或详情上下文识别未挂载端点，并保留合法的未开始计时状态。
  */
 export function isCapabilityUnavailable(
   error: unknown,
@@ -92,6 +115,10 @@ export function isCapabilityUnavailable(
   return error.status === 404 && error.code !== "SLA_NOT_STARTED";
 }
 
+/**
+ * 识别后端为隐藏资源可见性而返回的通用不存在错误。
+ * 仅匹配约定状态及业务码，避免吞掉权限和服务故障。
+ */
 export function isOpaqueResourceNotFound(error: unknown): boolean {
   return isApiClientError(error) && error.status === 404 && error.code === "RESOURCE_NOT_FOUND";
 }
@@ -177,6 +204,10 @@ export const errorLabels: Record<string, string> = {
   INTERNAL_ERROR: "服务发生未预期错误。",
 };
 
+/**
+ * 把统一异常映射为面向用户的中文说明。
+ * 优先使用稳定业务码，未知错误回退为通用提示并保留上层诊断信息。
+ */
 export function errorLabel(error: unknown): string {
   if (!isApiClientError(error)) return "请求失败，请稍后重试。";
   return errorLabels[error.code] ?? "请求失败，请稍后重试。";

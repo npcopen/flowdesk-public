@@ -17,7 +17,9 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
-/** Shared, deterministic fixtures for the Notification M8 integration slices. */
+/**
+ * 冻结测试样例或传输快照，保留原始身份、字节和摘要供正常及错误变体场景复用。
+ */
 final class NotificationIntegrationFixtures {
     static final UUID TENANT_A = UUID.fromString("11111111-1111-1111-1111-111111111111");
     static final UUID USER_A = UUID.fromString("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
@@ -28,9 +30,15 @@ final class NotificationIntegrationFixtures {
     private static final JwtIssuer ISSUER = new JwtIssuer(KEY_PAIR.getPrivate(),
             "flowdesk-iam-service", "flowdesk-api", "flowdesk-internal", 900, 300);
 
+    /**
+     * 初始化组件依赖与运行参数，使后续调用使用一致的协作对象。
+     */
     private NotificationIntegrationFixtures() {
     }
 
+    /**
+     * 注册测试专用数据库、密钥和开关配置，使应用上下文使用隔离依赖。
+     */
     static void properties(DynamicPropertyRegistry registry, String database) {
         String url = "jdbc:h2:mem:" + database
                 + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE";
@@ -53,20 +61,32 @@ final class NotificationIntegrationFixtures {
         registry.add("flowdesk.notification.recovery.datasource.password", () -> "");
     }
 
+    /**
+     * 签发当前场景需要的测试身份令牌，固定租户、角色与最小权限供真实认证路径校验。
+     */
     static String token(UUID user, RoleCode role, PermissionCode... permissions) {
         return ISSUER.issueHuman(TENANT_A, user, Set.of(role), Set.of(permissions)).token();
     }
 
+    /**
+     * 签发当前场景需要的测试身份令牌，固定租户、角色与最小权限供真实认证路径校验。
+     */
     static String userToken(UUID user) {
         return token(user, RoleCode.REQUESTER, PermissionCode.NOTIFICATION_READ_SELF,
                 PermissionCode.NOTIFICATION_WRITE_SELF);
     }
 
+    /**
+     * 签发当前场景需要的测试身份令牌，固定租户、角色与最小权限供真实认证路径校验。
+     */
     static String recoveryAdminToken() {
         return token(ADMIN_A, RoleCode.SERVICE_DESK_ADMIN, PermissionCode.RECOVERY_READ_TENANT,
                 PermissionCode.RECOVERY_REPLAY_TENANT);
     }
 
+    /**
+     * 按固定绑定构造带完整身份和摘要的测试投递，供消费入口验证。
+     */
     static Delivery delivery(NotificationEventContract.Binding binding, UUID recipient,
                              UUID sourceId, String kind, String title) {
         byte[] sourceEffect = NotificationWireCodec.deriveKey("FD-NOTIFICATION-TEST-SOURCE-V1",
@@ -90,16 +110,25 @@ final class NotificationIntegrationFixtures {
         return new Delivery(messageId, sourceId, body, properties, main, dlq);
     }
 
+    /**
+     * 将 UUID 编码为数据库使用的二进制值，空标识保持为空。
+     */
     static byte[] bytes(UUID value) {
         return ByteBuffer.allocate(16).putLong(value.getMostSignificantBits())
                 .putLong(value.getLeastSignificantBits()).array();
     }
 
+    /**
+     * 在 UUID 与持久化表示之间转换，保持标识高低位的编码顺序一致。
+     */
     static UUID uuid(byte[] value) {
         ByteBuffer buffer = ByteBuffer.wrap(value);
         return new UUID(buffer.getLong(), buffer.getLong());
     }
 
+    /**
+     * 生成仅供测试签发与验签的 RSA 密钥对，使身份流程无需外部密钥文件。
+     */
     private static KeyPair newKeyPair() {
         try {
             return KeyPairGenerator.getInstance("RSA").generateKeyPair();
@@ -109,12 +138,18 @@ final class NotificationIntegrationFixtures {
         }
     }
 
+    /**
+     * 将测试公钥编码为 PEM，供应用配置中的实际验签器加载。
+     */
     private static String publicKeyPem() {
         String nl = System.lineSeparator();
         String encoded = Base64.getEncoder().encodeToString(KEY_PAIR.getPublic().getEncoded());
         return "-----BEGIN PUBLIC KEY-----" + nl + encoded + nl + "-----END PUBLIC KEY-----";
     }
 
+    /**
+     * 冻结测试样例或传输快照，保留原始身份、字节和摘要供正常及错误变体场景复用。
+     */
     record Delivery(UUID messageId, UUID sourceId, byte[] body, Map<String, String> properties,
                     NotificationTransportMessage main, NotificationTransportMessage dlq) {
     }

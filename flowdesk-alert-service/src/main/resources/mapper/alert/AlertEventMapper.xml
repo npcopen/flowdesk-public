@@ -1,0 +1,96 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+  Webhook 防重放凭据及告警原始事件持久化接口，支持去重、周期匹配和事件查询。
+  PreTrust 入口在可信租户上下文建立前使用显式租户参数；普通入口校验当前租户。
+-->
+<mapper namespace="com.flowdesk.alert.mapper.AlertEventMapper">
+  <!-- 保存集成的 Webhook nonce 摘要、请求时间及过期时间，供防重放唯一性约束识别重复请求。 -->
+  <insert id="sqlInsertNoncePreTrust">
+INSERT INTO webhook_nonce
+                  (tenant_id,nonce_id,integration_id,nonce_hash,request_timestamp,
+                   accepted_at,expires_at,created_by_type,created_by_id)
+                VALUES (#{tenantId},#{nonceId},#{integrationId},#{nonceHash},#{requestTimestamp},#{acceptedAt},#{expiresAt},'INTEGRATION',#{integrationId})
+  </insert>
+  <!-- 按租户、集成和外部事件标识查询既有事件，用于校验重复投递，并同时返回集成展示信息。 -->
+  <select id="sqlFindEventPreTrust" resultType="com.flowdesk.alert.model.EventRow">
+SELECT e.alert_event_id,e.integration_id,i.integration_code,i.integration_name,
+                       e.external_event_id,e.event_type,e.fingerprint,e.alert_cycle_ref AS cycle_ref,
+                       e.occurred_at,e.received_at,e.disposition,e.incident_id,e.raw_body_sha256,
+                       e.summary,e.correlation_id
+                FROM alert_event e JOIN monitoring_integration i
+                  ON i.tenant_id=e.tenant_id AND i.integration_id=e.integration_id
+                WHERE e.tenant_id=#{tenantId} AND e.integration_id=#{integrationId} AND e.external_event_id=#{externalEventId}
+  </select>
+  <!-- 查询同租户、指纹及周期内未关联实例的 RESOLVED 事件，按接收时间和事件标识返回最早一条。 -->
+  <select id="sqlFindUnlinkedRecoveryPreTrust" resultType="com.flowdesk.alert.model.EventRow">
+SELECT e.alert_event_id,e.integration_id,i.integration_code,i.integration_name,
+                       e.external_event_id,e.event_type,e.fingerprint,e.alert_cycle_ref AS cycle_ref,
+                       e.occurred_at,e.received_at,e.disposition,e.incident_id,e.raw_body_sha256,
+                       e.summary,e.correlation_id
+                FROM alert_event e JOIN monitoring_integration i
+                  ON i.tenant_id=e.tenant_id AND i.integration_id=e.integration_id
+                WHERE e.tenant_id=#{tenantId} AND e.fingerprint=#{fingerprint} AND e.alert_cycle_ref=#{cycleRef}
+                  AND e.event_type='RESOLVED' AND e.incident_id IS NULL
+                ORDER BY e.received_at,e.alert_event_id LIMIT 1
+  </select>
+  <!-- 查询同指纹在 recoveredAt 后发生、未关联且对应周期尚未建立实例的 FIRING 事件，按发生时间和事件标识排序。 -->
+  <select id="sqlFindWaitingCycles" resultType="com.flowdesk.alert.model.EventRow">
+SELECT e.alert_event_id,e.integration_id,i.integration_code,i.integration_name,
+                       e.external_event_id,e.event_type,e.fingerprint,e.alert_cycle_ref AS cycle_ref,
+                       e.occurred_at,e.received_at,e.disposition,e.incident_id,e.raw_body_sha256,
+                       e.summary,e.correlation_id
+                FROM alert_event e JOIN monitoring_integration i
+                  ON i.tenant_id=e.tenant_id AND i.integration_id=e.integration_id
+                WHERE e.tenant_id=#{tenantId} AND e.fingerprint=#{fingerprint} AND e.incident_id IS NULL
+                  AND e.event_type='FIRING' AND e.occurred_at&gt;#{recoveredAt}
+                  AND NOT EXISTS (SELECT 1 FROM incident n JOIN alert_event f
+                    ON f.tenant_id=n.tenant_id AND f.alert_event_id=n.first_event_id
+                    WHERE n.tenant_id=e.tenant_id AND n.fingerprint=e.fingerprint
+                      AND f.alert_cycle_ref=e.alert_cycle_ref)
+                ORDER BY e.occurred_at,e.alert_event_id
+  </select>
+  <!-- 写入事件外部标识、周期、处置结果及原文摘要；原文引用和密文列为空，创建主体记录为监控集成。 -->
+  <insert id="sqlInsertEventPreTrust">
+INSERT INTO alert_event
+                  (tenant_id,alert_event_id,integration_id,external_event_id,event_type,
+                   fingerprint,alert_cycle_ref,occurred_at,received_at,disposition,incident_id,
+                   raw_body_sha256,raw_body_ref,raw_body_ciphertext,summary,correlation_id,
+                   created_at,created_by_type,created_by_id)
+                VALUES (#{tenantId},#{eventId},#{integrationId},#{externalId},#{eventType},#{fingerprint},#{cycleRef},#{occurredAt},#{receivedAt},#{disposition},#{incidentId},#{rawHash},NULL,NULL,#{summary},#{correlationId},#{receivedAt},'INTEGRATION',#{integrationId})
+  </insert>
+  <!-- 按租户和事件标识读取告警详情，并关联监控集成编码及名称。 -->
+  <select id="sqlFindEvent" resultType="com.flowdesk.alert.model.EventRow">
+SELECT e.alert_event_id,e.integration_id,i.integration_code,i.integration_name,
+                       e.external_event_id,e.event_type,e.fingerprint,e.alert_cycle_ref AS cycle_ref,
+                       e.occurred_at,e.received_at,e.disposition,e.incident_id,e.raw_body_sha256,
+                       e.summary,e.correlation_id
+                FROM alert_event e JOIN monitoring_integration i
+                  ON i.tenant_id=e.tenant_id AND i.integration_id=e.integration_id
+                WHERE e.tenant_id=#{tenantId} AND e.alert_event_id=#{eventId}
+  </select>
+
+  <!-- 判断同租户、指纹及周期是否恰有一个已建立实例，用于推导未直接关联事件的展示处置结果。 -->
+  <sql id="representedCycle">(SELECT COUNT(*) FROM incident rn JOIN alert_event rf ON rf.tenant_id=rn.tenant_id AND rf.alert_event_id=rn.first_event_id WHERE rn.tenant_id=e.tenant_id AND rn.fingerprint=e.fingerprint AND rf.alert_cycle_ref=e.alert_cycle_ref)=1</sql>
+  <!-- 排序列白名单：-occurredAt 使用发生时间，其余使用接收时间，避免将外部参数直接拼接为列名。 -->
+  <sql id="eventSort"><choose><when test="sort == '-occurredAt'">e.occurred_at</when><otherwise>e.received_at</otherwise></choose></sql>
+  <!-- 按类型、处置、周期、实例及时间等条件筛选，结合已建立周期推导展示处置状态；以时间与事件标识进行稳定游标分页并限制条数。 -->
+  <select id="sqlListEvents" resultType="com.flowdesk.alert.model.EventRow">
+    SELECT e.alert_event_id,e.integration_id,i.integration_code,i.integration_name,e.external_event_id,e.event_type,e.fingerprint,e.alert_cycle_ref AS cycle_ref,e.occurred_at,e.received_at,e.disposition,e.incident_id,e.raw_body_sha256,e.summary,e.correlation_id
+    FROM alert_event e JOIN monitoring_integration i ON i.tenant_id=e.tenant_id AND i.integration_id=e.integration_id WHERE e.tenant_id=#{tenantId}
+    <if test="filter.eventType != null">AND e.event_type=#{filter.eventType}</if>
+    <choose>
+      <when test="filter.disposition == 'REVIEW_REQUIRED'">AND e.disposition='REVIEW_REQUIRED' AND NOT (<include refid="representedCycle"/>)</when>
+      <when test="filter.disposition == 'APPLIED'">AND (e.disposition='APPLIED' OR (e.incident_id IS NULL AND (<include refid="representedCycle"/>)))</when>
+      <otherwise><if test="filter.disposition != null">AND e.disposition=#{filter.disposition}</if></otherwise>
+    </choose>
+    <if test="filter.incidentId != null">AND (e.incident_id=#{filter.incidentId} OR (e.incident_id IS NULL AND EXISTS (SELECT 1 FROM incident linked JOIN alert_event first_event ON first_event.tenant_id=linked.tenant_id AND first_event.alert_event_id=linked.first_event_id WHERE linked.tenant_id=#{tenantId} AND linked.incident_id=#{filter.incidentId} AND linked.fingerprint=e.fingerprint AND first_event.alert_cycle_ref=e.alert_cycle_ref)))</if>
+    <if test="filter.fingerprint != null">AND e.fingerprint=#{filter.fingerprint}</if>
+    <if test="filter.cycleRef != null">AND e.alert_cycle_ref=#{filter.cycleRef}</if>
+    <if test="filter.externalEventId != null">AND e.external_event_id=#{filter.externalEventId}</if>
+    <if test="filter.receivedFrom != null">AND e.received_at &gt;= #{filter.receivedFrom}</if>
+    <if test="filter.receivedTo != null">AND e.received_at &lt;= #{filter.receivedTo}</if>
+    <if test="cursorTime != null">AND (<include refid="eventSort"/> <choose><when test="sort == 'receivedAt'">&gt;</when><otherwise>&lt;</otherwise></choose> #{cursorTime} OR (<include refid="eventSort"/>=#{cursorTime} AND e.alert_event_id <choose><when test="sort == 'receivedAt'">&gt;</when><otherwise>&lt;</otherwise></choose> #{cursorId}))</if>
+    ORDER BY <include refid="eventSort"/> <choose><when test="sort == 'receivedAt'">ASC</when><otherwise>DESC</otherwise></choose>,e.alert_event_id <choose><when test="sort == 'receivedAt'">ASC</when><otherwise>DESC</otherwise></choose> LIMIT #{limit}
+  </select>
+</mapper>

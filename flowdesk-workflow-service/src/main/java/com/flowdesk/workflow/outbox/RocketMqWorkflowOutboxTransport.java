@@ -13,19 +13,27 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-/** Two frozen producer groups behind one contract-selecting transport boundary. */
+/**
+ * 依据契约选择两个独立生产者组，发送实例建立及审批完成事件。
+ */
 public final class RocketMqWorkflowOutboxTransport
         implements WorkflowOutboxTransport, AutoCloseable {
     private final DefaultMQProducer establishedProducer;
     private final DefaultMQProducer finalizedProducer;
     private final AtomicBoolean started = new AtomicBoolean();
 
+    /**
+     * 初始化组件依赖与运行参数，使后续调用使用一致的协作对象。
+     */
     private RocketMqWorkflowOutboxTransport(DefaultMQProducer establishedProducer,
                                             DefaultMQProducer finalizedProducer) {
         this.establishedProducer = establishedProducer;
         this.finalizedProducer = finalizedProducer;
     }
 
+    /**
+     * 使用已校验的代理地址和固定访问身份创建传输组件，保持冻结生产组配置一致。
+     */
     public static RocketMqWorkflowOutboxTransport create(
             WorkflowOutboxPublisherProperties properties) {
         properties.validateEnabled();
@@ -38,6 +46,9 @@ public final class RocketMqWorkflowOutboxTransport
                         "finalized", properties.getNameServer(), acl));
     }
 
+    /**
+     * 按指定身份及生产组构造生产者，为不同冻结事件绑定各自发送配置。
+     */
     static DefaultMQProducer producer(String group, String suffix,
                                       String nameServer, RPCHook acl) {
         DefaultMQProducer producer = new DefaultMQProducer(group, acl);
@@ -52,6 +63,9 @@ public final class RocketMqWorkflowOutboxTransport
         return producer;
     }
 
+    /**
+     * 启动当前组件并建立消息连接或调度资源，准备处理生命周期内的任务。
+     */
     public synchronized void start() throws Exception {
         if (started.get()) return;
         try {
@@ -66,6 +80,9 @@ public final class RocketMqWorkflowOutboxTransport
         }
     }
 
+    /**
+     * 发送当前消息并返回代理确认结果，重复发送保留原身份与载荷。
+     */
     @Override
     public WorkflowOutboxSendResult send(WorkflowOutboxMessage outbox) throws Exception {
         if (!started.get()) throw new IllegalStateException("Workflow Outbox is not started");
@@ -95,6 +112,9 @@ public final class RocketMqWorkflowOutboxTransport
                         : "RocketMQ send status " + result.getSendStatus().name());
     }
 
+    /**
+     * 关闭持有的消息代理资源并释放连接，结束传输对象生命周期。
+     */
     @Override
     public synchronized void close() {
         if (started.compareAndSet(true, false)) {

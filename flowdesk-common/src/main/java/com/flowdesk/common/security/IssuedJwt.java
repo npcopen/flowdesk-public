@@ -2,6 +2,8 @@ package com.flowdesk.common.security;
 
 import java.time.Instant;
 
-/** A newly issued JWT and its authoritative expiry. */
+/**
+ * 新签发的 JWT 及签发方确定的到期时间。
+ */
 public record IssuedJwt(String token, Instant expiresAt) {
 }

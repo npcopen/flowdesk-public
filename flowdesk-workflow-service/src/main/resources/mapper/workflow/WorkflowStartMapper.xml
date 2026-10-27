@@ -1,0 +1,300 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+  工作流启动消息消费与实例建立的持久化接口。
+  按租户保存收件箱幂等事实、版本快照引用、实例及首级任务，并提供发件箱、审计与失败恢复所需的底层操作。
+-->
+<mapper namespace="com.flowdesk.workflow.start.WorkflowStartMapper">
+  <!--
+    启动收件箱映射：读取消息身份、业务意图、正文摘要、处理结果与锁版本。
+  -->
+  <resultMap id="InboxRecord" type="com.flowdesk.workflow.model.start.WorkflowStartModels$InboxRecord">
+    <constructor>
+      <arg column="inbox_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg column="message_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg column="business_intent_key" javaType="[B"/>
+      <arg column="contract_ref" javaType="java.lang.String"/>
+      <arg column="contract_version" javaType="_int"/>
+      <arg column="body_sha256" javaType="[B"/>
+      <arg column="status" javaType="java.lang.String"/>
+      <arg column="result_type" javaType="java.lang.String"/>
+      <arg column="result_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg column="lock_version" javaType="_long"/>
+    </constructor>
+  </resultMap>
+
+  <!--
+    收件箱恢复映射：读取恢复状态、锁版本及最近一次重放关联标识。
+  -->
+  <resultMap id="RecoveryRecord" type="com.flowdesk.workflow.model.start.WorkflowStartModels$RecoveryRecord">
+    <constructor>
+      <arg column="recovery_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg column="state" javaType="java.lang.String"/>
+      <arg column="lock_version" javaType="_long"/>
+      <arg column="last_replay_correlation_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+    </constructor>
+  </resultMap>
+
+  <!--
+    启动版本快照映射：保留版本与定义状态，以及条件、审批人及快照摘要。
+  -->
+  <resultMap id="VersionSnapshot" type="com.flowdesk.workflow.model.start.WorkflowStartModels$VersionSnapshot">
+    <constructor>
+      <arg column="workflow_version_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg column="definition_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg column="version_no" javaType="_int"/>
+      <arg column="version_status" javaType="java.lang.String"/>
+      <arg column="definition_status" javaType="java.lang.String"/>
+      <arg column="condition_field_code" javaType="java.lang.String"/>
+      <arg column="condition_operator" javaType="java.lang.String"/>
+      <arg column="condition_value_type" javaType="java.lang.String"/>
+      <arg column="condition_value_text" javaType="java.lang.String"/>
+      <arg column="approval_level_count" javaType="_int"/>
+      <arg column="level1_approver_user_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg column="level2_approver_user_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg column="snapshot_sha256" javaType="[B"/>
+    </constructor>
+  </resultMap>
+
+  <!--
+    按租户、生产服务和消息标识读取收件箱事实。
+    用于消息级幂等核对；lock 为 true 时追加 FOR UPDATE，供事务内安全读取处理状态。
+  -->
+  <select id="findInboxByMessage" resultMap="InboxRecord">
+    SELECT inbox_id, message_id, business_intent_key, contract_ref,
+                       contract_version, body_sha256, status, result_type, result_id,
+                       lock_version
+                FROM inbox_message
+                WHERE tenant_id = #{messageTenantId} AND producer_service = #{messageProducerService} AND message_id = #{messageMessageId}
+    <if test="lock">FOR UPDATE</if>
+  </select>
+
+  <!--
+    按生产服务、契约和业务意图键读取租户内收件箱。
+    用于识别消息标识不同但业务意图相同的投递；lock 为 true 时锁定匹配记录。
+  -->
+  <select id="findInboxByIntent" resultMap="InboxRecord">
+    SELECT inbox_id, message_id, business_intent_key, contract_ref,
+                       contract_version, body_sha256, status, result_type, result_id,
+                       lock_version
+                FROM inbox_message
+                WHERE tenant_id = #{messageTenantId} AND producer_service = #{messageProducerService}
+                  AND contract_ref = #{messageContractRef} AND business_intent_key = #{messageBusinessIntentKey}
+    <if test="lock">FOR UPDATE</if>
+  </select>
+
+  <!--
+    读取启动消息明确引用的工作流版本快照。
+    同时匹配租户、定义标识、版本标识和版本号，联查定义状态，供调用方验证版本与定义是否可用。
+  -->
+  <select id="findVersion" resultMap="VersionSnapshot">
+    SELECT v.workflow_version_id, v.definition_id, v.version_no,
+                       v.status AS version_status, d.status AS definition_status,
+                       v.condition_field_code, v.condition_operator,
+                       v.condition_value_type, v.condition_value_text,
+                       v.approval_level_count, v.level1_approver_user_id,
+                       v.level2_approver_user_id, v.snapshot_sha256
+                FROM workflow_version v
+                JOIN workflow_definition d
+                  ON d.tenant_id = v.tenant_id AND d.definition_id = v.definition_id
+                WHERE v.tenant_id = #{messageTenantId} AND v.workflow_version_id = #{messageWorkflowVersionId}
+                  AND v.definition_id = #{messageWorkflowDefinitionId} AND v.version_no = #{messageVersionNo}
+  </select>
+
+  <!--
+    保存已成功建立工作流的收件箱消息。
+    保留原始正文、摘要及消息身份，状态设为 PROCESSED，以 WORKFLOW_INSTANCE 关联建立的实例。
+  -->
+  <insert id="insertProcessedInbox">
+    INSERT INTO inbox_message
+                  (tenant_id, inbox_id, producer_service, message_id, business_intent_key,
+                   contract_ref, contract_version, body_bytes, body_sha256, correlation_id,
+                   causation_id, occurred_at, status, result_type, result_id, attempt_count,
+                   first_received_at, last_attempt_at, processed_at)
+                VALUES (#{messageTenantId}, #{inboxId}, #{messageProducerService}, #{messageMessageId}, #{messageBusinessIntentKey}, #{messageContractRef}, #{messageContractVersion}, #{messageBodyBytes}, #{messageBodySha256}, #{messageCorrelationId}, #{messageCausationId}, #{messageOccurredAt}, 'PROCESSED',
+                        'WORKFLOW_INSTANCE', #{workflowInstanceId}, 1, #{now}, #{now}, #{now})
+  </insert>
+
+  <!--
+    保存已判定拒绝处理的启动消息。
+    写入 REJECTED、尝试次数、错误码与处理完成时间，同时保留完整消息用于查询与核对。
+  -->
+  <insert id="insertRejectedInbox">
+    INSERT INTO inbox_message
+                  (tenant_id, inbox_id, producer_service, message_id, business_intent_key,
+                   contract_ref, contract_version, body_bytes, body_sha256, correlation_id,
+                   causation_id, occurred_at, status, attempt_count, last_error_code,
+                   first_received_at, last_attempt_at, processed_at)
+                VALUES (#{messageTenantId}, #{inboxId}, #{messageProducerService}, #{messageMessageId}, #{messageBusinessIntentKey}, #{messageContractRef}, #{messageContractVersion}, #{messageBodyBytes}, #{messageBodySha256}, #{messageCorrelationId}, #{messageCausationId}, #{messageOccurredAt}, 'REJECTED', #{attemptCount}, #{errorCode}, #{now}, #{now}, #{now})
+  </insert>
+
+  <!--
+    保存需要人工恢复的启动消息。
+    记录 RECOVERY_REQUIRED、投递次数和错误码，保留正文及幂等身份，但不设置处理完成时间。
+  -->
+  <insert id="insertRecoveryRequiredInbox">
+    INSERT INTO inbox_message
+                  (tenant_id, inbox_id, producer_service, message_id, business_intent_key,
+                   contract_ref, contract_version, body_bytes, body_sha256, correlation_id,
+                   causation_id, occurred_at, status, attempt_count, last_error_code,
+                   first_received_at, last_attempt_at)
+                VALUES (#{messageTenantId}, #{inboxId}, #{messageProducerService}, #{messageMessageId}, #{messageBusinessIntentKey}, #{messageContractRef}, #{messageContractVersion}, #{messageBodyBytes}, #{messageBodySha256}, #{messageCorrelationId}, #{messageCausationId}, #{messageOccurredAt}, 'RECOVERY_REQUIRED', #{deliveryAttempts}, #{errorCode}, #{now}, #{now})
+  </insert>
+
+  <!--
+    查找指定收件箱对应的恢复记录。
+    限定租户及 INBOX 方向，返回恢复状态、锁版本与最近重放关联标识；可选 FOR UPDATE。
+  -->
+  <select id="findInboxRecovery" resultMap="RecoveryRecord">
+    SELECT recovery_id, state, lock_version, last_replay_correlation_id
+                FROM message_recovery
+                WHERE tenant_id = #{tenantId} AND direction = 'INBOX' AND source_record_id = #{inboxId}
+    <if test="lock">FOR UPDATE</if>
+  </select>
+
+  <!--
+    为失败的启动消息新增开放的收件箱恢复记录。
+    关联 inboxId 与业务意图键，记录投递次数和错误摘要，死信时间及需要恢复时间均设为 now。
+  -->
+  <insert id="insertInboxRecovery">
+    INSERT INTO message_recovery
+                  (tenant_id, recovery_id, direction, source_record_id,
+                   business_intent_key, state, attempt_count, last_error_code,
+                   last_error_summary, dead_lettered_at, recovery_required_at)
+                VALUES (#{messageTenantId}, #{recoveryId}, 'INBOX', #{inboxId}, #{messageBusinessIntentKey}, 'OPEN', #{deliveryAttempts}, #{errorCode}, #{errorSummary}, #{now}, #{now})
+  </insert>
+
+  <!--
+    将重放成功的收件箱更新为已处理并关联实例。
+    核对租户、消息身份、契约、业务意图、正文摘要及锁版本，仅迁移 RECOVERY_REQUIRED 记录。
+  -->
+  <update id="completeRecoveryInbox">
+    UPDATE inbox_message
+                SET status = 'PROCESSED', result_type = 'WORKFLOW_INSTANCE', result_id = #{workflowInstanceId},
+                    attempt_count = attempt_count + 1, last_error_code = NULL,
+                    last_attempt_at = #{now}, processed_at = #{now}, lock_version = lock_version + 1,
+                    updated_at = #{now}, updated_by_type = 'SERVICE', updated_by_id = NULL
+                WHERE tenant_id = #{messageTenantId} AND inbox_id = #{inboxInboxId} AND status = 'RECOVERY_REQUIRED'
+                  AND producer_service = #{messageProducerService} AND message_id = #{messageMessageId} AND contract_ref = #{messageContractRef}
+                  AND contract_version = #{messageContractVersion} AND business_intent_key = #{messageBusinessIntentKey} AND body_sha256 = #{messageBodySha256}
+                  AND lock_version = #{inboxLockVersion}
+  </update>
+
+  <!--
+    将重放后确认拒绝的收件箱更新为 REJECTED。
+    核对完整消息身份、正文摘要和锁版本，增加尝试次数，记录错误码及处理完成时间。
+  -->
+  <update id="rejectRecoveryInbox">
+    UPDATE inbox_message
+                SET status = 'REJECTED', attempt_count = attempt_count + 1,
+                    last_error_code = #{errorCode}, last_attempt_at = #{now}, processed_at = #{now},
+                    lock_version = lock_version + 1, updated_at = #{now},
+                    updated_by_type = 'SERVICE', updated_by_id = NULL
+                WHERE tenant_id = #{messageTenantId} AND inbox_id = #{inboxInboxId} AND status = 'RECOVERY_REQUIRED'
+                  AND producer_service = #{messageProducerService} AND message_id = #{messageMessageId} AND contract_ref = #{messageContractRef}
+                  AND contract_version = #{messageContractVersion} AND business_intent_key = #{messageBusinessIntentKey} AND body_sha256 = #{messageBodySha256}
+                  AND lock_version = #{inboxLockVersion}
+  </update>
+
+  <!--
+    在收件箱处理结束后解决对应恢复记录。
+    限定租户、来源收件箱、INBOX 方向及锁版本，仅允许 OPEN 或 REPLAYING 转为 RESOLVED。
+  -->
+  <update id="resolveInboxRecovery">
+    UPDATE message_recovery
+                SET state = 'RESOLVED', next_attempt_at = NULL, resolved_at = #{now},
+                    lock_version = lock_version + 1, updated_at = #{now},
+                    updated_by_type = 'SERVICE', updated_by_id = NULL
+                WHERE tenant_id = #{tenantId} AND recovery_id = #{recoveryRecoveryId} AND direction = 'INBOX'
+                  AND source_record_id = #{inboxId} AND state IN ('OPEN', 'REPLAYING')
+                  AND lock_version = #{recoveryLockVersion}
+  </update>
+
+  <!--
+    保存启动消息创建的工作流实例及输入快照。
+    固定引用消息携带的定义版本，保存业务意图、条件结果、状态和级别；完成时间由调用方按流程传入。
+  -->
+  <insert id="insertInstance">
+    INSERT INTO workflow_instance
+                  (tenant_id, workflow_instance_id, ticket_id, start_intent_key,
+                   definition_id, workflow_version_id, workflow_version_no,
+                   input_snapshot_json, input_snapshot_sha256, condition_result,
+                   status, current_level, started_at, completed_at)
+                VALUES (#{messageTenantId}, #{workflowInstanceId}, #{messageTicketId}, #{messageBusinessIntentKey}, #{messageWorkflowDefinitionId}, #{messageWorkflowVersionId}, #{messageVersionNo}, #{inputSnapshotJson}, #{inputSnapshotSha256}, #{conditionResult}, #{status}, #{currentLevel}, #{now}, #{completedAt})
+  </insert>
+
+  <!--
+    为新实例创建一级待审批任务。
+    写入租户、任务标识、实例和一级审批人，级别固定为 1，初始状态为 PENDING。
+  -->
+  <insert id="insertFirstLevelTask">
+    INSERT INTO approval_task
+                  (tenant_id, approval_task_id, workflow_instance_id, level_no,
+                   approver_user_id, status)
+                VALUES (#{tenantId}, #{taskId}, #{workflowInstanceId}, 1, #{approverUserId}, 'PENDING')
+  </insert>
+
+  <!--
+    保存工作流实例建立事件的本地发布记录。
+    记录消息及发布身份、正文摘要和关联链路，使用契约版本 1，初始化为 PENDING、尝试次数 0。
+  -->
+  <insert id="insertInstanceEstablishedOutbox">
+    INSERT INTO outbox_event
+                  (tenant_id, outbox_id, message_id, publication_key,
+                   business_intent_key, aggregate_type, aggregate_id,
+                   contract_ref, contract_version, body_bytes, body_sha256,
+                   correlation_id, causation_id, status, attempt_count,
+                   next_attempt_at, lock_version, created_at, created_by_type,
+                   created_by_id, updated_at, updated_by_type, updated_by_id)
+                VALUES (#{tenantId}, #{outboxId}, #{messageId}, #{publicationKey}, #{businessIntentKey}, 'WORKFLOW_INSTANCE', #{workflowInstanceId}, #{contractRef}, 1, #{body}, #{bodySha256}, #{correlationId}, #{causationId},
+                        'PENDING', 0, #{now}, 0, #{now}, 'SERVICE', NULL, #{now}, 'SERVICE', NULL)
+  </insert>
+
+  <!--
+    记录启动消息处理过程产生的服务审计。
+    操作人类型固定为 SERVICE，目标、结果、原因和错误码由调用方提供，保留消息关联与因果标识。
+  -->
+  <insert id="insertAudit">
+    INSERT INTO audit_record
+                  (tenant_id, audit_id, action_code, target_type, target_id, outcome,
+                   actor_type, actor_id, reason, error_code, correlation_id,
+                   causation_id, occurred_at)
+                VALUES (#{messageTenantId}, #{auditId}, #{actionCode}, #{targetType}, #{targetId}, #{outcome}, 'SERVICE', NULL, #{reason}, #{errorCode}, #{messageCorrelationId}, #{messageCausationId}, #{now})
+  </insert>
+  <!--
+    启动实例核对映射：保留工单、意图、版本引用、输入摘要及条件判断结果。
+  -->
+  <resultMap id="InstanceRecord" type="com.flowdesk.workflow.model.start.WorkflowStartModels$InstanceRecord">
+    <constructor>
+      <arg column="workflow_instance_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg column="ticket_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg column="start_intent_key" javaType="[B"/>
+      <arg column="definition_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg column="workflow_version_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg column="workflow_version_no" javaType="_int"/>
+      <arg column="input_snapshot_sha256" javaType="[B"/>
+      <arg column="condition_result" javaType="_boolean"/>
+    </constructor>
+  </resultMap>
+  <!--
+    按工单或启动业务意图查询租户内已有实例。
+    byTicket 为 true 时按 ticket_id 匹配，否则按 start_intent_key 匹配；lock 可为幂等处理申请行锁。
+  -->
+  <select id="findInstances" resultMap="InstanceRecord">
+    SELECT workflow_instance_id, ticket_id, start_intent_key, definition_id,
+           workflow_version_id, workflow_version_no, input_snapshot_sha256, condition_result
+    FROM workflow_instance WHERE tenant_id=#{tenantId}
+    <choose><when test="byTicket">AND ticket_id=#{value}</when>
+      <otherwise>AND start_intent_key=#{value}</otherwise></choose>
+    <if test="lock">FOR UPDATE</if>
+  </select>
+  <!--
+    统计历史上因审批人不具资格而拒绝的启动消息。
+    扫描工作流启动 v1 契约下的 REJECTED 记录并匹配指定错误码，该维护查询不按租户筛选。
+  -->
+  <select id="countLegacyIamDenials" resultType="java.lang.Integer">
+    SELECT COUNT(*) FROM inbox_message WHERE status='REJECTED'
+      AND last_error_code='WORKFLOW_APPROVER_NOT_ELIGIBLE'
+      AND contract_ref='flowdesk.workflow.start.v1' AND contract_version=1
+  </select>
+</mapper>

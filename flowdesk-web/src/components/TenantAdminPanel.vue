@@ -1,4 +1,5 @@
 <script setup lang="ts">
+/** 租户用户、角色与权限绑定的管理面板，按细分权限启用读取和修改操作。 */
 import { computed, onMounted, ref, watch } from "vue";
 import {
   KeyRound,
@@ -69,6 +70,10 @@ const availableTabs = computed<Tab[]>(() => {
   return result;
 });
 
+/**
+ * 按当前权限并行加载用户、角色和权限列表。
+ * 分别处理各请求结果，单个管理域失败不会掩盖其他可用数据。
+ */
 async function load(): Promise<void> {
   loading.value = true;
   error.value = null;
@@ -119,6 +124,10 @@ async function load(): Promise<void> {
   }
 }
 
+/**
+ * 加载当前选中用户的角色绑定及选中角色的权限绑定。
+ * 读取结果用于展示授权状态和后续修改的版本条件。
+ */
 async function loadBindings(): Promise<void> {
   if (!canReadBindings.value || !selectedUserId.value || !selectedRoleId.value) {
     userBindings.value = [];
@@ -155,9 +164,17 @@ watch(
 );
 onMounted(load);
 
+/**
+ * 根据资源锁版本构造约定的 ETag。
+ * 供已有资源的授权或状态更新执行乐观锁校验。
+ */
 function etag(version: number): string {
   return `"lv:${version}"`;
 }
+/**
+ * 判断绑定集合是否已包含目标资源。
+ * 区分已有绑定的版本更新和新绑定的创建条件。
+ */
 function hasBinding(
   items: AccessBinding[],
   targetId: string,
@@ -165,6 +182,10 @@ function hasBinding(
   return items.find((item) => item.targetId === targetId);
 }
 
+/**
+ * 提交新增用户表单并处理请求反馈。
+ * 创建成功后清空输入并刷新列表，失败时保留表单供修正或重试。
+ */
 async function createUser(): Promise<void> {
   if (!canManageUsers.value) return;
   actionError.value = null;
@@ -185,6 +206,10 @@ async function createUser(): Promise<void> {
     saving.value = false;
   }
 }
+/**
+ * 在启用和停用状态之间切换用户。
+ * 使用当前用户版本提交更新，并刷新管理数据。
+ */
 async function toggleUserStatus(user: UserSummary): Promise<void> {
   if (!canManageUsers.value) return;
   actionError.value = null;
@@ -202,6 +227,10 @@ async function toggleUserStatus(user: UserSummary): Promise<void> {
     saving.value = false;
   }
 }
+/**
+ * 提交新增角色配置。
+ * 成功后清空表单并刷新列表，保留错误信息供操作者定位问题。
+ */
 async function createRole(): Promise<void> {
   if (!canManageRoles.value) return;
   actionError.value = null;
@@ -217,6 +246,10 @@ async function createRole(): Promise<void> {
     saving.value = false;
   }
 }
+/**
+ * 切换角色的启用状态。
+ * 携带现有锁版本构造的 ETag，避免覆盖其他管理操作。
+ */
 async function toggleRoleStatus(role: Role): Promise<void> {
   if (!canManageRoles.value) return;
   actionError.value = null;
@@ -234,6 +267,10 @@ async function toggleRoleStatus(role: Role): Promise<void> {
     saving.value = false;
   }
 }
+/**
+ * 授予或撤销选中用户的角色。
+ * 按绑定是否已存在选择创建条件或版本条件，随后重新读取授权结果。
+ */
 async function toggleUserRole(role: Role): Promise<void> {
   if (!canManageBindings.value || !selectedUser.value) return;
   actionError.value = null;
@@ -256,6 +293,10 @@ async function toggleUserRole(role: Role): Promise<void> {
     saving.value = false;
   }
 }
+/**
+ * 授予或撤销选中角色的权限。
+ * 按现有绑定选择版本条件，并刷新绑定视图展示服务端最终状态。
+ */
 async function toggleRolePermission(permission: Permission): Promise<void> {
   if (!canManageBindings.value || !selectedRole.value) return;
   actionError.value = null;

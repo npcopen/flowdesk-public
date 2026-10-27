@@ -9,6 +9,10 @@ it('reuses the same ticket intent after the first successful write loses its res
   const keys: string[] = []
   const bodies: string[] = []
   const persisted = new Map<string, { ticketId: string }>()
+  /**
+   * 把测试载荷封装为标准 JSON HTTP 成功响应。
+   * 包含数据与分页结束标记，供真实请求客户端的重试场景使用。
+   */
   const envelope = (data: unknown) => new Response(JSON.stringify({ data, meta: { page: { nextPageToken: null } } }), { status: 200, headers: { 'Content-Type': 'application/json' } })
   const transport = vi.fn(async (input: string, init: RequestInit) => {
     if (init.method !== 'POST') return envelope(input.includes('service-catalog-items')

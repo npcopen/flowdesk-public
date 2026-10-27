@@ -1,0 +1,1 @@
+This classpath fixture must never be exposed by the API-only gateway.

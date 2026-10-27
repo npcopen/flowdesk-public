@@ -5,6 +5,10 @@ import {
   isOpaqueResourceNotFound,
 } from "./errors";
 
+/**
+ * 构造指定 HTTP 状态与业务码的统一错误对象。
+ * 固定关联标识，使错误分类测试聚焦状态和业务规则。
+ */
 function apiError(status: number, code: string): ApiClientError {
   return new ApiClientError({ status, code, correlationId: "test-correlation" });
 }

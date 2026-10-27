@@ -16,7 +16,9 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.fail;
 
-/** Frozen M8 Notification wire fixtures exercised through the consumer guard. */
+/**
+ * 通知冻结消息样例测试，核验两种来源绑定、可信边界及非法信封拒绝行为。
+ */
 class NotificationContractFixtureTest {
     private static final NotificationEnvelopeGuard GUARD = new NotificationEnvelopeGuard();
     private static final UUID TENANT = UUID.fromString("11111111-1111-1111-1111-111111111111");
@@ -25,6 +27,9 @@ class NotificationContractFixtureTest {
     private static final UUID CORRELATION = UUID.fromString("44444444-4444-4444-4444-444444444444");
     private static final Instant OCCURRED_AT = Instant.parse("2026-08-30T00:00:00.000000Z");
 
+    /**
+     * 验证冻结样例与共享绑定一致且规范消息可以被接纳，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void frozenFixturesMatchSharedBindingsAndAcceptCanonicalDeliveries() {
         for (String resource : fixtures()) {
@@ -60,6 +65,9 @@ class NotificationContractFixtureTest {
         }
     }
 
+    /**
+     * 验证消息守卫在建立租户信任之前拒绝违反冻结协议的输入，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void guardRejectsFrozenWireViolationsBeforeTenantTrust() {
         FixtureDelivery delivery = delivery(NotificationEventContract.TICKET,
@@ -108,11 +116,17 @@ class NotificationContractFixtureTest {
                 NotificationContractViolation.TrustBoundary.TRUSTED_TENANT);
     }
 
+    /**
+     * 列出当前契约测试使用的冻结样例，确保两种通知来源均被覆盖。
+     */
     private static List<String> fixtures() {
         return List.of("contracts/flowdesk-ticket-notification-requested-v1-wire.properties",
                 "contracts/flowdesk-workflow-notification-requested-v1-wire.properties");
     }
 
+    /**
+     * 加载指定冻结属性样例，供协议一致性及错误变体测试复用。
+     */
     private static Properties fixture(String resource) {
         Properties result = new Properties();
         try (InputStream stream = NotificationContractFixtureTest.class.getClassLoader()
@@ -128,6 +142,9 @@ class NotificationContractFixtureTest {
         }
     }
 
+    /**
+     * 根据样例的契约身份匹配共享绑定，保证测试沿用跨服务冻结协议。
+     */
     private static NotificationEventContract.Binding binding(Properties fixture) {
         return java.util.Arrays.stream(NotificationEventContract.bindings())
                 .filter(binding -> binding.contractRef().equals(fixture.getProperty("contractRef")))
@@ -135,6 +152,9 @@ class NotificationContractFixtureTest {
                 .orElseThrow(() -> new IllegalStateException("Unknown fixture binding"));
     }
 
+    /**
+     * 按固定绑定构造带完整身份和摘要的测试投递，供消费入口验证。
+     */
     private static FixtureDelivery delivery(NotificationEventContract.Binding binding,
                                             String kind, String title) {
         byte[] sourceEffect = NotificationWireCodec.deriveKey("FD-M8-FIXTURE-SOURCE-V1",
@@ -154,12 +174,18 @@ class NotificationContractFixtureTest {
                         messageId.toString(), null, body, properties));
     }
 
+    /**
+     * 复制属性后替换单个值，构造错误变体且不修改原始样例。
+     */
     private static Map<String, String> with(Map<String, String> source, String key, String value) {
         Map<String, String> copy = new LinkedHashMap<>(source);
         copy.put(key, value);
         return copy;
     }
 
+    /**
+     * 执行消息守卫并提取契约异常，供断言稳定错误码及信任边界。
+     */
     private static Violation violation(NotificationTransportMessage message) {
         try {
             GUARD.validateMain(message);
@@ -171,6 +197,9 @@ class NotificationContractFixtureTest {
         }
     }
 
+    /**
+     * 断言当前场景的稳定身份、终态或业务副作用，失败时直接报告对应证据差异。
+     */
     private static void assertViolation(NotificationTransportMessage message, String code,
                                         NotificationContractViolation.TrustBoundary boundary) {
         Violation violation = violation(message);
@@ -178,7 +207,13 @@ class NotificationContractFixtureTest {
         assertThat(violation.boundary()).isEqualTo(boundary);
     }
 
+    /**
+     * 冻结测试样例或传输快照，保留原始身份、字节和摘要供正常及错误变体场景复用。
+     */
     private record FixtureDelivery(UUID messageId, byte[] body, Map<String, String> properties,
                                    NotificationTransportMessage message) { }
+    /**
+     * 通知不可变数据快照，组合声明字段供当前业务处理阶段传递完整事实。
+     */
     private record Violation(String code, NotificationContractViolation.TrustBoundary boundary) { }
 }

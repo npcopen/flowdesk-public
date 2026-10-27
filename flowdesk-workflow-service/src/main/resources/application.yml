@@ -9,7 +9,16 @@ spring:
     username: fd_workflow_runtime
     password: ${FLOWDESK_WORKFLOW_DB_PASSWORD}
   cloud:
+    loadbalancer:
+      retry:
+        enabled: false
     nacos:
+      # No-profile local development and unit tests do not require remote config.
+      # Managed dev/test/prod profiles explicitly enable required Nacos imports.
+      config:
+        enabled: false
+        import-check:
+          enabled: false
       discovery:
         server-addr: ${FLOWDESK_NACOS_SERVER_ADDR:127.0.0.1:8848}
         namespace: ${FLOWDESK_NACOS_NAMESPACE:}
@@ -54,8 +63,10 @@ flowdesk:
         access-key: ${FLOWDESK_WORKFLOW_ROCKETMQ_ACCESS_KEY:}
         secret-key: ${FLOWDESK_WORKFLOW_ROCKETMQ_SECRET_KEY:}
     iam:
-      base-url: ${FLOWDESK_WORKFLOW_IAM_BASE_URL:http://127.0.0.1:8081}
+      base-url: ${FLOWDESK_WORKFLOW_IAM_BASE_URL:}
       service-token-file: ${FLOWDESK_WORKFLOW_IAM_SERVICE_TOKEN_FILE:}
+      connect-timeout: ${FLOWDESK_WORKFLOW_IAM_CONNECT_TIMEOUT:PT2S}
+      read-timeout: ${FLOWDESK_WORKFLOW_IAM_READ_TIMEOUT:PT3S}
     start:
       entry:
         enabled: ${FLOWDESK_WORKFLOW_START_ENTRY_ENABLED:${FLOWDESK_WORKFLOW_START_CONSUMER_ENABLED:false}}
@@ -64,3 +75,12 @@ flowdesk:
         name-server: ${FLOWDESK_ROCKETMQ_NAME_SERVER:127.0.0.1:9876}
         access-key: ${FLOWDESK_WORKFLOW_ROCKETMQ_ACCESS_KEY:}
         secret-key: ${FLOWDESK_WORKFLOW_ROCKETMQ_SECRET_KEY:}
+
+mybatis:
+  mapper-locations: classpath*:mapper/**/*.xml
+  type-handlers-package: com.flowdesk.common.mybatis
+  configuration:
+    map-underscore-to-camel-case: true
+    arg-name-based-constructor-auto-mapping: true
+    local-cache-scope: STATEMENT
+    cache-enabled: false

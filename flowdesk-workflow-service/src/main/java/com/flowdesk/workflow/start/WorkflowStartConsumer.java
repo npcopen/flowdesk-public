@@ -1,5 +1,7 @@
 package com.flowdesk.workflow.start;
 
+import com.flowdesk.workflow.service.start.*;
+import com.flowdesk.workflow.model.start.WorkflowStartModels;
 import com.flowdesk.common.tenant.TenantContext;
 import com.flowdesk.common.tenant.TenantContextScope;
 import org.slf4j.Logger;
@@ -10,8 +12,8 @@ import org.springframework.transaction.TransactionException;
 import java.util.UUID;
 
 /**
- * Strict five-stage Workflow consumption entry. A Broker adapter may ACK only when
- * this class returns {@link WorkflowStartConsumeResult.BrokerDisposition#ACK}.
+ * 五阶段工作流启动消费入口：信封校验、租户建立、去重、版本及 IAM 预检、本地事务提交。
+ * Broker 适配器只有收到 ACK 结果后才可确认消息。
  */
 public final class WorkflowStartConsumer {
 
@@ -20,24 +22,30 @@ public final class WorkflowStartConsumer {
     private static final String IAM_UNAVAILABLE = "IAM_ELIGIBILITY_UNAVAILABLE";
 
     private final WorkflowStartEnvelopeGuard guard;
-    private final WorkflowStartRepository repository;
-    private final WorkflowStartTransaction transaction;
+    private final WorkflowStartQueryService queries;
+    private final WorkflowStartCommandService transaction;
     private final WorkflowApproverEligibilityChecker eligibilityChecker;
 
+    /**
+     * 绑定严格信封守卫、只读预检、事务写入及审批资格检查器，将租户可信校验、事务外依赖调用和原子提交分阶段执行。
+     */
     WorkflowStartConsumer(WorkflowStartEnvelopeGuard guard,
-                          WorkflowStartRepository repository,
-                          WorkflowStartTransaction transaction,
+                          WorkflowStartQueryService queries,
+                          WorkflowStartCommandService transaction,
                           WorkflowApproverEligibilityChecker eligibilityChecker) {
         this.guard = guard;
-        this.repository = repository;
+        this.queries = queries;
         this.transaction = transaction;
         this.eligibilityChecker = eligibilityChecker;
     }
 
+    /**
+     * 先严格校验信封再建立可信租户，协调事务外预检及原子启动，暂时性故障返回代理重试。
+     */
     public WorkflowStartConsumeResult consume(WorkflowStartTransportMessage delivery) {
         final AcceptedWorkflowStart message;
         try {
-            // 1. Transport guard. No tenant-owned read or write is reachable before this.
+            // 1. 先校验传输契约；通过之前不允许访问任何租户业务数据。
             message = guard.validateMain(delivery);
         }
         catch (WorkflowStartContractViolation deterministicPoison) {
@@ -46,7 +54,7 @@ public final class WorkflowStartConsumer {
             return WorkflowStartConsumeResult.ack(deterministicPoison.code(), null);
         }
 
-        // 2. Install the only trusted context accepted by this message entry.
+        // 2. 只使用已验证的信封事实建立可信租户上下文。
         TenantContext context = TenantContext.ofValidatedBrokerMessage(
                 message.tenantId(), message.producerService(), message.correlationId());
         try (TenantContextScope ignored = TenantContextScope.open(context)) {
@@ -64,51 +72,51 @@ public final class WorkflowStartConsumer {
         }
     }
 
+    /**
+     * 在可信租户内检查重复、已发布版本与 IAM 资格，再由写服务提交启动事实。
+     */
     private WorkflowStartConsumeResult consumeInsideTenant(AcceptedWorkflowStart message) {
-        // 3. Read-only duplicate fast path in the frozen message-id then intent order.
-        WorkflowStartRepository.DuplicateCheck fast = repository.findDuplicate(message, false);
+        // 3. 先按消息标识、再按业务意图只读去重，顺序与固定契约保持一致。
+        WorkflowStartModels.DuplicateCheck fast = queries.findDuplicate(message);
         if (fast.terminalDuplicate()) {
             return WorkflowStartConsumeResult.ack(
                     "WORKFLOW_START_DUPLICATE", fast.existing().resultId());
         }
-        if (fast.kind() == WorkflowStartRepository.DuplicateKind.CONFLICT) {
-            WorkflowStartTransaction.Completion settled =
-                    transaction.complete(message, WorkflowStartTransaction.conflictOnly());
-            if (settled.kind() == WorkflowStartTransaction.CompletionKind.ACK) {
+        if (fast.kind() == WorkflowStartModels.DuplicateKind.CONFLICT) {
+            WorkflowStartModels.Completion settled =
+                    transaction.complete(message, WorkflowStartModels.conflictOnly());
+            if (settled.kind() == WorkflowStartModels.CompletionKind.ACK) {
                 return WorkflowStartConsumeResult.ack(
                         settled.code(), settled.workflowInstanceId());
             }
-            // Inbox facts are immutable in the runtime account. This branch only covers
-            // an out-of-band deletion between the fast read and the locked redecision.
+            // 运行账户不能改写既有 Inbox；此分支仅防御快速读取与加锁复核之间的外部删除。
         }
 
-        // 4. WorkflowVersion and, only when a first task is necessary, IAM pre-check.
-        WorkflowStartRepository.VersionLookup version = repository.findVersion(message);
-        WorkflowStartTransaction.Preflight preflight;
+        // 4. 检查流程版本；仅需创建首级任务时才在事务外预检审批人资格。
+        WorkflowStartModels.VersionLookup version = queries.findVersion(message);
+        WorkflowStartModels.Preflight preflight;
         if (!version.valid()) {
-            preflight = WorkflowStartTransaction.rejected(null, version.errorCode());
+            preflight = WorkflowStartModels.rejected(null, version.errorCode());
         }
         else if (version.version().requiresApproval(message)) {
             UUID approver = version.version().level1ApproverUserId();
             if (!eligibilityChecker.isEligibleApprover(message.tenantId(), approver)) {
-                // M6 reclassifies a negative IAM qualification as a recoverable
-                // external qualification failure.  No local Inbox/Instance/Task/
-                // Outbox fact may be committed before the main Group exhausts its
-                // bounded delivery budget and the DLQ acceptor owns recovery.
+                // 审批人资格不满足属于可恢复的外部资格失败，交回 Broker 消耗有限重试预算。
+                // 在独立死信接收器接管前，不提交 Inbox、实例、任务或 Outbox 事实。
                 return WorkflowStartConsumeResult.retry(
-                        WorkflowStartTransaction.approverNotEligibleCode());
+                        WorkflowStartModels.approverNotEligibleCode());
             }
             else {
-                preflight = WorkflowStartTransaction.ready(version.version(), approver);
+                preflight = WorkflowStartModels.ready(version.version(), approver);
             }
         }
         else {
-            preflight = WorkflowStartTransaction.ready(version.version(), null);
+            preflight = WorkflowStartModels.ready(version.version(), null);
         }
 
-        // 5. Lock/re-decide locally, then atomically commit Inbox/effects/Audit.
-        WorkflowStartTransaction.Completion completion = transaction.complete(message, preflight);
-        if (completion.kind() != WorkflowStartTransaction.CompletionKind.ACK) {
+        // 5. 在本地事务内加锁并重新裁决，原子提交 Inbox、业务副作用及审计后才允许 ACK。
+        WorkflowStartModels.Completion completion = transaction.complete(message, preflight);
+        if (completion.kind() != WorkflowStartModels.CompletionKind.ACK) {
             throw new IllegalStateException("Workflow-start preflight unexpectedly disappeared");
         }
         return WorkflowStartConsumeResult.ack(

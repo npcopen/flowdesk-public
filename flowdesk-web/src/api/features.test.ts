@@ -15,7 +15,7 @@ describe("feature flag resolution", () => {
       recovery: "api",
       sla: "readonly-api",
       fullMock: false,
-      gatewayBuild: false,
+      productionBuild: false,
     });
   });
 
@@ -30,7 +30,7 @@ describe("feature flag resolution", () => {
     });
   });
 
-  it("never ships a browser mock in the Gateway bundle", () => {
+  it("forces real APIs in production even when every mock override is present", () => {
     expect(
       resolveFeatureFlags(
         {
@@ -47,7 +47,7 @@ describe("feature flag resolution", () => {
       recovery: "api",
       sla: "readonly-api",
       fullMock: false,
-      gatewayBuild: true,
+      productionBuild: true,
     });
   });
 

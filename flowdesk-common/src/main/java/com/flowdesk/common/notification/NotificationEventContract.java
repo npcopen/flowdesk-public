@@ -4,9 +4,7 @@ import java.time.Duration;
 import java.util.List;
 
 /**
- * The two M8 notification request bindings.  Keeping the wire names in one
- * shared class prevents producer and consumer deployments from silently
- * drifting apart.
+ * 集中定义两类通知请求的消息绑定，避免生产者和消费者部署后出现消息契约偏差。
  */
 public final class NotificationEventContract {
 
@@ -29,31 +27,42 @@ public final class NotificationEventContract {
             Duration.ofMinutes(2), Duration.ofMinutes(10), Duration.ofMinutes(30),
             Duration.ofHours(2));
 
+    /**
+     * 禁止直接实例化该工具类型，统一通过静态方法或工厂入口使用。
+     */
     private NotificationEventContract() {
     }
 
+    /**
+     * 通知事件来源枚举，区分业务生产者领域，避免不同来源混用消费绑定。
+     */
     public enum Source {
         TICKET,
         WORKFLOW
     }
 
+    /**
+     * 保存通知来源的主题、消费组及死信接收配置，并派生重试和死信主题。
+     */
     public record Binding(Source source, String eventType, String contractRef,
                           String topic, String producerService, String producerGroup,
                           String consumerGroup, String dlqAcceptorGroup,
                           String intentNamespace) {
+        /**
+         * 按业务消费组生成 RocketMQ 死信主题，供恢复接收器绑定同一消息来源。
+         */
         public String dlqTopic() {
             return "%DLQ%" + consumerGroup;
         }
 
+        /**
+         * 生成死信接收器自己的重试主题，区分业务消费失败与死信入库失败。
+         */
         public String acceptorRetryTopic() {
             return "%RETRY%" + dlqAcceptorGroup;
         }
 
-        /**
-         * Returns true only for the complete persisted route identity.  A
-         * producer name by itself is intentionally insufficient to select a
-         * binding during recovery.
-         */
+        /** 只有完整匹配持久化的路由身份才返回 true；恢复时不能只凭生产者名称选择消息绑定。 */
         public boolean matchesRoute(String topic, String consumerGroup,
                                     String producerService, String contract,
                                     int contractVersion, String aggregateType) {
@@ -90,6 +99,9 @@ public final class NotificationEventContract {
             "flowdesk_workflow_notification_requested_v1_notification_dlq_acceptor_cg",
             "FD-WORKFLOW-NOTIFICATION-REQUESTED-V1");
 
+    /**
+     * 返回工单与工作流两种通知来源的绑定，供统一配置主题、消费组及死信接收器。
+     */
     public static Binding[] bindings() {
         return new Binding[]{TICKET, WORKFLOW};
     }

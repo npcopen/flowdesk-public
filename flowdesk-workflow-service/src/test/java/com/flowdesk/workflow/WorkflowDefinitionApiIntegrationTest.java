@@ -40,6 +40,9 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+/**
+ * 流程定义 API 集成测试，覆盖草稿创建、受限校验、发布、幂等重放和并发唯一性。
+ */
 @SpringBootTest(properties = "flowdesk.workflow.start.entry.enabled=false")
 @AutoConfigureMockMvc
 class WorkflowDefinitionApiIntegrationTest {
@@ -64,6 +67,30 @@ class WorkflowDefinitionApiIntegrationTest {
     @Autowired
     private FakeEligibility eligibility;
 
+    @Autowired
+    private com.flowdesk.workflow.mapper.WorkflowDefinitionMapper definitions;
+
+    /**
+     * 验证流程定义 MyBatis 游标保持租户条件和稳定次级排序，并检查相关业务事实或错误响应符合约定。
+     */
+    @Test
+    void mybatisDefinitionCursorPreservesTenantAndTieBreakerOrdering() {
+        UUID other = UUID.fromString("33333333-3333-3333-3333-333333333334");
+        insertDefinition(TENANT_A, other, "B_FLOW", "乙流程");
+        var first = definitions.findDefinitions(TENANT_A, "definitionCode", true, null, null, 1);
+        assertThat(first).extracting(row -> row.definitionId()).containsExactly(DEFINITION_A, other);
+        assertThat(definitions.findDefinitions(TENANT_A, "definitionCode", true, "A_FLOW", DEFINITION_A, 1))
+                .extracting(row -> row.definitionId()).containsExactly(other);
+        assertThat(definitions.findDefinitions(TENANT_A, "definitionCode", false, "B_FLOW", other, 1))
+                .extracting(row -> row.definitionId()).containsExactly(DEFINITION_A);
+        assertThat(definitions.findDefinition(TENANT_B, DEFINITION_A)).isEmpty();
+        assertThat(definitions.findDefinitions(TENANT_A, "definitionName", true, null, null, 10))
+                .hasSize(2);
+    }
+
+    /**
+     * 注册测试专用数据库、密钥和开关配置，使应用上下文使用隔离依赖。
+     */
     @DynamicPropertySource
     static void properties(DynamicPropertyRegistry registry) {
         registry.add("flowdesk.security.jwt.public-key-pem", WorkflowDefinitionApiIntegrationTest::publicKeyPem);
@@ -80,6 +107,9 @@ class WorkflowDefinitionApiIntegrationTest {
         registry.add("spring.sql.init.schema-locations", () -> "classpath:schema-test.sql");
     }
 
+    /**
+     * 恢复测试替身与数据库的初始状态，保证每个场景从独立前置条件开始。
+     */
     @BeforeEach
     void reset() {
         for (String table : List.of("message_recovery", "audit_record", "inbox_message",
@@ -92,6 +122,9 @@ class WorkflowDefinitionApiIntegrationTest {
         eligibility.calls = 0;
     }
 
+    /**
+     * 验证两级审批拒绝同一人担任两级办理人，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void twoLevelApprovalRejectsTheSamePerson() throws Exception {
         mockMvc.perform(post("/api/v1/workflow-definitions/" + DEFINITION_A + "/drafts")
@@ -101,6 +134,9 @@ class WorkflowDefinitionApiIntegrationTest {
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM workflow_draft", Integer.class)).isZero();
     }
 
+    /**
+     * 验证管理员能按受限规则创建、校验及发布草稿，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void adminCreatesValidatesAndPublishesRestrictedDraft() throws Exception {
         MvcResult created = mockMvc.perform(post("/api/v1/workflow-definitions/" + DEFINITION_A + "/drafts")
@@ -139,6 +175,9 @@ class WorkflowDefinitionApiIntegrationTest {
         assertThat(eligibility.calls).isEqualTo(4);
     }
 
+    /**
+     * 验证编辑清除旧校验且创建重试使用持久化幂等锚点，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void editClearsValidationAndCreateReplayUsesPersistentAnchor() throws Exception {
         String body = draftBody(APPROVER_1, APPROVER_2, "HIGH");
@@ -170,6 +209,9 @@ class WorkflowDefinitionApiIntegrationTest {
                 .andExpect(header().string("ETag", "\"lv:2\""));
     }
 
+    /**
+     * 验证未知规则结构及不合格审批人不会产生写入，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void unknownStructureAndIneligibleApproverWriteNothing() throws Exception {
         mockMvc.perform(post("/api/v1/workflow-definitions/" + DEFINITION_A + "/drafts")
@@ -196,6 +238,9 @@ class WorkflowDefinitionApiIntegrationTest {
                 .isZero();
     }
 
+    /**
+     * 验证权限和租户范围违规默认拒绝，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void permissionsAndTenantScopeAreFailClosed() throws Exception {
         mockMvc.perform(get("/api/v1/workflow-definitions")
@@ -207,6 +252,9 @@ class WorkflowDefinitionApiIntegrationTest {
                 .andExpect(jsonPath("$.error.code").value("RESOURCE_NOT_FOUND"));
     }
 
+    /**
+     * 验证并发创建及并发发布均只产生一个成功结果，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void concurrentDraftCreationAndPublicationEachHaveOneWinner() throws Exception {
         ExecutorService executor = Executors.newFixedThreadPool(2);
@@ -269,6 +317,9 @@ class WorkflowDefinitionApiIntegrationTest {
         }
     }
 
+    /**
+     * 发起并发草稿创建请求，保留响应供单一胜者及冲突结果断言。
+     */
     private MvcResult concurrentCreate(String key) throws Exception {
         return mockMvc.perform(post("/api/v1/workflow-definitions/" + DEFINITION_A + "/drafts")
                         .header("Authorization", "Bearer " + adminToken())
@@ -278,6 +329,9 @@ class WorkflowDefinitionApiIntegrationTest {
                 .andReturn();
     }
 
+    /**
+     * 发起带版本及幂等键的并发发布请求，供唯一版本断言。
+     */
     private MvcResult concurrentPublish(UUID draftId, String etag, String key) throws Exception {
         return mockMvc.perform(post("/api/v1/workflow-drafts/" + draftId + "/publish")
                         .header("Authorization", "Bearer " + adminToken())
@@ -286,6 +340,9 @@ class WorkflowDefinitionApiIntegrationTest {
                 .andReturn();
     }
 
+    /**
+     * 调用创建草稿 API 并返回原始结果，供并发与幂等测试检查状态和响应头。
+     */
     private MvcResult create(String body, String key) throws Exception {
         return mockMvc.perform(post("/api/v1/workflow-definitions/" + DEFINITION_A + "/drafts")
                         .header("Authorization", "Bearer " + adminToken())
@@ -294,6 +351,9 @@ class WorkflowDefinitionApiIntegrationTest {
                 .andExpect(status().isCreated()).andReturn();
     }
 
+    /**
+     * 构造受限草稿 JSON，供不同审批人及条件值的 API 场景复用。
+     */
     private static String draftBody(UUID level1, UUID level2, String value) {
         return """
                 {"condition":{"fieldCode":"SERVICE_RISK_LEVEL","operator":"EQUALS",
@@ -302,6 +362,9 @@ class WorkflowDefinitionApiIntegrationTest {
                 """.formatted(value, level1, level2);
     }
 
+    /**
+     * 建立当前测试场景的持久化前置事实，保留指定租户、身份和状态供后续业务路径验证。
+     */
     private void insertDefinition(UUID tenant, UUID id, String code, String name) {
         jdbc.update("""
                 INSERT INTO workflow_definition
@@ -312,6 +375,9 @@ class WorkflowDefinitionApiIntegrationTest {
                 WorkflowIdempotencyCodec.uuidBytes(id), code, name);
     }
 
+    /**
+     * 签发当前场景需要的测试身份令牌，固定租户、角色与最小权限供真实认证路径校验。
+     */
     private String adminToken() {
         return ISSUER.issueHuman(TENANT_A, ADMIN_A, Set.of(RoleCode.SERVICE_DESK_ADMIN),
                 Set.of(PermissionCode.WORKFLOW_READ_TENANT,
@@ -319,11 +385,17 @@ class WorkflowDefinitionApiIntegrationTest {
                         PermissionCode.WORKFLOW_PUBLISH)).token();
     }
 
+    /**
+     * 签发当前场景需要的测试身份令牌，固定租户、角色与最小权限供真实认证路径校验。
+     */
     private String requesterToken() {
         return ISSUER.issueHuman(TENANT_A, REQUESTER_A, Set.of(RoleCode.REQUESTER),
                 Set.of(PermissionCode.TICKET_READ_OWN)).token();
     }
 
+    /**
+     * 生成仅供测试签发与验签的 RSA 密钥对，使身份流程无需外部密钥文件。
+     */
     private static KeyPair newKeyPair() {
         try {
             return KeyPairGenerator.getInstance("RSA").generateKeyPair();
@@ -333,13 +405,22 @@ class WorkflowDefinitionApiIntegrationTest {
         }
     }
 
+    /**
+     * 将测试公钥编码为 PEM，供应用配置中的实际验签器加载。
+     */
     private static String publicKeyPem() {
         String base64 = Base64.getEncoder().encodeToString(KEYS.getPublic().getEncoded());
         return "-----BEGIN PUBLIC KEY-----\n" + base64 + "\n-----END PUBLIC KEY-----";
     }
 
+    /**
+     * 可控制资格结果及依赖故障的测试替身，记录调用用于验证事务外预检和竞争处理。
+     */
     @TestConfiguration
     static class EligibilityConfiguration {
+        /**
+         * 装配当前测试使用的替身组件，替换外部依赖并保留可控结果与调用观察。
+         */
         @Bean
         @Primary
         FakeEligibility fakeWorkflowEligibility() {
@@ -347,9 +428,15 @@ class WorkflowDefinitionApiIntegrationTest {
         }
     }
 
+    /**
+     * 可控制资格结果及依赖故障的测试替身，记录调用用于验证事务外预检和竞争处理。
+     */
     static final class FakeEligibility implements WorkflowApproverEligibilityChecker {
         int calls;
 
+        /**
+         * 返回可配置的测试审批资格结果并记录调用次数，供预检、依赖失败及并发路径断言。
+         */
         @Override
         public boolean isEligibleApprover(UUID tenantId, UUID approverUserId) {
             calls++;

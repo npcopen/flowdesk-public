@@ -1,22 +1,29 @@
 package com.flowdesk.workflow.start;
 
+import com.flowdesk.workflow.service.recovery.*;
+import com.flowdesk.workflow.service.start.*;
+import com.flowdesk.workflow.service.start.impl.*;
+import com.flowdesk.workflow.service.recovery.impl.*;
 import com.flowdesk.workflow.service.WorkflowCursorTokenService;
+import com.flowdesk.common.recovery.RecoveryReplayResumer;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
-import org.springframework.boot.autoconfigure.condition.ConditionalOnWebApplication;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
-import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.cloud.openfeign.EnableFeignClients;
 import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.transaction.PlatformTransactionManager;
-import org.springframework.web.client.RestClient;
 import com.flowdesk.workflow.notification.WorkflowNotificationOutboxWriter;
 
 import java.time.Clock;
 
-/** Production wiring for the opt-in strict entry, MQ groups and controlled replay. */
+/**
+ * 装配按需启用的严格启动消费入口、独立消息组与受控重放及中断恢复机制。
+ */
 @Configuration(proxyBeanMethods = false)
+@EnableFeignClients(clients = WorkflowIamEligibilityFeignClient.class)
 @EnableConfigurationProperties({
         WorkflowIamClientProperties.class,
         WorkflowStartRocketMqProperties.class,
@@ -24,38 +31,27 @@ import java.time.Clock;
 })
 public class WorkflowStartConfiguration {
 
-    /** All Workflow business timestamps use one UTC clock and TIMESTAMP(6) precision. */
+    /**
+     * 工作流业务时间统一使用同一 UTC 时钟，并对齐 TIMESTAMP(6) 的微秒精度。
+     */
     @Bean
     Clock flowDeskWorkflowClock() {
         return Clock.systemUTC();
     }
 
-    /** The writer is explicit because it is also used by the opt-in start transaction. */
-    @Bean
-    @ConditionalOnWebApplication(type = ConditionalOnWebApplication.Type.SERVLET)
-    @ConditionalOnProperty(prefix = "flowdesk.workflow.start.entry", name = "enabled",
-            havingValue = "false", matchIfMissing = true)
-    WorkflowNotificationOutboxWriter workflowNotificationOutboxWriter(
-            com.flowdesk.workflow.repository.WorkflowRepository repository) {
-        return new WorkflowNotificationOutboxWriter((tenantId, intent) ->
-                repository.insertNotificationOutbox(tenantId, intent.outboxId(), intent.messageId(),
-                        intent.publicationKey(), intent.businessIntentKey(), intent.sourceRefId(),
-                        1, intent.bodyBytes(), intent.bodySha256(), intent.correlationId(),
-                        intent.causationId(), intent.occurredAt()));
-    }
-
-    @Bean("workflowIamRestClientBuilder")
-    RestClient.Builder workflowIamRestClientBuilder() {
-        return RestClient.builder();
-    }
-
+    /**
+     * 装配审批资格检查器，将声明的协作依赖与配置绑定到当前服务的统一处理链路。
+     */
     @Bean
     WorkflowApproverEligibilityChecker workflowApproverEligibilityChecker(
-            @Qualifier("workflowIamRestClientBuilder") RestClient.Builder builder,
+            WorkflowIamEligibilityFeignClient client,
             WorkflowIamClientProperties properties) {
-        return new WorkflowIamEligibilityClient(builder, properties);
+        return new WorkflowIamEligibilityClient(client, properties);
     }
 
+    /**
+     * 启动入口启用时的组件装配，集中配置消息消费、事务服务和恢复后台执行器。
+     */
     @Configuration(proxyBeanMethods = false)
     @ConditionalOnProperty(
             prefix = "flowdesk.workflow.start.entry",
@@ -63,90 +59,98 @@ public class WorkflowStartConfiguration {
             havingValue = "true")
     static class EntryConfiguration {
 
+        /**
+         * 装配消息或迁移校验器，将声明的协作依赖与配置绑定到当前服务的统一处理链路。
+         */
         @Bean
-        WorkflowNotificationOutboxWriter workflowNotificationOutboxWriter(
-                WorkflowStartRepository repository) {
-            return new WorkflowNotificationOutboxWriter((tenantId, intent) ->
-                    repository.insertNotificationOutbox(tenantId, intent.outboxId(), intent.messageId(),
-                            intent.publicationKey(), intent.businessIntentKey(), intent.sourceRefId(),
-                            1, intent.bodyBytes(), intent.bodySha256(), intent.correlationId(),
-                            intent.causationId(), intent.occurredAt()));
+        WorkflowStartMigrationGuard workflowStartMigrationGuard(WorkflowStartMapper mapper) {
+            return new WorkflowStartMigrationGuard(mapper);
         }
 
-        @Bean
-        WorkflowStartMigrationGuard workflowStartMigrationGuard(JdbcTemplate jdbc) {
-            return new WorkflowStartMigrationGuard(jdbc);
-        }
-
+        /**
+         * 装配消息或迁移校验器，将声明的协作依赖与配置绑定到当前服务的统一处理链路。
+         */
         @Bean
         WorkflowStartEnvelopeGuard workflowStartEnvelopeGuard() {
             return new WorkflowStartEnvelopeGuard();
         }
 
+        /**
+         * 装配业务服务，将声明的协作依赖与配置绑定到当前服务的统一处理链路。
+         */
         @Bean
-        WorkflowStartRepository workflowStartRepository(JdbcTemplate jdbc) {
-            return new WorkflowStartRepository(jdbc);
+        WorkflowStartQueryService workflowStartQueryService(WorkflowStartMapper mapper) {
+            return new WorkflowStartQueryServiceImpl(mapper);
         }
 
+        /**
+         * 装配业务服务，将声明的协作依赖与配置绑定到当前服务的统一处理链路。
+         */
         @Bean
-        WorkflowStartTransaction workflowStartTransaction(
-                WorkflowStartRepository repository,
+        WorkflowStartCommandService workflowStartCommandService(WorkflowStartMapper mapper,
                 PlatformTransactionManager transactionManager, Clock clock,
                 WorkflowNotificationOutboxWriter notificationWriter) {
-            return new WorkflowStartTransaction(repository, transactionManager, clock,
-                    notificationWriter);
+            return new WorkflowStartCommandServiceImpl(mapper, transactionManager, clock, notificationWriter);
         }
 
+        /**
+         * 装配业务服务，将声明的协作依赖与配置绑定到当前服务的统一处理链路。
+         */
         @Bean
-        WorkflowStartDlqTransaction workflowStartDlqTransaction(
-                WorkflowStartRepository repository,
+        WorkflowStartDlqService workflowStartDlqService(WorkflowStartMapper mapper,
                 PlatformTransactionManager transactionManager) {
-            return new WorkflowStartDlqTransaction(repository, transactionManager);
+            return new WorkflowStartDlqServiceImpl(mapper, transactionManager);
         }
 
+        /**
+         * 装配依赖组件，将声明的协作依赖与配置绑定到当前服务的统一处理链路。
+         */
         @Bean
-        WorkflowStartConsumer workflowStartConsumer(
-                WorkflowStartEnvelopeGuard guard,
-                WorkflowStartRepository repository,
-                WorkflowStartTransaction transaction,
+        WorkflowStartConsumer workflowStartConsumer(WorkflowStartEnvelopeGuard guard,
+                WorkflowStartQueryService queries, WorkflowStartCommandService commands,
                 WorkflowApproverEligibilityChecker eligibilityChecker) {
-            return new WorkflowStartConsumer(
-                    guard, repository, transaction, eligibilityChecker);
+            return new WorkflowStartConsumer(guard, queries, commands, eligibilityChecker);
         }
 
+        /**
+         * 装配依赖组件，将声明的协作依赖与配置绑定到当前服务的统一处理链路。
+         */
         @Bean
-        WorkflowStartDlqAcceptor workflowStartDlqAcceptor(
-                WorkflowStartEnvelopeGuard guard,
-                WorkflowStartDlqTransaction transaction) {
-            return new WorkflowStartDlqAcceptor(guard, transaction);
+        WorkflowStartDlqAcceptor workflowStartDlqAcceptor(WorkflowStartEnvelopeGuard guard,
+                WorkflowStartDlqService service) {
+            return new WorkflowStartDlqAcceptor(guard, service);
         }
 
+        /**
+         * 装配业务服务，将声明的协作依赖与配置绑定到当前服务的统一处理链路。
+         */
         @Bean
-        WorkflowRecoveryRepository workflowRecoveryRepository(JdbcTemplate jdbc) {
-            return new WorkflowRecoveryRepository(jdbc);
-        }
-
-        @Bean
-        WorkflowRecoveryReadService workflowRecoveryReadService(
-                WorkflowRecoveryRepository repository,
+        WorkflowRecoveryReadService workflowRecoveryReadService(WorkflowRecoveryMapper mapper,
                 WorkflowCursorTokenService cursors) {
-            return new WorkflowRecoveryReadService(repository, cursors);
+            return new WorkflowRecoveryReadServiceImpl(mapper, cursors);
         }
 
+        /**
+         * 装配业务服务，将声明的协作依赖与配置绑定到当前服务的统一处理链路。
+         */
         @Bean
-        WorkflowRecoveryReplayTransaction workflowRecoveryReplayTransaction(
-                WorkflowRecoveryRepository repository,
+        WorkflowRecoveryAcceptanceService workflowRecoveryAcceptanceService(WorkflowRecoveryMapper mapper,
                 PlatformTransactionManager transactionManager) {
-            return new WorkflowRecoveryReplayTransaction(repository, transactionManager);
+            return new WorkflowRecoveryAcceptanceServiceImpl(mapper, transactionManager);
         }
 
+        /**
+         * 装配业务服务，将声明的协作依赖与配置绑定到当前服务的统一处理链路。
+         */
         @Bean
-        WorkflowRecoveryReplaySettlement workflowRecoveryReplaySettlement(
-                WorkflowRecoveryRepository repository,
+        WorkflowRecoveryExecutionService workflowRecoveryExecutionService(WorkflowRecoveryMapper mapper,
                 PlatformTransactionManager transactionManager) {
-            return new WorkflowRecoveryReplaySettlement(repository, transactionManager);
+            return new WorkflowRecoveryExecutionServiceImpl(mapper, transactionManager);
         }
 
+        /**
+         * 装配异步执行器，将声明的协作依赖与配置绑定到当前服务的统一处理链路。
+         */
         @Bean(name = "workflowRecoveryReplayExecutor")
         ThreadPoolTaskExecutor workflowRecoveryReplayExecutor() {
             ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
@@ -159,23 +163,42 @@ public class WorkflowStartConfiguration {
             return executor;
         }
 
+        /**
+         * 装配后台工作者，将声明的协作依赖与配置绑定到当前服务的统一处理链路。
+         */
         @Bean
         WorkflowRecoveryReplayWorker workflowRecoveryReplayWorker(
                 @Qualifier("workflowRecoveryReplayExecutor") ThreadPoolTaskExecutor executor,
-                WorkflowRecoveryRepository repository,
                 WorkflowStartConsumer consumer,
-                WorkflowRecoveryReplaySettlement settlement) {
+                WorkflowRecoveryExecutionService settlement) {
             return new WorkflowRecoveryReplayWorker(
-                    executor, repository, consumer, settlement);
+                    executor, consumer, settlement);
         }
 
+        /**
+         * 装配业务服务，将声明的协作依赖与配置绑定到当前服务的统一处理链路。
+         */
         @Bean
         WorkflowRecoveryReplayService workflowRecoveryReplayService(
-                WorkflowRecoveryReplayTransaction transaction,
+                WorkflowRecoveryAcceptanceService transaction,
                 WorkflowRecoveryReplayWorker worker) {
-            return new WorkflowRecoveryReplayService(transaction, worker);
+            return new WorkflowRecoveryReplayServiceImpl(transaction, worker);
         }
 
+        /**
+         * 装配重启恢复扫描器，将声明的协作依赖与配置绑定到当前服务的统一处理链路。
+         */
+        @Bean
+        RecoveryReplayResumer workflowRecoveryReplayResumer(
+                WorkflowRecoveryReplayMapper mapper, PlatformTransactionManager transactionManager,
+                WorkflowRecoveryReplayWorker worker,
+                @Value("${flowdesk.recovery.resume-enabled:true}") boolean enabled) {
+            return new RecoveryReplayResumer(mapper, transactionManager, worker::resume, enabled);
+        }
+
+        /**
+         * 装配消息消费者，将声明的协作依赖与配置绑定到当前服务的统一处理链路。
+         */
         @Bean
         @ConditionalOnProperty(
                 prefix = "flowdesk.workflow.start.consumer",

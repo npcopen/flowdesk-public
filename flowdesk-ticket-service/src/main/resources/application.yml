@@ -17,7 +17,16 @@ spring:
       port: ${FLOWDESK_REDIS_PORT:6379}
       password: ${FLOWDESK_REDIS_PASSWORD:}
   cloud:
+    loadbalancer:
+      retry:
+        enabled: false
     nacos:
+      # No-profile local development and unit tests do not require remote config.
+      # Managed dev/test/prod profiles explicitly enable required Nacos imports.
+      config:
+        enabled: false
+        import-check:
+          enabled: false
       discovery:
         server-addr: ${FLOWDESK_NACOS_SERVER_ADDR:127.0.0.1:8848}
         namespace: ${FLOWDESK_NACOS_NAMESPACE:}
@@ -44,7 +53,10 @@ flowdesk:
       clock-skew: ${FLOWDESK_JWT_CLOCK_SKEW:PT30S}
   ticket:
     workflow:
-      base-url: ${FLOWDESK_TICKET_WORKFLOW_BASE_URL:http://127.0.0.1:8083}
+      # 留空使用 Nacos 中的 flowdesk-workflow-service；填写 URL 时直连。
+      base-url: ${FLOWDESK_TICKET_WORKFLOW_BASE_URL:}
+      connect-timeout: ${FLOWDESK_TICKET_WORKFLOW_CONNECT_TIMEOUT:PT2S}
+      read-timeout: ${FLOWDESK_TICKET_WORKFLOW_READ_TIMEOUT:PT3S}
     sla:
       enabled: ${FLOWDESK_TICKET_SLA_ENABLED:false}
       scanner-enabled: ${FLOWDESK_TICKET_SLA_SCANNER_ENABLED:false}
@@ -88,11 +100,17 @@ flowdesk:
         access-key: ${FLOWDESK_TICKET_ROCKETMQ_ACCESS_KEY:}
         secret-key: ${FLOWDESK_TICKET_ROCKETMQ_SECRET_KEY:}
     iam:
-      base-url: ${FLOWDESK_TICKET_IAM_BASE_URL:http://127.0.0.1:8081}
+      # 留空使用 Nacos 中的 flowdesk-iam-service；仅本地调试时配置直连地址。
+      base-url: ${FLOWDESK_TICKET_IAM_BASE_URL:}
       service-token-file: ${FLOWDESK_TICKET_IAM_SERVICE_TOKEN_FILE:}
+      connect-timeout: ${FLOWDESK_TICKET_IAM_CONNECT_TIMEOUT:PT2S}
+      read-timeout: ${FLOWDESK_TICKET_IAM_READ_TIMEOUT:PT3S}
     outbox:
       publisher:
         enabled: ${FLOWDESK_TICKET_OUTBOX_PUBLISHER_ENABLED:false}
         name-server: ${FLOWDESK_ROCKETMQ_NAME_SERVER:127.0.0.1:9876}
         access-key: ${FLOWDESK_TICKET_ROCKETMQ_ACCESS_KEY:}
         secret-key: ${FLOWDESK_TICKET_ROCKETMQ_SECRET_KEY:}
+
+mybatis:
+  mapper-locations: classpath*:mapper/**/*.xml

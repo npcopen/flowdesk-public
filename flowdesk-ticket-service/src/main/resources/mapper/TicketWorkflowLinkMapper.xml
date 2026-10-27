@@ -1,0 +1,53 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper
+  PUBLIC '-//mybatis.org//DTD Mapper 3.0//EN'
+  'https://mybatis.org/dtd/mybatis-3-mapper.dtd'>
+<!--
+  工单与工作流启动请求的关联接口，维护请求状态及流程实例关联信息。
+  语句与同名 Java Mapper 方法对应；租户参数、状态条件和并发版本共同限定数据访问。
+-->
+<mapper namespace="com.flowdesk.ticket.mapper.TicketWorkflowLinkMapper">
+  <!--
+    将查询列按构造参数映射为 WorkflowStartRow，参数顺序、字段别名及类型须与对应模型一致。 UUID 字段通过二进制类型处理器转换。
+  -->
+  <resultMap id="WorkflowStartRow" type="com.flowdesk.ticket.model.WorkflowStartRow">
+    <constructor>
+      <arg name="ticketId" column="ticket_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="status" column="status" javaType="java.lang.String"/>
+      <arg name="workflowInstanceId" column="workflow_instance_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="requestedAt" column="requested_at" javaType="java.time.Instant"/>
+      <arg name="establishedAt" column="established_at" javaType="java.time.Instant"/>
+      <arg name="recoveryRequiredAt" column="recovery_required_at" javaType="java.time.Instant"/>
+      <arg name="recoveryReasonCode" column="recovery_reason_code" javaType="java.lang.String"/>
+      <arg name="retryCount" column="retry_count" javaType="_int"/>
+      <arg name="lastAttemptAt" column="last_attempt_at" javaType="java.time.Instant"/>
+      <arg name="lockVersion" column="lock_version" javaType="_long"/>
+      <arg name="createdAt" column="created_at" javaType="java.time.Instant"/>
+      <arg name="updatedAt" column="updated_at" javaType="java.time.Instant"/>
+    </constructor>
+  </resultMap>
+  <!--
+    查询指定工单的流程启动关联，返回请求状态、流程实例、恢复信息及锁版本。
+  -->
+  <select id="findWorkflowStartLink" resultMap="WorkflowStartRow">
+    SELECT ticket_id, status, workflow_instance_id, requested_at, established_at,
+       recovery_required_at, recovery_reason_code, retry_count, last_attempt_at,
+       lock_version, created_at, updated_at
+FROM workflow_start_link
+WHERE tenant_id = #{tenantId} AND ticket_id = #{ticketId}
+  </select>
+  <!--
+    为指定工单创建 REQUESTED 状态的流程启动关联，保存启动意图键和请求时间。
+  -->
+  <insert id="insertWorkflowStartLink">
+    INSERT INTO workflow_start_link
+  (tenant_id, ticket_id, start_intent_key, status, workflow_instance_id,
+   requested_at, established_at, recovery_required_at, recovery_reason_code,
+   retry_count, last_attempt_at, lock_version,
+   created_at, created_by_type, created_by_id,
+   updated_at, updated_by_type, updated_by_id)
+VALUES (#{tenantId}, #{ticketId}, #{startIntentKey}, 'REQUESTED', NULL, #{requestedAt}, NULL, NULL, NULL,
+        0, NULL, 0, CURRENT_TIMESTAMP(6), 'SERVICE', NULL,
+        CURRENT_TIMESTAMP(6), 'SERVICE', NULL)
+  </insert>
+</mapper>

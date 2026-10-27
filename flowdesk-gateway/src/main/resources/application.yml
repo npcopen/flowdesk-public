@@ -9,8 +9,21 @@ server:
 spring:
   application:
     name: flowdesk-gateway
+  web:
+    resources:
+      # The independently deployed frontend owns all pages and static assets.
+      # Disable defaults even if an old build left static files on the classpath.
+      add-mappings: false
+      # Boot's welcome-page mapping separately scans these locations for index.html.
+      static-locations: []
   cloud:
     nacos:
+      # No-profile local development and unit tests do not require remote config.
+      # Managed dev/test/prod profiles explicitly enable required Nacos imports.
+      config:
+        enabled: false
+        import-check:
+          enabled: false
       discovery:
         server-addr: ${FLOWDESK_NACOS_SERVER_ADDR:127.0.0.1:8848}
         namespace: ${FLOWDESK_NACOS_NAMESPACE:}
@@ -21,10 +34,6 @@ spring:
         register-enabled: ${FLOWDESK_NACOS_REGISTER_ENABLED:true}
 
 flowdesk:
-  health:
-    # Gateway readiness is served by GatewayHealthController and requires the
-    # same-origin SPA bundle to be present in the executable artifact.
-    static-bundle-required: ${FLOWDESK_HEALTH_STATIC_BUNDLE_REQUIRED:true}
   security:
     jwt:
       public-key-pem: ${FLOWDESK_JWT_PUBLIC_KEY_PEM:}

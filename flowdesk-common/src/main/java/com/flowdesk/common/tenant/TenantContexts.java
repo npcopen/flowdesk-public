@@ -11,6 +11,9 @@ import java.util.UUID;
  */
 public final class TenantContexts {
 
+    /**
+     * 禁止直接实例化该工具类型，统一通过静态方法或工厂入口使用。
+     */
     private TenantContexts() {
     }
 

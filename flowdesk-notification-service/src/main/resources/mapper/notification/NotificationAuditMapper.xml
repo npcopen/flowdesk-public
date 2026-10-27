@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+  通知操作审计持久化接口，按租户保存和读取审计结果。
+  记录操作人、目标、失败原因及关联和因果标识，供通知和恢复操作追溯。
+-->
+<mapper namespace="com.flowdesk.notification.mapper.NotificationAuditMapper">
+  <!-- 将查询列按构造参数映射为 NotificationAuditRow，明确字段、Java 类型及构造顺序，供相应查询复用。 -->
+  <resultMap id="audit" type="com.flowdesk.notification.model.NotificationAuditRow">
+    <constructor>
+      <arg name="auditId" column="audit_id" javaType="java.util.UUID"/>
+      <arg name="actionCode" column="action_code" javaType="java.lang.String"/>
+      <arg name="targetType" column="target_type" javaType="java.lang.String"/>
+      <arg name="targetId" column="target_id" javaType="java.util.UUID"/>
+      <arg name="outcome" column="outcome" javaType="java.lang.String"/>
+      <arg name="actorType" column="actor_type" javaType="java.lang.String"/>
+      <arg name="actorId" column="actor_id" javaType="java.util.UUID"/>
+      <arg name="reason" column="reason" javaType="java.lang.String"/>
+      <arg name="errorCode" column="error_code" javaType="java.lang.String"/>
+      <arg name="correlationId" column="correlation_id" javaType="java.util.UUID"/>
+      <arg name="causationId" column="causation_id" javaType="java.util.UUID"/>
+      <arg name="occurredAt" column="occurred_at" javaType="java.time.Instant"/>
+      <arg name="recordedAt" column="recorded_at" javaType="java.time.Instant"/>
+    </constructor>
+  </resultMap>
+  <!-- 按租户及审计标识读取通知审计，返回目标、操作人、结果与追踪信息。 -->
+  <select id="findAudit" resultMap="audit">
+    <![CDATA[
+SELECT audit_id,action_code,target_type,target_id,outcome,actor_type,actor_id,
+       reason,error_code,correlation_id,causation_id,occurred_at,recorded_at
+FROM audit_record WHERE tenant_id=#{tenantId} AND audit_id=#{auditId}
+    ]]>
+  </select>
+  <!-- 保存通知操作动作、目标、主体、原因及追踪信息，发生与入库时间均使用 occurredAt。 -->
+  <insert id="insertAudit">
+    <![CDATA[
+INSERT INTO audit_record
+  (tenant_id,audit_id,action_code,target_type,target_id,outcome,actor_type,
+   actor_id,reason,error_code,correlation_id,causation_id,occurred_at,recorded_at)
+VALUES (#{tenantId},#{auditId},#{actionCode},#{targetType},#{targetId},#{outcome},#{actorType},#{actorId},#{reason},#{errorCode},#{correlationId},#{causationId},#{occurredAt},#{occurredAt})
+    ]]>
+  </insert>
+</mapper>

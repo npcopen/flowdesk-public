@@ -6,7 +6,7 @@ import java.time.Instant;
 import java.util.Arrays;
 import java.util.UUID;
 
-/** Values emitted by the strict transport guard after all wire checks pass. */
+/** 严格校验通过的通知消息，保存业务字段、传输身份和不可变原始报文供消费持久化。 */
 public record AcceptedNotification(
         NotificationEventContract.Binding binding,
         UUID tenantId,
@@ -27,6 +27,9 @@ public record AcceptedNotification(
         Instant envelopeOccurredAt,
         byte[] bodyBytes,
         byte[] bodySha256) {
+    /**
+     * 构造不可变快照并防御性复制可变内容，防止外部修改原数组或集合改变已接纳事实。
+     */
     public AcceptedNotification {
         java.util.Objects.requireNonNull(binding, "binding");
         java.util.Objects.requireNonNull(tenantId, "tenantId");
@@ -39,7 +42,7 @@ public record AcceptedNotification(
         bodySha256 = bodySha256.clone();
     }
 
-    /** Source-compatible constructor for callers that used messageId as the key. */
+    /** 兼容旧调用方将 messageId 作为消息 key 的构造方式。 */
     public AcceptedNotification(NotificationEventContract.Binding binding,
                                 UUID tenantId,
                                 UUID messageId,
@@ -64,13 +67,28 @@ public record AcceptedNotification(
                 correlationId, causationId, envelopeOccurredAt, bodyBytes, bodySha256);
     }
 
+    /**
+     * 返回业务意图键的防御性副本，避免调用方通过数组修改已保存事实。
+     */
     @Override public byte[] businessIntentKey() { return businessIntentKey.clone(); }
+    /**
+     * 返回消息发布键的防御性副本，避免调用方通过数组修改已保存事实。
+     */
     @Override public byte[] publicationKey() { return publicationKey.clone(); }
+    /**
+     * 返回来源副作用键的防御性副本，避免调用方通过数组修改已保存事实。
+     */
     @Override public byte[] sourceEffectKey() { return sourceEffectKey.clone(); }
+    /**
+     * 返回原始消息字节的防御性副本，避免调用方通过数组修改已保存事实。
+     */
     @Override public byte[] bodyBytes() { return bodyBytes.clone(); }
+    /**
+     * 返回消息体摘要的防御性副本，避免调用方通过数组修改已保存事实。
+     */
     @Override public byte[] bodySha256() { return bodySha256.clone(); }
 
-    /** Returns the already verified immutable envelope for persistence/replay paths. */
+    /** 为持久化及重放路径返回已经校验的不可变信封。 */
     public NotificationEnvelope envelope() {
         return new NotificationEnvelope(binding, tenantId, messageId, messageKey,
                 businessIntentKey, publicationKey, NotificationContract.AGGREGATE_TYPE,

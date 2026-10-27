@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+  告警操作审计持久化接口，保存操作目标、结果与消息追踪信息。
+  业务入口先校验租户上下文，再调用 XML SQL 写入审计。
+-->
+<mapper namespace="com.flowdesk.alert.mapper.AlertAuditMapper">
+  <!-- 插入告警审计，保存动作、目标、结果、操作主体及关联和因果标识，发生与入库时间均使用 now。 -->
+  <insert id="sqlInsertAudit">
+INSERT INTO audit_record
+                  (tenant_id,audit_id,action_code,target_type,target_id,outcome,actor_type,
+                   actor_id,reason,error_code,correlation_id,causation_id,occurred_at,recorded_at)
+                VALUES (#{tenantId},#{auditId},#{action},#{targetType},#{targetId},#{outcome},#{actorType},#{actorId},#{reason},#{error},#{correlationId},#{causationId},#{now},#{now})
+  </insert>
+</mapper>

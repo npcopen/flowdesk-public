@@ -39,6 +39,10 @@ const recovery: MessageRecovery = {
   updatedAt: "2026-08-30T09:00:00Z",
 };
 
+/**
+ * 构造消息恢复列表的测试响应。
+ * 包含结束游标、排序与关联标识，模拟组件依赖的标准分页元数据。
+ */
 function listResult(items: MessageRecovery[] = []) {
   return {
     items,
@@ -49,6 +53,10 @@ function listResult(items: MessageRecovery[] = []) {
   };
 }
 
+/**
+ * 向测试认证仓库写入具有恢复读取和重放权限的管理员会话。
+ * 使组件测试在明确授权条件下验证界面行为。
+ */
 function authorize(): void {
   const auth = useAuthStore();
   auth.session = {

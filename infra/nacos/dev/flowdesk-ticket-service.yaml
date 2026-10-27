@@ -1,0 +1,69 @@
+# Namespace: flowdesk-dev | Group: FLOWDESK_GROUP | Data ID: flowdesk-ticket-service.yaml
+# Startup-loaded configuration; restart instances after publishing a change.
+# Secrets and key/token file paths are supplied by the deployment, never here.
+spring:
+  datasource:
+    url: ${FLOWDESK_TICKET_DB_URL:jdbc:mysql://mysql:3306/flowdesk_ticket?sslMode=PREFERRED&allowPublicKeyRetrieval=true&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true}
+    username: fd_ticket_runtime
+  cloud:
+    stream:
+      rocketmq:
+        binder:
+          name-server: ${FLOWDESK_ROCKETMQ_NAME_SERVER:rocketmq-nameserver:9876}
+  data:
+    redis:
+      host: ${FLOWDESK_REDIS_HOST:redis}
+      port: ${FLOWDESK_REDIS_PORT:6379}
+flowdesk:
+  configuration:
+    service-name: flowdesk-ticket-service
+  health:
+    database-required: true
+    migration-required: true
+  ticket:
+    workflow:
+      base-url: ${FLOWDESK_TICKET_WORKFLOW_BASE_URL:}
+      connect-timeout: PT2S
+      read-timeout: PT3S
+    sla:
+      enabled: true
+      scanner-enabled: true
+      rebuilder-enabled: true
+      redis-enabled: true
+      batch-size: 100
+      tenant-batch-size: 100
+      poll-interval: PT5S
+      rebuild-lease-duration: PT30S
+      redis-degraded-sweep-interval: PT60S
+      qualification-refresh-interval: PT5M
+      qualification-max-age: PT5M
+      qualification-clock-skew: PT30S
+    notification:
+      outbox:
+        publisher:
+          enabled: true
+          name-server: ${FLOWDESK_ROCKETMQ_NAME_SERVER:rocketmq-nameserver:9876}
+          poll-interval-millis: 500
+    incident-entry:
+      enabled: true
+    incident-consumer:
+      enabled: true
+      name-server: ${FLOWDESK_ROCKETMQ_NAME_SERVER:rocketmq-nameserver:9876}
+      retry-delay-level: 0
+    incident-result-publisher:
+      enabled: true
+      name-server: ${FLOWDESK_ROCKETMQ_NAME_SERVER:rocketmq-nameserver:9876}
+    workflow-reverse:
+      entry:
+        enabled: true
+      consumer:
+        enabled: true
+        name-server: ${FLOWDESK_ROCKETMQ_NAME_SERVER:rocketmq-nameserver:9876}
+    iam:
+      base-url: ${FLOWDESK_TICKET_IAM_BASE_URL:}
+      connect-timeout: PT2S
+      read-timeout: PT3S
+    outbox:
+      publisher:
+        enabled: true
+        name-server: ${FLOWDESK_ROCKETMQ_NAME_SERVER:rocketmq-nameserver:9876}

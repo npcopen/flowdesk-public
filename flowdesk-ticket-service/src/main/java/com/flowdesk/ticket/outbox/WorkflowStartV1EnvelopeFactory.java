@@ -14,7 +14,7 @@ import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
 
-/** Builds the frozen v1 transport envelope without reserializing persisted body bytes. */
+/** 从持久化流程启动事实构建 v1 消息信封，发送前严格验证契约和载荷摘要。 */
 final class WorkflowStartV1EnvelopeFactory {
 
     private static final int MAX_BODY_BYTES = 64 * 1024;
@@ -22,10 +22,16 @@ final class WorkflowStartV1EnvelopeFactory {
             .appendInstant(6)
             .toFormatter(Locale.ROOT);
 
+    /**
+     * 私有构造方法，阻止工具类实例化，调用方应使用静态入口。
+     */
     private WorkflowStartV1EnvelopeFactory() {
     }
 
-    static TicketOutboxMessage create(TicketOutboxRepository.ClaimedOutbox outbox) {
+    /**
+     * 校验工作流启动发布创建请求并保存事实，按接口约定处理幂等及版本条件。
+     */
+    static TicketOutboxMessage create(com.flowdesk.ticket.model.outbox.ClaimedOutbox outbox) {
         requireFrozenContract(outbox);
         byte[] body = outbox.bodyBytes();
         if (body.length == 0 || body.length > MAX_BODY_BYTES) {
@@ -65,7 +71,10 @@ final class WorkflowStartV1EnvelopeFactory {
                 outbox.messageId().toString(), body, properties);
     }
 
-    private static void requireFrozenContract(TicketOutboxRepository.ClaimedOutbox outbox) {
+    /**
+     * 核对消息符合冻结传输契约，拒绝不兼容发布内容。
+     */
+    private static void requireFrozenContract(com.flowdesk.ticket.model.outbox.ClaimedOutbox outbox) {
         if (!TicketEventContract.WorkflowStartRequested.CONTRACT_REF.equals(outbox.contractRef())
                 || TicketEventContract.WorkflowStartRequested.EVENT_VERSION
                 != outbox.contractVersion()
@@ -75,6 +84,9 @@ final class WorkflowStartV1EnvelopeFactory {
         }
     }
 
+    /**
+     * 校验原始内容符合 UTF-8 处理约定，拒绝无法按协议解释的字节。
+     */
     private static void requireUtf8(byte[] body) {
         try {
             StandardCharsets.UTF_8.newDecoder()
@@ -87,6 +99,9 @@ final class WorkflowStartV1EnvelopeFactory {
         }
     }
 
+    /**
+     * 计算输入内容 SHA-256 摘要，供消息完整性和业务意图核验。
+     */
     private static byte[] sha256(byte[] value) {
         try {
             return MessageDigest.getInstance("SHA-256").digest(value);
@@ -96,11 +111,20 @@ final class WorkflowStartV1EnvelopeFactory {
         }
     }
 
+    /**
+     * 启动发件箱契约异常，阻止不符合协议的持久化消息继续发送。
+     */
     static final class InvalidOutboxContractException extends RuntimeException {
+        /**
+         * 构造工作流启动发布异常，保存稳定错误信息及可用的原始原因，供上层分类处理。
+         */
         InvalidOutboxContractException(String message) {
             super(message);
         }
 
+        /**
+         * 构造工作流启动发布异常，保存稳定错误信息及可用的原始原因，供上层分类处理。
+         */
         InvalidOutboxContractException(String message, Throwable cause) {
             super(message, cause);
         }

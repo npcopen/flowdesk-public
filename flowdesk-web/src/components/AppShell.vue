@@ -1,4 +1,5 @@
 <script setup lang="ts">
+/** 应用导航与公共布局；根据用户权限筛选可见菜单。 */
 import { computed, ref } from "vue";
 import { RouterLink, useRoute, useRouter } from "vue-router";
 import {
@@ -78,9 +79,17 @@ const connectionText = computed(() =>
   featureFlags.fullMock ? "本地数据" : "工作空间",
 );
 
+/**
+ * 收起移动端导航菜单。
+ * 路由切换或遮罩点击后复位菜单状态，避免覆盖下一页面。
+ */
 function closeMenu(): void {
   open.value = false;
 }
+/**
+ * 结束当前内存会话并关闭导航菜单。
+ * 随后跳转登录页，使受保护视图离开当前界面。
+ */
 function logout(): void {
   auth.logout();
   closeMenu();

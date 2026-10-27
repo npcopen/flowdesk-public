@@ -20,14 +20,23 @@ class TenantContextScopeTest {
     private static final UUID USER_1 = UUID.fromString("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
     private static final UUID CORR_1 = UUID.fromString("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
 
+    /**
+     * 创建租户 A 的可信测试上下文，供作用域可见性及线程隔离断言使用。
+     */
     private static TenantContext contextA() {
         return TenantContext.ofHumanJwt(TENANT_A, USER_1, CORR_1);
     }
 
+    /**
+     * 创建租户 B 的可信测试上下文，验证嵌套切换及线程复用时不会误用租户 A。
+     */
     private static TenantContext contextB() {
         return TenantContext.ofHumanJwt(TENANT_B, USER_1, CORR_1);
     }
 
+    /**
+     * 验证打开作用域后当前线程可读取该租户上下文。
+     */
     @Test
     void contextIsVisibleInsideScope() {
         TenantContext context = contextA();
@@ -37,6 +46,9 @@ class TenantContextScopeTest {
         }
     }
 
+    /**
+     * 验证作用域正常关闭时清除当前上下文，防止后续任务继承旧租户。
+     */
     @Test
     void contextIsClearedOnNormalExit() {
         try (TenantContextScope ignored = TenantContextScope.open(contextA())) {
@@ -46,6 +58,9 @@ class TenantContextScopeTest {
         assertThat(TenantContextHolder.currentOrNull()).isNull();
     }
 
+    /**
+     * 验证作用域内抛出异常后仍正确清理上下文。
+     */
     @Test
     void contextIsClearedOnExceptionExit() {
         assertThatThrownBy(() -> {
@@ -59,6 +74,9 @@ class TenantContextScopeTest {
         assertThat(TenantContextHolder.currentOrNull()).isNull();
     }
 
+    /**
+     * 验证嵌套作用域关闭后恢复外层上下文，最终退出时不残留租户。
+     */
     @Test
     void nestedScopeRestoresOuterOnClose() {
         try (TenantContextScope outer = TenantContextScope.open(contextA())) {
@@ -71,6 +89,9 @@ class TenantContextScopeTest {
         assertThatThrownBy(TenantContextHolder::current).isInstanceOf(NoTenantContextException.class);
     }
 
+    /**
+     * 验证作用域外不存在默认租户，未认证调用不能回退到隐式租户。
+     */
     @Test
     void noDefaultTenantOutsideScope() {
         // 禁止默认租户：没有任何路径能读到猜测的默认上下文。
@@ -78,12 +99,18 @@ class TenantContextScopeTest {
         assertThat(TenantContextHolder.currentOrNull()).isNull();
     }
 
+    /**
+     * 验证不能用 null 上下文打开可信租户作用域。
+     */
     @Test
     void openRejectsNullContext() {
         assertThatThrownBy(() -> TenantContextScope.open(null))
                 .isInstanceOf(NullPointerException.class);
     }
 
+    /**
+     * 验证重复关闭同一作用域不会误清理或恢复错误上下文。
+     */
     @Test
     void closeIsIdempotent() {
         TenantContextScope scope = TenantContextScope.open(contextA());

@@ -15,17 +15,25 @@ import java.util.Objects;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-/** Synchronous RocketMQ adapter for the Workflow Notification binding. */
+/**
+ * 审批通知的同步 RocketMQ 发送适配器，将 Broker 发送状态转换为发布器可判断的结果。
+ */
 public final class RocketMqWorkflowNotificationOutboxTransport
         implements WorkflowNotificationOutboxTransport, AutoCloseable {
     static final String NOT_CONFIRMED = "BROKER_SEND_NOT_CONFIRMED";
     private final DefaultMQProducer producer;
     private final AtomicBoolean started = new AtomicBoolean();
 
+    /**
+     * 初始化组件依赖与运行参数，使后续调用使用一致的协作对象。
+     */
     RocketMqWorkflowNotificationOutboxTransport(DefaultMQProducer producer) {
         this.producer = Objects.requireNonNull(producer, "producer");
     }
 
+    /**
+     * 使用已校验的代理地址和固定访问身份创建传输组件，保持冻结生产组配置一致。
+     */
     public static RocketMqWorkflowNotificationOutboxTransport create(
             WorkflowNotificationOutboxPublisherProperties properties) {
         properties.validateEnabledConfiguration();
@@ -43,12 +51,18 @@ public final class RocketMqWorkflowNotificationOutboxTransport
         return new RocketMqWorkflowNotificationOutboxTransport(producer);
     }
 
+    /**
+     * 启动当前组件并建立消息连接或调度资源，准备处理生命周期内的任务。
+     */
     public synchronized void start() throws MQClientException {
         if (started.get()) return;
         try { producer.start(); started.set(true); }
         catch (MQClientException | RuntimeException failure) { producer.shutdown(); throw failure; }
     }
 
+    /**
+     * 发送当前消息并返回代理确认结果，重复发送保留原身份与载荷。
+     */
     @Override public WorkflowNotificationOutboxSendResult send(WorkflowNotificationOutboxMessage value)
             throws Exception {
         if (!started.get()) throw new IllegalStateException("Workflow Notification producer is not started");
@@ -69,9 +83,15 @@ public final class RocketMqWorkflowNotificationOutboxTransport
         return WorkflowNotificationOutboxSendResult.notConfirmed(NOT_CONFIRMED, summary);
     }
 
+    /**
+     * 关闭持有的消息代理资源并释放连接，结束传输对象生命周期。
+     */
     @Override public synchronized void close() {
         if (started.compareAndSet(true, false)) producer.shutdown();
     }
 
+    /**
+     * 提供当前生产者，供测试核验冻结配置与真实发送行为。
+     */
     DefaultMQProducer producerForTest() { return producer; }
 }

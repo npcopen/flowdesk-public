@@ -3,14 +3,18 @@ package com.flowdesk.ticket.event;
 import java.time.Duration;
 import java.util.List;
 
-/**
- * Executable integration-event constants emitted by Ticket.
- */
+/** 工单服务发布事件的固定契约常量，统一消息身份、绑定、重试次数与租约约束。 */
 public final class TicketEventContract {
 
+    /**
+     * 私有构造方法，阻止工具类实例化，调用方应使用静态入口。
+     */
     private TicketEventContract() {
     }
 
+    /**
+     * 工作流启动请求的冻结载荷，记录工单及所用定义、版本快照。
+     */
     public static final class WorkflowStartRequested {
         public static final String EVENT_TYPE = "flowdesk.workflow.start";
         public static final int EVENT_VERSION = 1;
@@ -39,6 +43,9 @@ public final class TicketEventContract {
                 Duration.ofMinutes(30),
                 Duration.ofHours(2));
 
+        /**
+         * 私有构造方法，阻止工具类实例化，调用方应使用静态入口。
+         */
         private WorkflowStartRequested() {
         }
     }

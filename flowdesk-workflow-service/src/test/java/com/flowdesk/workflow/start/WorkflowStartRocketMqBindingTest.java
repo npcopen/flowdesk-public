@@ -1,5 +1,7 @@
 package com.flowdesk.workflow.start;
 
+import com.flowdesk.workflow.dto.WorkflowRecoverySupport;
+import com.flowdesk.workflow.dto.WorkflowRecoveryReplayCommand;
 import org.apache.rocketmq.client.consumer.DefaultMQPushConsumer;
 import org.apache.rocketmq.client.consumer.listener.ConsumeConcurrentlyContext;
 import org.apache.rocketmq.client.consumer.listener.ConsumeConcurrentlyStatus;
@@ -16,8 +18,14 @@ import java.util.concurrent.atomic.AtomicReference;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+/**
+ * 启动队列绑定测试，核验主队列五次重投、死信计数补偿和监听器单次处置映射。
+ */
 class WorkflowStartRocketMqBindingTest {
 
+    /**
+     * 验证主队列有五次重投且死信接纳补偿继承的重试计数，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void mainGroupHasFiveReconsumesAndDlqAcceptorCompensatesInheritedCount()
             throws Exception {
@@ -46,6 +54,9 @@ class WorkflowStartRocketMqBindingTest {
                 .isEqualTo("%DLQ%flowdesk_workflow_start_v1_workflow_cg");
     }
 
+    /**
+     * 验证死信接纳暂时失败使用新的短代理重试延迟，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void dlqAcceptorTransientFailureUsesFreshShortBrokerDelay() {
         MessageExt message = new MessageExt();
@@ -70,6 +81,9 @@ class WorkflowStartRocketMqBindingTest {
                 .isEqualTo(WorkflowStartContract.DLQ_ACCEPTOR_RETRY_DELAY_LEVEL);
     }
 
+    /**
+     * 验证监听器直接向代理映射单次结果且无内部嵌套重试，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void listenerMapsOneResultDirectlyToBrokerWithoutInnerRetry() {
         MessageExt message = new MessageExt();
@@ -100,6 +114,9 @@ class WorkflowStartRocketMqBindingTest {
                 .isEqualTo(WorkflowStartContract.CONSUMER_GROUP);
     }
 
+    /**
+     * 验证ACL 错误身份失败关闭且重放请求体仅接收原因，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void aclIdentityFailsClosedAndReplayBodyHasOnlyReason() {
         WorkflowStartRocketMqProperties valid = new WorkflowStartRocketMqProperties();
@@ -111,12 +128,12 @@ class WorkflowStartRocketMqBindingTest {
         valid.setAccessKey("flowdeskticket");
         assertThatThrownBy(valid::validateEnabledConfiguration)
                 .isInstanceOf(IllegalStateException.class);
-        assertThat(WorkflowRecoveryController.ReplayCommand.class.getRecordComponents())
+        assertThat(WorkflowRecoveryReplayCommand.class.getRecordComponents())
                 .extracting(java.lang.reflect.RecordComponent::getName)
                 .containsExactly("reason");
         assertThatThrownBy(() -> new ObjectMapper().readValue(
                 "{\"reason\":\"retry\",\"messageId\":\"forbidden\"}",
-                WorkflowRecoveryController.ReplayCommand.class))
+                WorkflowRecoveryReplayCommand.class))
                 .hasMessageContaining("messageId");
         assertThatThrownBy(() -> WorkflowRecoverySupport.requireReason("   "))
                 .isInstanceOfSatisfying(com.flowdesk.common.web.ApiException.class,
@@ -124,6 +141,9 @@ class WorkflowStartRocketMqBindingTest {
                                 .isEqualTo("RECOVERY_REASON_REQUIRED"));
     }
 
+    /**
+     * 断言当前场景的冻结消费组及重投边界，失败时直接报告对应证据差异。
+     */
     private static void assertFrozen(
             DefaultMQPushConsumer consumer, String group, int maxReconsumeTimes) {
         assertThat(consumer.getConsumerGroup()).isEqualTo(group);

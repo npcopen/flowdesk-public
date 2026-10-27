@@ -1,0 +1,30 @@
+# Namespace: flowdesk-test | Group: FLOWDESK_GROUP | Data ID: flowdesk-notification-service.yaml
+# Startup-loaded configuration; restart instances after publishing a change.
+# Secrets and key/token file paths are supplied by the deployment, never here.
+spring:
+  datasource:
+    url: ${FLOWDESK_NOTIFICATION_DB_URL:jdbc:mysql://mysql:3306/flowdesk_notification?sslMode=PREFERRED&allowPublicKeyRetrieval=true&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true}
+    username: fd_notification_runtime
+  cloud:
+    stream:
+      rocketmq:
+        binder:
+          name-server: ${FLOWDESK_ROCKETMQ_NAME_SERVER:rocketmq-nameserver:9876}
+flowdesk:
+  configuration:
+    service-name: flowdesk-notification-service
+  health:
+    database-required: true
+    migration-required: true
+  notification:
+    entry:
+      enabled: true
+    consumer:
+      enabled: true
+      name-server: ${FLOWDESK_ROCKETMQ_NAME_SERVER:rocketmq-nameserver:9876}
+    recovery:
+      enabled: true
+      datasource:
+        url: ${FLOWDESK_NOTIFICATION_RECOVERY_DB_URL:${FLOWDESK_NOTIFICATION_DB_URL:jdbc:mysql://mysql:3306/flowdesk_notification?sslMode=PREFERRED&allowPublicKeyRetrieval=true&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true}}
+        username: ${FLOWDESK_NOTIFICATION_RECOVERY_DB_USERNAME:fd_notification_recovery}
+        driver-class-name: com.mysql.cj.jdbc.Driver

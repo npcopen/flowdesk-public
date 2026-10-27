@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!-- IAM 审计记录 SQL：按 tenantId 隔离记录，保存业务操作事实并支持重复写入后的原因比对。 -->
+<mapper namespace="com.flowdesk.iam.mapper.AuditMapper">
+
+  <!-- 写入审计操作、对象、执行人和结果；发生时间由调用方传入，记录时间使用数据库当前时间。 -->
+  <insert id="insertAudit">
+    INSERT INTO audit_record
+      (tenant_id, audit_id, action_code, target_type, target_id, outcome,
+       actor_type, actor_id, reason, error_code, correlation_id, causation_id,
+       occurred_at, recorded_at)
+    VALUES (#{tenantId}, #{auditId}, #{actionCode}, #{targetType}, #{targetId}, #{outcome}, #{actorType}, #{actorId}, #{reason}, #{errorCode}, #{correlationId}, NULL, #{occurredAt}, CURRENT_TIMESTAMP(6))
+  </insert>
+
+  <!-- 按租户和审计 ID 读取原始原因，供服务层识别既有操作意图或审计结果。 -->
+  <select id="findAuditReason" resultType="string">
+    SELECT reason FROM audit_record WHERE tenant_id = #{tenantId} AND audit_id = #{auditId}
+  </select>
+
+  <!-- 创建或授权操作遇到重复键后的原因复查入口，限定条件与普通查询一致，幂等意图比对由服务层完成。 -->
+  <select id="findAuditReasonAfterDuplicate" resultType="string">
+    SELECT reason FROM audit_record
+    WHERE tenant_id = #{tenantId} AND audit_id = #{auditId}
+  </select>
+
+</mapper>

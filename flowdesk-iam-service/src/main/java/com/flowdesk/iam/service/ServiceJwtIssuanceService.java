@@ -10,11 +10,8 @@ import java.util.Objects;
 import java.util.UUID;
 
 /**
- * IAM application service for issuing tenant-scoped service-identity JWTs.
- *
- * <p>The private signing key remains in IAM. Only the deployment-unit ids configured
- * in {@code flowdesk.security.jwt.allowed-service-ids} can be minted, which matches
- * the verifier allow-list used by the API-016 internal eligibility endpoint.</p>
+ * 签发绑定租户的服务身份 JWT；仅允许配置白名单内的部署单元，签名私钥不离开 IAM。
+ * 签发白名单与内部资格接口的验证白名单保持一致。
  */
 @Service
 public class ServiceJwtIssuanceService {
@@ -22,6 +19,9 @@ public class ServiceJwtIssuanceService {
     private final JwtIssuer jwtIssuer;
     private final List<String> allowedServiceIds;
 
+    /**
+     * 保存 JWT 签发器及允许的服务标识配置，只有通过白名单校验的租户服务身份才能签发令牌。
+     */
     public ServiceJwtIssuanceService(JwtIssuer jwtIssuer, FlowDeskJwtProperties jwtProperties) {
         this.jwtIssuer = Objects.requireNonNull(jwtIssuer, "jwtIssuer");
         this.allowedServiceIds = List.copyOf(
@@ -29,12 +29,11 @@ public class ServiceJwtIssuanceService {
     }
 
     /**
-     * Issues a short-lived RS256 service JWT ({@code aud=flowdesk-internal}).
-     *
-     * @param tenantId  tenant scope encoded in the token
-     * @param serviceId deployment-unit id that will present the token
-     * @return serialized JWT and its authoritative expiry
-     * @throws IllegalArgumentException when the service id is not on the IAM allow-list
+     * 签发短时效的 RS256 服务 JWT（{@code aud=flowdesk-internal}）。
+     * @param tenantId 写入令牌的租户范围
+     * @param serviceId 使用此令牌的部署单元标识
+     * @return 序列化 JWT 及其权威到期时间
+     * @throws IllegalArgumentException 服务标识不在 IAM 签发白名单时抛出
      */
     public IssuedJwt issue(UUID tenantId, String serviceId) {
         Objects.requireNonNull(tenantId, "tenantId");

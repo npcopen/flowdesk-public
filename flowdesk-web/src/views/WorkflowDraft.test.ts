@@ -10,7 +10,15 @@ vi.mock('@/stores/auth', () => ({ useAuthStore: () => ({ can: () => true, canAny
 vi.mock('vue-router', () => ({ RouterLink: { template: '<a><slot /></a>', props: ['to'] } }))
 import ApprovalsPage from './ApprovalsPage.vue'
 
+/**
+ * 构造单个工作流资源的 API 测试结果。
+ * 提供响应头及元数据，供草稿管理页面按真实结果结构读取。
+ */
 const one = (data: unknown) => ({ data, headers: new Headers(), meta: {} })
+/**
+ * 构造工作流集合的分页测试结果。
+ * 默认没有下一页，便于控制定义、版本及审批人候选的测试数据。
+ */
 const list = (items: unknown[] = []) => ({ items, meta: { page: { nextPageToken: null } } })
 const draft = { draftId: 'draft-1', definitionId: 'definition-1', status: 'EDITABLE', validationState: 'VALID', lockVersion: 1, condition: { fieldCode: 'SERVICE_RISK_LEVEL', operator: 'EQUALS', valueType: 'STRING', value: 'HIGH' }, level1ApproverUserId: 'approver-a', level2ApproverUserId: 'approver-b' }
 
@@ -30,6 +38,10 @@ beforeEach(() => {
 it('requires saving and validating changed approvers before publishing that version', async () => {
   const wrapper = mount(ApprovalsPage)
   await flushPromises()
+  /**
+   * 按可见文本在组件按钮集合中定位目标按钮。
+   * 测试用此入口触发草稿保存、校验和发布等用户操作。
+   */
   const button = (label: string) => wrapper.findAll('button').find(b => b.text().includes(label))!
   expect(button('发布规则').attributes('disabled')).toBeUndefined()
   await wrapper.get('#level-one').setValue('approver-c')

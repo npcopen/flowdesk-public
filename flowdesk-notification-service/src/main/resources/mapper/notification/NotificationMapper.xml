@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+  用户通知持久化接口，支持通知去重、个人列表、未读数量及阅读状态更新。
+  默认入口校验租户，写入要求已有事务；阅读更新还以收件人及版本约束目标。
+-->
+<mapper namespace="com.flowdesk.notification.mapper.NotificationMapper">
+  <!-- 通知查询复用列，覆盖收件人、来源效果、内容、阅读状态、版本及审计时间。 -->
+  <sql id="columns">notification_id,recipient_user_id,notification_kind,source_service,source_effect_key,source_ref_type,source_ref_id,title,body,state,read_at,lock_version,created_at,updated_at</sql>
+  <!-- 按租户及通知标识读取单条通知；lock 为 true 时使用 FOR UPDATE，未命中时底层返回 null。 -->
+  <select id="selectNotification" resultType="com.flowdesk.notification.model.NotificationRow">
+    SELECT <include refid="columns"/> FROM notification WHERE tenant_id=#{tenantId} AND notification_id=#{notificationId}
+    <if test="lock">FOR UPDATE</if>
+  </select>
+  <!-- 按租户、收件人、来源服务、效果键及通知类型查询既有通知，供业务效果去重；lock 控制行锁。 -->
+  <select id="selectByEffect" resultType="com.flowdesk.notification.model.NotificationRow">
+    SELECT <include refid="columns"/> FROM notification WHERE tenant_id=#{tenantId} AND recipient_user_id=#{recipientId} AND source_service=#{sourceService} AND source_effect_key=#{sourceEffect} AND notification_kind=#{kind}
+    <if test="lock">FOR UPDATE</if>
+  </select>
+  <!-- 限定租户及收件人，按状态、类型及创建时间筛选，以创建时间和通知标识进行稳定游标分页，最多 limit 条。 -->
+  <select id="selectNotifications" resultType="com.flowdesk.notification.model.NotificationRow">
+    SELECT <include refid="columns"/> FROM notification WHERE tenant_id=#{tenantId} AND recipient_user_id=#{recipientId}
+    <if test="state != null">AND state=#{state}</if>
+    <if test="kind != null">AND notification_kind=#{kind}</if>
+    <if test="from != null">AND created_at &gt;= #{from}</if>
+    <if test="to != null">AND created_at &lt;= #{to}</if>
+    <if test="cursorValue != null and cursorId != null">
+      AND (created_at <choose><when test="ascending">&gt;</when><otherwise>&lt;</otherwise></choose> #{cursorValue} OR (created_at=#{cursorValue} AND notification_id <choose><when test="ascending">&gt;</when><otherwise>&lt;</otherwise></choose> #{cursorId}))
+    </if>
+    ORDER BY created_at <choose><when test="ascending">ASC</when><otherwise>DESC</otherwise></choose>, notification_id <choose><when test="ascending">ASC</when><otherwise>DESC</otherwise></choose> LIMIT #{limit}
+  </select>
+  <!-- 统计指定租户及收件人状态为 UNREAD 的通知数量。 -->
+  <select id="selectUnreadCount" resultType="long">SELECT COUNT(*) FROM notification WHERE tenant_id=#{tenantId} AND recipient_user_id=#{recipientId} AND state='UNREAD'</select>
+  <!-- 保存来源效果及通知内容，初始化为 UNREAD、已读时间为空、版本为 0，以服务主体记录创建信息。 -->
+  <insert id="insertNotificationRow">
+    INSERT INTO notification (tenant_id,notification_id,recipient_user_id,notification_kind,source_service,source_effect_key,source_ref_type,source_ref_id,title,body,state,read_at,lock_version,created_at,created_by_type,created_by_id,updated_at,updated_by_type,updated_by_id)
+    VALUES (#{tenantId},#{notificationId},#{recipientId},#{kind},#{sourceService},#{sourceEffect},#{sourceRefType},#{sourceRefId},#{title},#{body},'UNREAD',NULL,0,#{now},'SERVICE',NULL,#{now},'SERVICE',NULL)
+  </insert>
+  <!-- 以租户、通知、收件人及 expectedVersion 更新阅读状态和 readAt，增加版本并将收件人记为更新主体。 -->
+  <update id="updateReadStateRow">
+    UPDATE notification SET state=#{state},read_at=#{readAt},lock_version=lock_version+1,updated_at=#{now},updated_by_type='USER',updated_by_id=#{recipientId}
+    WHERE tenant_id=#{tenantId} AND notification_id=#{notificationId} AND recipient_user_id=#{recipientId} AND lock_version=#{expectedVersion}
+  </update>
+</mapper>

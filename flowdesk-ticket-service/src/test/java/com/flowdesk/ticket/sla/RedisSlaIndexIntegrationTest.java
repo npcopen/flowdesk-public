@@ -15,13 +15,19 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
-/** Redis adapter boundary contract; real Redis fencing/swap is exercised by M8 E2E. */
+/**
+ * Redis SLA 索引适配器的边界契约测试，通过替身核验租户键、候选编码和异常成员处理。
+ * 真实 Redis 上的围栏与索引切换行为由 M8 端到端测试覆盖。
+ */
 class RedisSlaIndexIntegrationTest {
     private static final UUID TENANT_A = UUID.fromString("11111111-1111-1111-1111-111111111111");
     private static final UUID TENANT_B = UUID.fromString("22222222-2222-2222-2222-222222222222");
     private static final UUID CLOCK_A = UUID.fromString("33333333-3333-3333-3333-333333333333");
     private static final UUID CLOCK_B = UUID.fromString("44444444-4444-4444-4444-444444444444");
 
+    /**
+     * 验证租户键隔离、同毫秒候选和非法成员处理。
+     */
     @Test
     void tenantKeysSameMillisecondCandidatesAndMalformedMembersAreHandledSafely() {
         StringRedisTemplate redis = mock(StringRedisTemplate.class);
@@ -60,6 +66,9 @@ class RedisSlaIndexIntegrationTest {
         verify(redis).delete(keyA);
     }
 
+    /**
+     * 验证临时键与正式键仅共享各自租户的 Redis 哈希槽。
+     */
     @Test
     void temporaryAndFormalKeysShareOnlyTheirTenantHashSlot() {
         UUID run = UUID.fromString("55555555-5555-5555-5555-555555555555");

@@ -5,7 +5,7 @@ import com.jayway.jsonpath.JsonPath;
 import com.flowdesk.common.authz.RoleCode;
 import com.flowdesk.common.security.IssuedJwt;
 import com.flowdesk.common.security.JwtIssuer;
-import com.flowdesk.iam.repository.IamRepository.Uuids;
+import com.flowdesk.iam.repository.Uuids;
 import com.flowdesk.iam.service.PasswordHashService;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -43,9 +43,15 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+/**
+ * 验证IAM 登录、账户、角色及授权 API的行为约束；结合可控测试数据检查正常流程、失败边界或状态收敛，避免回归破坏既有契约。
+ */
 @SpringBootTest
 @AutoConfigureMockMvc
 class IamApiIntegrationTest {
+    /**
+     * 验证管理员不能撤销自身管理角色，也不能移除组织管理员的核心 IAM 权限，防止租户失去管理入口。
+     */
     @Test
     void administratorCannotRemoveTheirOwnAccessOrTheCoreAdministrationPermissions() throws Exception {
         String token=jwtIssuer.issueHuman(TENANT_A,ALICE,Set.of(RoleCode.TENANT_ADMIN),
@@ -64,6 +70,9 @@ class IamApiIntegrationTest {
                 .andExpect(status().isConflict()).andExpect(jsonPath("$.error.code").value("IAM_CORE_PERMISSION_REQUIRED"));
     }
 
+    /**
+     * 验证审批人无需账户管理权限即可读取同租户最小身份，同时不能越过租户边界。
+     */
     @Test
     void approversCanReadMinimalSameTenantIdentityWithoutAccountPermissions() throws Exception {
         String token=jwtIssuer.issueHuman(TENANT_A,DAVE,Set.of(RoleCode.APPROVER),Set.of(PermissionCode.APPROVAL_READ_ASSIGNED)).token();
@@ -74,6 +83,104 @@ class IamApiIntegrationTest {
         String foreign=jwtIssuer.issueHuman(TENANT_B,DAVE,Set.of(RoleCode.APPROVER),Set.of(PermissionCode.APPROVAL_READ_ASSIGNED)).token();
         mockMvc.perform(get("/api/v1/users/"+BOB+"/identity").header("Authorization","Bearer "+foreign)).andExpect(status().isNotFound());
         mockMvc.perform(get("/api/v1/users/"+BOB).header("Authorization","Bearer "+token)).andExpect(status().isForbidden());
+    }
+
+    /**
+     * 验证 Agent 可分页查询同租户有效接单候选，返回最小身份且不要求用户管理权限。
+     */
+    @Test
+    void agentsCanPageOnlyActiveSameTenantAssigneeIdentitiesWithoutUserManagementAccess() throws Exception {
+        insertUserRole(TENANT_A, BOB, ROLE_AGENT);
+        insertUserRole(TENANT_A, DAVE, ROLE_AGENT);
+        insertUserRole(TENANT_A, ERIN, ROLE_AGENT);
+        jdbc.update("UPDATE user_role_assignment SET state = 'REVOKED' WHERE tenant_id = ? AND user_id = ? AND role_id = ?",
+                Uuids.toBytes(TENANT_A), Uuids.toBytes(ERIN), Uuids.toBytes(ROLE_AGENT));
+        UUID foreignRole = UUID.fromString("20000000-0000-0000-0000-000000000003");
+        UUID foreignAgent = UUID.fromString("20000000-0000-0000-0000-000000000004");
+        insertRole(TENANT_B, foreignRole, "AGENT", "Other tenant agent");
+        insertUser(TENANT_B, foreignAgent, "foreign-agent", "Aaron", "ACTIVE", null);
+        insertUserRole(TENANT_B, foreignAgent, foreignRole);
+        String agent = jwtIssuer.issueHuman(TENANT_A, CAROL, Set.of(RoleCode.AGENT),
+                Set.of(PermissionCode.TICKET_TRANSFER_ASSIGNED)).token();
+        String path = "/api/v1/users/ticket-assignee-candidates";
+
+        MvcResult first = mockMvc.perform(get(path).header("Authorization", "Bearer " + agent)
+                        .param("pageSize", "1").param("sort", "displayName"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.length()").value(1))
+                .andExpect(jsonPath("$.data[0].userId").value(BOB.toString()))
+                .andExpect(jsonPath("$.data[0].username").value("bob"))
+                .andExpect(jsonPath("$.data[0].displayName").value("Bob"))
+                .andExpect(jsonPath("$.data[0].length()").value(3))
+                .andExpect(jsonPath("$.data[0].roleCodes").doesNotExist())
+                .andExpect(jsonPath("$.data[0].status").doesNotExist())
+                .andExpect(jsonPath("$.data[0].passwordHash").doesNotExist())
+                .andExpect(jsonPath("$.meta.page.nextPageToken").isNotEmpty()).andReturn();
+        String cursor = JsonPath.read(first.getResponse().getContentAsString(), "$.meta.page.nextPageToken");
+        mockMvc.perform(get(path).header("Authorization", "Bearer " + agent)
+                        .param("pageSize", "1").param("sort", "displayName").param("pageToken", cursor))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.data.length()").value(1))
+                .andExpect(jsonPath("$.data[0].userId").value(CAROL.toString()))
+                .andExpect(jsonPath("$.meta.page.nextPageToken").isEmpty());
+        String ticketService = jwtIssuer.issueService(TENANT_A, "flowdesk-ticket-service").token();
+        for (UUID subject : List.of(ALICE, BOB, CAROL, DAVE, ERIN, foreignAgent)) {
+            mockMvc.perform(post("/api/v1/internal/iam/eligibility-checks")
+                            .header("Authorization", "Bearer " + ticketService)
+                            .header("X-Correlation-Id", UUID.randomUUID().toString())
+                            .contentType("application/json")
+                            .content("{\"subjectUserId\":\"%s\",\"requiredRoleCode\":\"AGENT\",\"purpose\":\"TICKET_ASSIGNEE\"}".formatted(subject)))
+                    .andExpect(status().isOk())
+                    .andExpect(jsonPath("$.data.eligible").value(List.of(BOB, CAROL).contains(subject)));
+        }
+        String foreign = jwtIssuer.issueHuman(TENANT_B, foreignAgent, Set.of(RoleCode.AGENT),
+                Set.of(PermissionCode.TICKET_TRANSFER_ASSIGNED)).token();
+        mockMvc.perform(get(path).header("Authorization", "Bearer " + foreign)
+                        .param("pageSize", "1").param("sort", "displayName").param("pageToken", cursor))
+                .andExpect(status().isBadRequest()).andExpect(jsonPath("$.error.code").value("CURSOR_INVALID"));
+        mockMvc.perform(get("/api/v1/users").header("Authorization", "Bearer " + agent))
+                .andExpect(status().isForbidden());
+        mockMvc.perform(get("/api/v1/users/" + BOB).header("Authorization", "Bearer " + agent))
+                .andExpect(status().isForbidden());
+        mockMvc.perform(post("/api/v1/users").header("Authorization", "Bearer " + agent)
+                        .header("Idempotency-Key", "agent-cannot-create-user-001")
+                        .contentType("application/json")
+                        .content("{\"username\":\"new-user\",\"displayName\":\"New User\",\"initialPassword\":\"Password123!\",\"status\":\"ACTIVE\"}"))
+                .andExpect(status().isForbidden());
+        jdbc.update("UPDATE role SET status = 'INACTIVE' WHERE tenant_id = ? AND role_id = ?",
+                Uuids.toBytes(TENANT_A), Uuids.toBytes(ROLE_AGENT));
+        mockMvc.perform(get(path).header("Authorization", "Bearer " + agent))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.data").isEmpty());
+    }
+
+    /**
+     * 验证接单候选查询要求工单相关权限，并拒绝通过附加范围参数改变固定候选边界。
+     */
+    @Test
+    void assigneeCandidatesRequireTicketPermissionAndRejectScopeOverrides() throws Exception {
+        String path = "/api/v1/users/ticket-assignee-candidates";
+        mockMvc.perform(get(path)).andExpect(status().isUnauthorized());
+        String requester = jwtIssuer.issueHuman(TENANT_A, BOB, Set.of(RoleCode.REQUESTER),
+                Set.of(PermissionCode.TICKET_CREATE)).token();
+        mockMvc.perform(get(path).header("Authorization", "Bearer " + requester))
+                .andExpect(status().isForbidden());
+        String readOnly = jwtIssuer.issueHuman(TENANT_A, CAROL, Set.of(RoleCode.AGENT),
+                Set.of(PermissionCode.TICKET_READ_ASSIGNED)).token();
+        mockMvc.perform(get(path).header("Authorization", "Bearer " + readOnly))
+                .andExpect(status().isForbidden());
+        String agent = jwtIssuer.issueHuman(TENANT_A, CAROL, Set.of(RoleCode.AGENT),
+                Set.of(PermissionCode.TICKET_TRANSFER_ASSIGNED)).token();
+        for (PermissionCode permission : List.of(PermissionCode.TICKET_ASSIGN_TENANT,
+                PermissionCode.TICKET_TRANSFER_TENANT)) {
+            String admin = jwtIssuer.issueHuman(TENANT_A, ALICE, Set.of(RoleCode.SERVICE_DESK_ADMIN),
+                    Set.of(permission)).token();
+            mockMvc.perform(get(path).header("Authorization", "Bearer " + admin))
+                    .andExpect(status().isOk()).andExpect(jsonPath("$.data[0].userId").value(CAROL.toString()));
+        }
+        for (String parameter : List.of("status", "roleCode", "tenantId")) {
+            mockMvc.perform(get(path).header("Authorization", "Bearer " + agent).param(parameter, "INACTIVE"))
+                    .andExpect(status().isBadRequest());
+        }
     }
 
     private static final UUID TENANT_A = UUID.fromString("11111111-1111-1111-1111-111111111111");
@@ -101,6 +208,9 @@ class IamApiIntegrationTest {
 
     private static final KeyPair KEY_PAIR = newKeyPair();
 
+    /**
+     * 为集成测试注册配套 JWT 签名和验签配置，保证测试请求经真实认证链校验。
+     */
     @DynamicPropertySource
     static void jwtKeys(DynamicPropertyRegistry registry) {
         registry.add("flowdesk.security.jwt.private-key-pem", () -> privateKeyPem());
@@ -116,6 +226,9 @@ class IamApiIntegrationTest {
         registry.add("spring.sql.init.schema-locations", () -> "classpath:schema-test.sql");
     }
 
+    /**
+     * 清理数据库并植入多租户、用户、角色和权限事实，为权限及幂等集成测试建立确定起点。
+     */
     @BeforeEach
     void cleanAndSeed() {
         for (String table : List.of("audit_record", "user_role_assignment", "role_permission",
@@ -161,6 +274,9 @@ class IamApiIntegrationTest {
         insertRolePermission(TENANT_A, ROLE_REQUESTER, PermissionCode.TICKET_CREATE);
     }
 
+    /**
+     * 验证登录成功签发令牌，当前用户查询以 JWT 认证租户而非请求输入确定数据范围。
+     */
     @Test
     void loginSucceedsAndCurrentUserComesFromJwtTenant() throws Exception {
         mockMvc.perform(post("/api/v1/auth/login")
@@ -185,6 +301,9 @@ class IamApiIntegrationTest {
                 .andExpect(jsonPath("$.data.tenant.tenantCode").value("ACME_SUPPORT"));
     }
 
+    /**
+     * 验证错误密码与模糊租户候选统一返回登录失败，避免泄露身份是否存在或选择错误账户。
+     */
     @Test
     void wrongPasswordAndAmbiguousTenantCodeAreUniformLoginFailed() throws Exception {
         mockMvc.perform(post("/api/v1/auth/login")
@@ -209,6 +328,62 @@ class IamApiIntegrationTest {
                 .andExpect(jsonPath("$.error.code").value("LOGIN_FAILED"));
     }
 
+    /**
+     * 验证登录失败计数独立提交，并在旧锁定过期后从新一轮失败开始计数。
+     */
+    @Test
+    void failedLoginAccountingCommitsIndependentlyAndExpiredLocksRestartTheCount() throws Exception {
+        for (int attempt = 1; attempt <= 5; attempt++) {
+            mockMvc.perform(post("/api/v1/auth/login")
+                            .contentType("application/json")
+                            .content("""
+                                    {"tenantCode":"ACME_SUPPORT","username":"alice","password":"wrong"}
+                                    """))
+                    .andExpect(status().isUnauthorized())
+                    .andExpect(jsonPath("$.error.code").value("LOGIN_FAILED"));
+            assertThat(jdbc.queryForObject(
+                    "SELECT failed_attempt_count FROM user_credential WHERE tenant_id=? AND user_id=?",
+                    Integer.class, Uuids.toBytes(TENANT_A), Uuids.toBytes(ALICE))).isEqualTo(attempt);
+        }
+        assertThat(jdbc.queryForObject(
+                "SELECT locked_until FROM user_credential WHERE tenant_id=? AND user_id=?",
+                Timestamp.class, Uuids.toBytes(TENANT_A), Uuids.toBytes(ALICE))).isAfter(Timestamp.from(Instant.now()));
+        mockMvc.perform(post("/api/v1/auth/login")
+                        .contentType("application/json")
+                        .content("""
+                                {"tenantCode":"ACME_SUPPORT","username":"alice","password":"Password123!"}
+                                """))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.error.code").value("ACCOUNT_TEMPORARILY_LOCKED"));
+
+        jdbc.update("UPDATE user_credential SET locked_until=? WHERE tenant_id=? AND user_id=?",
+                Timestamp.from(Instant.now().minusSeconds(60)), Uuids.toBytes(TENANT_A), Uuids.toBytes(ALICE));
+        mockMvc.perform(post("/api/v1/auth/login")
+                        .contentType("application/json")
+                        .content("""
+                                {"tenantCode":"ACME_SUPPORT","username":"alice","password":"wrong"}
+                                """))
+                .andExpect(status().isUnauthorized());
+        assertThat(jdbc.queryForObject(
+                "SELECT failed_attempt_count FROM user_credential WHERE tenant_id=? AND user_id=?",
+                Integer.class, Uuids.toBytes(TENANT_A), Uuids.toBytes(ALICE))).isEqualTo(1);
+        assertThat(jdbc.queryForObject(
+                "SELECT locked_until FROM user_credential WHERE tenant_id=? AND user_id=?",
+                Timestamp.class, Uuids.toBytes(TENANT_A), Uuids.toBytes(ALICE))).isNull();
+        mockMvc.perform(post("/api/v1/auth/login")
+                        .contentType("application/json")
+                        .content("""
+                                {"tenantCode":"ACME_SUPPORT","username":"alice","password":"Password123!"}
+                                """))
+                .andExpect(status().isOk());
+        assertThat(jdbc.queryForObject(
+                "SELECT failed_attempt_count FROM user_credential WHERE tenant_id=? AND user_id=?",
+                Integer.class, Uuids.toBytes(TENANT_A), Uuids.toBytes(ALICE))).isZero();
+    }
+
+    /**
+     * 验证凭证匹配后仍需拒绝停用账户和未到解锁时间的账户。
+     */
     @Test
     void inactiveAndLockedAccountsAreRejectedAfterCredentialMatch() throws Exception {
         mockMvc.perform(post("/api/v1/auth/login")
@@ -228,6 +403,9 @@ class IamApiIntegrationTest {
                 .andExpect(jsonPath("$.error.code").value("ACCOUNT_TEMPORARILY_LOCKED"));
     }
 
+    /**
+     * 验证请求不能额外指定租户字段绕过上下文，缺少认证令牌时返回统一认证错误。
+     */
     @Test
     void unknownTenantFieldIsRejectedAndMissingTokenIsAuthenticationRequired() throws Exception {
         mockMvc.perform(post("/api/v1/auth/login")
@@ -252,6 +430,9 @@ class IamApiIntegrationTest {
                 .andExpect(jsonPath("$.error.code").value("AUTHENTICATION_REQUIRED"));
     }
 
+    /**
+     * 验证第二页按实际数据库排序列继续查询，避免 API 字段与物理列映射错误导致分页失效。
+     */
     @Test
     void keysetPaginationSecondPageUsesPhysicalSortColumns() throws Exception {
         String adminToken = jwtIssuer.issueHuman(TENANT_A, ALICE, Set.of(RoleCode.TENANT_ADMIN),
@@ -297,6 +478,9 @@ class IamApiIntegrationTest {
                 .andExpect(jsonPath("$.data").isArray());
     }
 
+    /**
+     * 验证租户管理员具备用户创建、列表和修改能力，而普通请求者无权读取用户管理数据。
+     */
     @Test
     void tenantAdminCanCreateListAndPatchUserButRequesterCannotReadUsers() throws Exception {
         String requesterToken = jwtIssuer.issueHuman(TENANT_A, BOB, Set.of(RoleCode.REQUESTER),
@@ -352,6 +536,9 @@ class IamApiIntegrationTest {
                 .andExpect(jsonPath("$.data.lockVersion").value(1));
     }
 
+    /**
+     * 验证并发创建同一幂等意图只保留一个用户与追加审计效果，重复请求返回原资源。
+     */
     @Test
     void concurrentUserCreateReplaysOneAppendOnlyAuditEffect() throws Exception {
         String adminToken = jwtIssuer.issueHuman(TENANT_A, ALICE, Set.of(RoleCode.TENANT_ADMIN),
@@ -432,6 +619,9 @@ class IamApiIntegrationTest {
         }
     }
 
+    /**
+     * 验证无关审计约束冲突会回滚整次用户创建，解除冲突后相同请求可以成功重试。
+     */
     @Test
     void unrelatedAuditConstraintRollsBackUserCreateAndRetryCanSucceed() throws Exception {
         String adminToken = jwtIssuer.issueHuman(TENANT_A, ALICE, Set.of(RoleCode.TENANT_ADMIN),
@@ -466,6 +656,9 @@ class IamApiIntegrationTest {
                 .andExpect(header().doesNotExist("Idempotency-Replayed"));
     }
 
+    /**
+     * 验证审计约束失败使角色与创建审计一起回滚，不留下阻碍后续重试的半完成资源。
+     */
     @Test
     void unrelatedAuditConstraintRollsBackRoleCreateAndRetryCanSucceed() throws Exception {
         String adminToken = jwtIssuer.issueHuman(TENANT_B, ALICE, Set.of(RoleCode.TENANT_ADMIN),
@@ -501,6 +694,9 @@ class IamApiIntegrationTest {
                 .andExpect(header().doesNotExist("Idempotency-Replayed"));
     }
 
+    /**
+     * 验证绑定创建的审计失败会回滚授权关系，修复约束后重试仍能完整提交。
+     */
     @Test
     void unrelatedAuditConstraintRollsBackBindingCreateAndRetryCanSucceed() throws Exception {
         String adminToken = jwtIssuer.issueHuman(TENANT_A, ALICE, Set.of(RoleCode.TENANT_ADMIN),
@@ -541,6 +737,9 @@ class IamApiIntegrationTest {
                 .andExpect(status().isCreated())
                 .andExpect(header().doesNotExist("Idempotency-Replayed"));
     }
+    /**
+     * 验证修改用户时的审计失败会回滚资料及版本变化，后续可按原前提成功重试。
+     */
     @Test
     void unrelatedAuditConstraintRollsBackUserPatchAndRetryCanSucceed() throws Exception {
         String adminToken = jwtIssuer.issueHuman(TENANT_A, ALICE, Set.of(RoleCode.TENANT_ADMIN),
@@ -583,6 +782,9 @@ class IamApiIntegrationTest {
                 .andExpect(jsonPath("$.data.lockVersion").value(1));
     }
 
+    /**
+     * 验证修改角色时审计失败不会留下部分更新，后续相同意图能够正常重试。
+     */
     @Test
     void unrelatedAuditConstraintRollsBackRolePatchAndRetryCanSucceed() throws Exception {
         String adminToken = jwtIssuer.issueHuman(TENANT_A, ALICE, Set.of(RoleCode.TENANT_ADMIN),
@@ -625,6 +827,9 @@ class IamApiIntegrationTest {
                 .andExpect(jsonPath("$.data.lockVersion").value(1));
     }
 
+    /**
+     * 验证绑定状态更新与审计原子提交，审计失败不改变授权关系及版本。
+     */
     @Test
     void unrelatedAuditConstraintRollsBackBindingUpdateAndRetryCanSucceed() throws Exception {
         String adminToken = jwtIssuer.issueHuman(TENANT_A, ALICE, Set.of(RoleCode.TENANT_ADMIN),
@@ -670,6 +875,9 @@ class IamApiIntegrationTest {
                 .andExpect(jsonPath("$.data.state").value("REVOKED"))
                 .andExpect(jsonPath("$.data.lockVersion").value(1));
     }
+    /**
+     * 验证租户管理员可以授予、撤销角色和权限，同时不能突破固定权限上限。
+     */
     @Test
     void tenantAdminCanBindAndRevokeRolesWithCeilingEnforcement() throws Exception {
         String adminToken = jwtIssuer.issueHuman(TENANT_A, ALICE, Set.of(RoleCode.TENANT_ADMIN),
@@ -742,6 +950,9 @@ class IamApiIntegrationTest {
                 .andExpect(jsonPath("$.data.state").value("REVOKED"));
     }
 
+    /**
+     * 验证已存在且目标状态相同的绑定写入按既有资源返回成功，不因初始版本为零误判新建。
+     */
     @Test
     void sameStateBindingPutReturnsOkEvenWhenLockVersionIsStillZero() throws Exception {
         String adminToken = jwtIssuer.issueHuman(TENANT_A, ALICE, Set.of(RoleCode.TENANT_ADMIN),
@@ -762,6 +973,9 @@ class IamApiIntegrationTest {
                 .andExpect(jsonPath("$.data.lockVersion").value(0));
     }
 
+    /**
+     * 验证授权绑定列表按业务编码在升序和降序下均可稳定续查，无重复或遗漏。
+     */
     @Test
     void bindingListsPaginateByCodeInBothDirections() throws Exception {
         String adminToken = jwtIssuer.issueHuman(TENANT_A, ALICE, Set.of(RoleCode.TENANT_ADMIN),
@@ -811,6 +1025,9 @@ class IamApiIntegrationTest {
                 .andExpect(jsonPath("$.data[0].targetId").value(catalogId.toString()));
     }
 
+    /**
+     * 验证旧锁定过期后的首次错误密码重置失败周期，而非直接沿用旧累计次数。
+     */
     @Test
     void expiredLoginLockResetsFailureCounterAfterAnotherWrongPassword() throws Exception {
         jdbc.update("""
@@ -841,6 +1058,9 @@ class IamApiIntegrationTest {
         assertThat(lockedUntil).isNull();
     }
 
+    /**
+     * 验证重复查询参数被拒绝，避免同一请求在不同解析层产生不同筛选含义。
+     */
     @Test
     void duplicateQueryParametersAreRejected() throws Exception {
         String adminToken = jwtIssuer.issueHuman(TENANT_A, ALICE, Set.of(RoleCode.TENANT_ADMIN),
@@ -853,6 +1073,9 @@ class IamApiIntegrationTest {
                 .andExpect(jsonPath("$.error.code").value("INVALID_QUERY_PARAMETER"));
     }
 
+    /**
+     * 验证服务资格检查同时限制调用服务、目标角色、业务用途组合，并隔离租户事实。
+     */
     @Test
     void serviceEligibilityEnforcesTripleAndTenantScope() throws Exception {
         IssuedJwt ticketJwt = jwtIssuer.issueService(TENANT_A, "flowdesk-ticket-service");
@@ -904,6 +1127,9 @@ class IamApiIntegrationTest {
     }
 
 
+    /**
+     * 验证格式错误或空白分页令牌返回 CURSOR_INVALID，不能被当成第一页。
+     */
     @Test
     void invalidOrEmptyPageTokenFailsClosedWithCursorInvalid() throws Exception {
         String adminToken = jwtIssuer.issueHuman(TENANT_A, ALICE, Set.of(RoleCode.TENANT_ADMIN),
@@ -922,6 +1148,9 @@ class IamApiIntegrationTest {
                 .andExpect(jsonPath("$.error.code").value("INVALID_QUERY_PARAMETER"));
     }
 
+    /**
+     * 验证对已存在绑定使用仅限新建的 If-None-Match 星号时返回资源前提失败。
+     */
     @Test
     void existingBindingWithIfNoneMatchStarReturnsResourcePreconditionFailed() throws Exception {
         String adminToken = jwtIssuer.issueHuman(TENANT_A, ALICE, Set.of(RoleCode.TENANT_ADMIN),
@@ -940,6 +1169,9 @@ class IamApiIntegrationTest {
                 .andExpect(jsonPath("$.error.code").value("RESOURCE_PRECONDITION_FAILED"));
     }
 
+    /**
+     * 验证未知查询参数和重复 JSON 字段在业务执行前拒绝，避免歧义请求产生副作用。
+     */
     @Test
     void unknownQueryParamsAndDuplicateJsonKeysAreRejected() throws Exception {
         mockMvc.perform(post("/api/v1/auth/login")
@@ -960,6 +1192,9 @@ class IamApiIntegrationTest {
                 .andExpect(jsonPath("$.error.code").value("MALFORMED_JSON"));
     }
 
+    /**
+     * 验证未知角色编码及全空白修改字段触发请求校验，不能进入持久化更新。
+     */
     @Test
     void invalidRoleCodeAndBlankPatchFieldsAreValidated() throws Exception {
         String adminToken = jwtIssuer.issueHuman(TENANT_A, ALICE, Set.of(RoleCode.TENANT_ADMIN),
@@ -986,6 +1221,9 @@ class IamApiIntegrationTest {
                 .andExpect(jsonPath("$.error.code").value("VALIDATION_FAILED"));
     }
 
+    /**
+     * 验证文本字段拒绝控制字符，响应时间统一输出六位小数以匹配微秒契约。
+     */
     @Test
     void controlCharactersAreRejectedAndInstantsUseFixedSixFractionDigits() throws Exception {
         String backslash = "\\";
@@ -1011,6 +1249,9 @@ class IamApiIntegrationTest {
                 .matcher(expiresAt).matches()).isTrue();
     }
 
+    /**
+     * 验证未知路由和非法 UUID 参数均使用统一错误信封，保留可诊断错误码。
+     */
     @Test
     void unknownPathsAndMalformedUuidUseTheUnifiedErrorEnvelope() throws Exception {
         mockMvc.perform(get("/api/v1/not-a-real-path"))
@@ -1031,6 +1272,9 @@ class IamApiIntegrationTest {
 
     // ----- helpers ------------------------------------------------------------------
 
+    /**
+     * 插入独立测试租户，保留明确租户标识供隔离与同代码歧义场景断言。
+     */
     private void insertTenant(UUID tenantId, String code, String displayName) {
         jdbc.update("""
                 INSERT INTO tenant (tenant_id, tenant_code, display_name, created_by_type, updated_by_type)
@@ -1038,6 +1282,9 @@ class IamApiIntegrationTest {
                 """, Uuids.toBytes(tenantId), code, displayName);
     }
 
+    /**
+     * 插入测试角色及状态，供授权关系、资格和角色管理接口测试使用。
+     */
     private void insertRole(UUID tenantId, UUID roleId, String code, String name) {
         jdbc.update("""
                 INSERT INTO role (tenant_id, role_id, role_code, role_name, status,
@@ -1046,6 +1293,9 @@ class IamApiIntegrationTest {
                 """, Uuids.toBytes(tenantId), Uuids.toBytes(roleId), code, name);
     }
 
+    /**
+     * 植入测试租户所需的固定权限目录，确保授权上限测试使用真实权限编码。
+     */
     private void insertPermissions(UUID tenantId, Set<PermissionCode> codes) {
         for (PermissionCode code : codes) {
             jdbc.update("""
@@ -1057,6 +1307,9 @@ class IamApiIntegrationTest {
         }
     }
 
+    /**
+     * 插入测试用户与匹配凭证，并设置账户状态供登录、权限及资格测试使用。
+     */
     private void insertUser(UUID tenantId, UUID userId, String username, String displayName,
                             String status, Timestamp lockedUntil) {
         jdbc.update("""
@@ -1074,6 +1327,9 @@ class IamApiIntegrationTest {
                 lockedUntil == null ? 0 : 1, lockedUntil);
     }
 
+    /**
+     * 建立测试用户与角色的授权关系，供权限计算及资格事实查询使用。
+     */
     private void insertUserRole(UUID tenantId, UUID userId, UUID roleId) {
         jdbc.update("""
                 INSERT INTO user_role_assignment (tenant_id, user_id, role_id, state,
@@ -1082,6 +1338,9 @@ class IamApiIntegrationTest {
                 """, Uuids.toBytes(tenantId), Uuids.toBytes(userId), Uuids.toBytes(roleId));
     }
 
+    /**
+     * 植入审计唯一约束竞争所需的锚点，验证业务写入在审计失败时整体回滚。
+     */
     private void insertAuditAnchor(String actionCode) {
         jdbc.update("""
                 INSERT INTO audit_record
@@ -1093,6 +1352,9 @@ class IamApiIntegrationTest {
                 """, Uuids.toBytes(TENANT_A), Uuids.toBytes(UUID.randomUUID()), actionCode,
                 Uuids.toBytes(UUID.randomUUID()), Uuids.toBytes(ALICE), Uuids.toBytes(UUID.randomUUID()));
     }
+    /**
+     * 查询测试租户中指定权限编码对应的资源标识，避免测试依赖随机生成的主键。
+     */
     private UUID permissionId(PermissionCode code) {
         return jdbc.queryForObject(
                 "SELECT permission_id FROM permission WHERE tenant_id = ? AND permission_code = ?",
@@ -1100,6 +1362,9 @@ class IamApiIntegrationTest {
                 Uuids.toBytes(TENANT_A), code.name());
     }
 
+    /**
+     * 为测试角色建立权限绑定，明确指定授权边界以验证接口权限。
+     */
     private void insertRolePermission(UUID tenantId, UUID roleId, PermissionCode code) {
         UUID permissionId = jdbc.queryForObject(
                 "SELECT permission_id FROM permission WHERE tenant_id = ? AND permission_code = ?",
@@ -1112,12 +1377,18 @@ class IamApiIntegrationTest {
                 """, Uuids.toBytes(tenantId), Uuids.toBytes(roleId), Uuids.toBytes(permissionId));
     }
 
+    /**
+     * 生成符合最小强度要求的 Base64 游标签名密钥，供多个测试实例共享。
+     */
     private static String cursorTokenHmacKey() {
         byte[] key = new byte[32];
         java.util.Arrays.fill(key, (byte) 0x5A);
         return Base64.getEncoder().encodeToString(key);
     }
 
+    /**
+     * 为测试生成 RSA 密钥对，签发器与验签配置共享同一对密钥。
+     */
     private static KeyPair newKeyPair() {
         try {
             return KeyPairGenerator.getInstance("RSA").generateKeyPair();
@@ -1126,18 +1397,27 @@ class IamApiIntegrationTest {
         }
     }
 
+    /**
+     * 将测试私钥编码为 PEM 文本，供与生产相同的密钥加载配置读取。
+     */
     private static String privateKeyPem() {
         String nl = System.lineSeparator();
         String base64 = Base64.getEncoder().encodeToString(KEY_PAIR.getPrivate().getEncoded());
         return "-----BEGIN PRIVATE KEY-----" + nl + base64 + nl + "-----END PRIVATE KEY-----";
     }
 
+    /**
+     * 将测试公钥编码为 PEM 文本，使应用通过正常配置路径加载验签材料。
+     */
     private static String publicKeyPem() {
         String nl = System.lineSeparator();
         String base64 = Base64.getEncoder().encodeToString(KEY_PAIR.getPublic().getEncoded());
         return "-----BEGIN PUBLIC KEY-----" + nl + base64 + nl + "-----END PUBLIC KEY-----";
     }
 
+    /**
+     * 读取类路径测试资源为 UTF-8 文本，资源缺失或读取失败时明确终止测试初始化。
+     */
     private static String readResource(String name) {
         try (var in = IamApiIntegrationTest.class.getClassLoader().getResourceAsStream(name)) {
             if (in == null) {

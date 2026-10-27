@@ -1,3 +1,4 @@
+/** 浏览器内存模拟后端，用于显式启用的离线演示和自动化场景；刷新后数据重置。 */
 import { ApiClientError } from '@/api/errors'
 import type {
   AccessBinding, AlertEvent, ApprovalTask, AuthSession, CurrentUser, Incident,
@@ -33,12 +34,24 @@ const ids = {
   tenantAdmin: 'ffffffff-ffff-ffff-ffff-ffffffffffff'
 }
 
+/**
+ * 生成当前时间的 ISO 字符串。
+ * 为模拟实体、时间线及状态变更提供统一时间格式。
+ */
 const now = () => new Date().toISOString()
+/**
+ * 生成模拟实体及关联记录的唯一标识。
+ * 优先使用原生 UUID，缺失时使用兼容格式的随机值。
+ */
 const uuid = () => {
   if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID()
   return `00000000-0000-4000-8000-${Math.random().toString(16).slice(2).padEnd(12, '0').slice(0, 12)}`
 }
 
+/**
+ * 根据演示用户名生成身份、角色和权限组合。
+ * 用于本地登录模拟不同业务参与者的可见范围和操作能力。
+ */
 function userFor(username: string): { id: string; roles: CurrentUser['roles']; permissions: CurrentUser['permissions']; displayName: string } {
   const key = username.toLowerCase()
     if (key.includes('admin') && key.includes('tenant')) return {
@@ -75,8 +88,16 @@ function userFor(username: string): { id: string; roles: CurrentUser['roles']; p
   }
 }
 
+/**
+ * 把模拟资源的锁版本编码为标准 ETag。
+ * 与真实接口的版本条件格式保持一致，支持前端并发处理演示。
+ */
 function etag(version: number): string { return `"lv:${version}"` }
 
+/**
+ * 维护浏览器内存中的业务模拟状态及 API 路由。
+ * 覆盖认证、授权、工单、审批、告警、通知等演示场景及版本控制。
+ */
 export class MockApi {
   private currentUser: CurrentUser | null = null
   private users: UserSummary[] = []
@@ -105,21 +126,32 @@ export class MockApi {
   private recoveries: MessageRecovery[] = []
   private idempotency = new Map<string, string>()
 
+  /**
+   * 初始化模拟 API 并装载演示数据。
+   * 统一调用重置流程建立各业务集合及初始关联关系。
+   */
   constructor() { this.reset() }
 
+  /**
+   * 清除模拟接口当前登录身份。
+   * 保留业务演示数据，供退出登录后切换用户继续场景操作。
+   */
   clearSession(): void {
     this.currentUser = null
   }
 
   /**
-   * Keeps feature-scoped mocks usable when the rest of the app talks to a real
-   * Gateway. Only the safe current-user projection is copied; no token or
-   * credential is retained by the mock transport.
+   * 从真实网关会话复制安全的当前用户信息。
+   * 仅供局部能力使用模拟传输时共享身份，不保存访问令牌或登录凭证。
    */
   setSession(user: CurrentUser): void {
     this.currentUser = { ...user, roles: [...user.roles], permissions: [...user.permissions] }
   }
 
+  /**
+   * 恢复全部业务集合和预置演示数据。
+   * 重新建立用户、绑定、目录和流程等关联，同时清除会话及历史操作状态。
+   */
   reset(): void {
     this.currentUser = null
     this.userRoleBindings.clear(); this.rolePermissionBindings.clear()
@@ -128,6 +160,10 @@ export class MockApi {
     this.instances = []; this.tasks = []; this.workflowStarts.clear(); this.events = []; this.incidents = []; this.links.clear()
     this.idempotency.clear()
     const timestamp = now()
+    /**
+     * 根据预置身份信息构造用户摘要。
+     * 统一补充用户状态、角色、锁版本和创建更新时间。
+     */
     const mkUser = (id: string, username: string, displayName: string, roleCodes: UserSummary['roleCodes']): UserSummary => ({ userId: id, username, displayName, status: 'ACTIVE', roleCodes, lockVersion: 0, createdAt: timestamp, updatedAt: timestamp })
     this.users = [
       mkUser(ids.requester, 'requester', '申请人', ['REQUESTER']),
@@ -170,6 +206,10 @@ export class MockApi {
     this.recoveries = []
   }
 
+  /**
+   * 构造一条模拟通知并登记收件人。
+   * 业务来源引用与收件人单独保存，支持按当前用户过滤通知。
+   */
   private notification(title: string, body: string, sourceDomain: 'TICKET' | 'WORKFLOW', recipient: string, state: 'READ' | 'UNREAD', sourceRefType = 'USER', sourceRefId = recipient, notificationKind = 'WORKFLOW_UPDATE'): Notification {
     const timestamp = now()
     const notification: Notification = { notificationId: uuid(), notificationKind, sourceDomain, sourceRefType, sourceRefId, title, body, state, readAt: state === 'READ' ? timestamp : null, createdAt: timestamp, updatedAt: timestamp, lockVersion: 0 }
@@ -177,6 +217,10 @@ export class MockApi {
     return notification
   }
 
+  /**
+   * 执行模拟请求并统一封装结果和异常。
+   * 解析路径与查询参数，生成关联标识，并把未预期异常转换为标准内部错误。
+   */
   async request<T>(path: string, options: MockOptions = {}): Promise<MockResult<T>> {
     await new Promise(resolve => setTimeout(resolve, 4))
     const url = new URL(path, 'http://flowdesk.mock')
@@ -184,19 +228,27 @@ export class MockApi {
     const method = (options.method ?? 'GET').toUpperCase()
     const headers = new Headers({ 'X-Correlation-Id': options.headers?.['X-Correlation-Id'] || uuid() })
     try {
-      const result = await this.dispatch<T>(pathname, method, url.searchParams, options, headers)
-      return result
+      const result = await this.dispatch(pathname, method, url.searchParams, options, headers)
+      return result as MockResult<T>
     } catch (error) {
       if (error instanceof ApiClientError) throw error
       throw new ApiClientError({ status: 500, code: 'INTERNAL_ERROR', correlationId: headers.get('X-Correlation-Id'), headers })
     }
   }
 
+  /**
+   * 构造模拟成功响应及元数据。
+   * 需要版本控制时设置 ETag，并按需附带异步副作用说明。
+   */
   private ok<T>(data: T, status: number, headers: Headers, version?: number, asyncEffects?: MockResult<T>['meta']['asyncEffects']): MockResult<T> {
     if (version !== undefined) headers.set('ETag', etag(version))
     return { data, status, headers, meta: { correlationId: headers.get('X-Correlation-Id') || '', ...(asyncEffects ? { asyncEffects } : {}) } }
   }
 
+  /**
+   * 按页大小和数字游标截取模拟集合。
+   * 限制页大小并返回下一页游标及排序元数据，模拟标准分页响应。
+   */
   private list<T>(items: T[], params: URLSearchParams, headers: Headers, sort = '-updatedAt'): MockResult<T[]> {
     const pageSize = Math.min(100, Math.max(1, Number(params.get('pageSize') || 20)))
     const start = params.get('pageToken') ? Number(params.get('pageToken')) || 0 : 0
@@ -205,27 +257,51 @@ export class MockApi {
     return { ...this.ok(pageItems, 200, headers), meta: { correlationId: headers.get('X-Correlation-Id') || '', page: { pageSize: pageItems.length, nextPageToken: next, sort } } }
   }
 
+  /**
+   * 抛出带状态、业务码和关联标识的统一 API 异常。
+   * 可标记是否适合重试，供页面复用真实请求的错误处理。
+   */
   private error(status: number, code: string, headers: Headers, retryable = false): never {
     throw new ApiClientError({ status, code, correlationId: headers.get('X-Correlation-Id'), retryable, headers })
   }
 
+  /**
+   * 取得当前模拟会话的用户身份。
+   * 尚未登录时抛出认证错误，阻止需要会话的操作继续执行。
+   */
   private requireUser(headers: Headers): CurrentUser {
     if (!this.currentUser) this.error(401, 'AUTHENTICATION_REQUIRED', headers)
     return this.currentUser
   }
 
+  /**
+   * 从请求选项读取对象形式的业务载荷。
+   * 缺少载荷或载荷类型不符时返回空对象，便于模拟路由统一读取字段。
+   */
   private body(options: MockOptions): Record<string, any> { return (options.body && typeof options.body === 'object') ? options.body as Record<string, any> : {} }
+  /**
+   * 校验两级审批人均已提供且互不相同。
+   * 条件不满足时返回约定业务错误，模拟后端规则约束。
+   */
   private requireDistinctApprovers(rule: { level1ApproverUserId?: string; level2ApproverUserId?: string }, headers: Headers): void {
     if (!rule.level1ApproverUserId || !rule.level2ApproverUserId || rule.level1ApproverUserId === rule.level2ApproverUserId) this.error(422, 'APPROVERS_MUST_DIFFER', headers)
   }
 
+  /**
+   * 校验写操作携带的资源版本条件。
+   * 版本不一致返回冲突，缺少必要条件返回前置条件错误。
+   */
   private checkEtag(item: { lockVersion: number }, options: MockOptions, headers: Headers): void {
     const given = options.headers?.['If-Match']
     if (given && given !== etag(item.lockVersion)) this.error(412, 'RESOURCE_VERSION_CONFLICT', headers)
     if (!given && (options.method || '').toUpperCase() !== 'GET') this.error(428, 'PRECONDITION_REQUIRED', headers)
   }
 
-  private async dispatch<T>(path: string, method: string, params: URLSearchParams, options: MockOptions, headers: Headers): Promise<MockResult<T>> {
+  /**
+   * 按路径和 HTTP 方法分发模拟 API 请求。
+   * 处理认证、基础资源和集合操作，再转交工单、流程、草稿等专用路由。
+   */
+  private async dispatch(path: string, method: string, params: URLSearchParams, options: MockOptions, headers: Headers): Promise<MockResult<unknown>> {
     if (path === '/auth/login' && method === 'POST') {
       const input = this.body(options)
       if (!input.tenantCode || !input.username || !input.password) this.error(401, 'LOGIN_FAILED', headers)
@@ -241,6 +317,15 @@ export class MockApi {
       return this.ok(session, 200, headers)
     }
     if (path === '/users/me' && method === 'GET') return this.ok(this.requireUser(headers), 200, headers)
+    if (path === '/users/ticket-assignee-candidates' && method === 'GET') {
+      const actor = this.requireUser(headers)
+      if (!actor.permissions.some(p => ['TICKET_ASSIGN_TENANT', 'TICKET_TRANSFER_TENANT', 'TICKET_TRANSFER_ASSIGNED'].includes(p))) this.error(403, 'ACCESS_DENIED', headers)
+      const activeAgentRole = this.roles.find(role => role.roleCode === 'AGENT' && role.status === 'ACTIVE')
+      const candidates = this.users.filter(user => user.status === 'ACTIVE' && activeAgentRole
+        && this.userRoleBindings.get(user.userId)?.some(binding => binding.targetId === activeAgentRole.roleId && binding.state === 'GRANTED'))
+        .map(({ userId, username, displayName }) => ({ userId, username, displayName }))
+      return this.list(candidates, params, headers, params.get('sort') || 'displayName')
+    }
     if (path === '/users' && method === 'GET') return this.list(this.users.filter(u => (!params.get('status') || u.status === params.get('status')) && (!params.get('roleCode') || u.roleCodes.includes(params.get('roleCode') as Role['roleCode']))), params, headers, params.get('sort') || 'displayName')
     if (path === '/users' && method === 'POST') {
       this.requireUser(headers); const input = this.body(options); const existing = this.users.find(u => u.username === input.username)
@@ -284,7 +369,7 @@ export class MockApi {
     if (path === '/approval-tasks/summary' && method === 'GET') return this.ok({ pendingCount: this.visibleTasks().filter(t => t.status === 'PENDING').length }, 200, headers)
     if (path === '/incidents/summary' && method === 'GET') return this.ok({ activeCount: this.incidents.filter(i => i.status === 'ACTIVE').length }, 200, headers)
     if (path === '/tickets' && method === 'GET') return this.list(this.visibleTickets(params.get('scope')), params, headers, params.get('sort') || '-updatedAt')
-    if (path === '/tickets' && method === 'POST') return this.createTicket<T>(options, headers)
+    if (path === '/tickets' && method === 'POST') return this.createTicket<unknown>(options, headers)
     const clockSource = path.match(/^\/tickets\/by-sla-clock\/([^/]+)$/)
     if (clockSource && method === 'GET') {
       const ticket = this.visibleTickets().find(t => [...(this.sla.get(t.ticketId)?.clocks ?? []), ...(this.sla.get(t.ticketId)?.historyClocks ?? [])].some(c => c.slaClockId === clockSource[1]))
@@ -292,22 +377,22 @@ export class MockApi {
       return this.ok({ ticketId: ticket.ticketId }, 200, headers)
     }
     const ticketMatch = path.match(/^\/tickets\/([^/]+)(?:\/(.*))?$/)
-    if (ticketMatch) return this.ticketDispatch<T>(ticketMatch[1], ticketMatch[2] || '', method, params, options, headers)
+    if (ticketMatch) return this.ticketDispatch<unknown>(ticketMatch[1], ticketMatch[2] || '', method, params, options, headers)
     if (path === '/workflow-definitions' && method === 'GET') return this.list(this.workflowDefinitions, params, headers, params.get('sort') || 'definitionName')
     const definitionMatch = path.match(/^\/workflow-definitions\/([^/]+)(?:\/(.*))?$/)
-    if (definitionMatch) return this.workflowDispatch<T>(definitionMatch[1], definitionMatch[2] || '', method, params, options, headers)
+    if (definitionMatch) return this.workflowDispatch<unknown>(definitionMatch[1], definitionMatch[2] || '', method, params, options, headers)
     const draftMatch = path.match(/^\/workflow-drafts\/([^/]+)(?:\/(validate|publish))?$/)
-    if (draftMatch) return this.draftDispatch<T>(draftMatch[1], draftMatch[2] || '', method, options, headers)
+    if (draftMatch) return this.draftDispatch<unknown>(draftMatch[1], draftMatch[2] || '', method, options, headers)
     const versionMatch = path.match(/^\/workflow-versions\/([^/]+)$/)
     if (versionMatch && method === 'GET') { const v = this.versions.find(x => x.workflowVersionId === versionMatch[1]); if (!v) this.error(404, 'RESOURCE_NOT_FOUND', headers); return this.ok(v, 200, headers) }
     if (path === '/workflow-instances' && method === 'GET') return this.list(this.instances, params, headers, params.get('sort') || '-startedAt')
     const handoffMatch = path.match(/^\/workflow-instances\/([^/]+)\/approver-changes$/)
-    if (handoffMatch) return this.handoffDispatch<T>(handoffMatch[1], method, options, headers)
+    if (handoffMatch) return this.handoffDispatch<unknown>(handoffMatch[1], method, options, headers)
     const instanceMatch = path.match(/^\/workflow-instances\/([^/]+)$/)
     if (instanceMatch && method === 'GET') { const v = this.instances.find(x => x.workflowInstanceId === instanceMatch[1]); if (!v) this.error(404, 'RESOURCE_NOT_FOUND', headers); return this.ok(v, 200, headers, v.lockVersion) }
     if (path === '/approval-tasks' && method === 'GET') return this.list(this.visibleTasks(), params, headers, params.get('sort') || '-createdAt')
     const taskMatch = path.match(/^\/approval-tasks\/([^/]+)(?:\/(approve|reject))?$/)
-    if (taskMatch) return this.taskDispatch<T>(taskMatch[1], taskMatch[2] || '', method, options, headers)
+    if (taskMatch) return this.taskDispatch<unknown>(taskMatch[1], taskMatch[2] || '', method, options, headers)
     if (path === '/alert-events' && method === 'GET') return this.list(this.events, params, headers, params.get('sort') || '-receivedAt')
     const eventMatch = path.match(/^\/alert-events\/([^/]+)$/)
     if (eventMatch && method === 'GET') { const e = this.events.find(x => x.alertEventId === eventMatch[1]); if (!e) this.error(404, 'RESOURCE_NOT_FOUND', headers); return this.ok(e, 200, headers) }
@@ -324,6 +409,10 @@ export class MockApi {
     this.error(404, 'RESOURCE_NOT_FOUND', headers)
   }
 
+  /**
+   * 根据当前用户权限和查询范围过滤可见工单。
+   * 分别支持全租户、本人申请和分派给本人，未登录返回空集合。
+   */
   private visibleTickets(scope: string | null = null): Ticket[] {
     const user = this.currentUser
     if (!user) return []
@@ -337,11 +426,19 @@ export class MockApi {
     })
   }
 
+  /**
+   * 筛选属于当前模拟用户的通知。
+   * 优先使用独立收件人映射，并兼容旧演示记录的来源引用。
+   */
   private notificationsForUser(): Notification[] {
     const id = this.currentUser?.userId
     return id ? this.notifications.filter(n => (this.notificationRecipients.get(n.notificationId) ?? n.sourceRefId) === id) : []
   }
 
+  /**
+   * 创建或更新用户角色、角色权限绑定。
+   * 创建要求不存在条件，更新校验 ETag，并同步用户摘要中的角色码。
+   */
   private updateBinding(kind: 'user' | 'role', subjectId: string, targetId: string, options: MockOptions, headers: Headers): MockResult<AccessBinding> {
     this.requireUser(headers)
     const store = kind === 'user' ? this.userRoleBindings : this.rolePermissionBindings
@@ -372,6 +469,10 @@ export class MockApi {
     return this.ok(binding, 201, headers, binding.lockVersion)
   }
 
+  /**
+   * 按目录配置创建模拟工单并处理幂等重放。
+   * 根据是否需要审批创建工作流或 SLA，并记录时间线及异步启动状态。
+   */
   private createTicket<T>(options: MockOptions, headers: Headers): MockResult<T> {
     const actor = this.requireUser(headers); const body = this.body(options); const key = options.headers?.['Idempotency-Key'] || ''
     if (key && this.idempotency.has(key)) { const existing = this.tickets.find(t => t.ticketId === this.idempotency.get(key)); if (existing) { headers.set('Idempotency-Replayed', 'true'); return this.ok(existing as T, 200, headers, existing.lockVersion) } }
@@ -385,16 +486,32 @@ export class MockApi {
     return this.ok(ticket as T, 201, headers, ticket.lockVersion, effects)
   }
 
+  /**
+   * 为工单追加一条审计时间线记录。
+   * 保存事件、摘要、操作者、关联资源和关联标识，供详情页追踪业务过程。
+   */
   private addTimeline(ticket: Ticket, eventType: string, summary: string, actorType: string, actorId: string | null, relatedRefType: string | null = null, relatedRefId: string | null = null): void {
     this.timeline.push({ timelineId: uuid(), ticketId: ticket.ticketId, eventType, summary, relatedRefType, relatedRefId, actorType, actorId, occurredAt: now(), correlationId: uuid() })
   }
 
+  /**
+   * 为工单建立首次响应和解决时限两个模拟时钟。
+   * 使用目录关联策略或默认策略，并按创建时间计算演示截止时间。
+   */
   private createSla(ticket: Ticket): void {
     const started = new Date(ticket.createdAt); const policyId = this.catalogs.find(c => c.catalogItemId === ticket.catalogItemId)?.slaPolicyId || '30000000-0000-4000-8000-000000000001'
+    /**
+     * 构造指定类型和时长的 SLA 时钟。
+     * 统一初始化运行状态、截止时间、触发记录及锁版本。
+     */
     const clock = (type: 'FIRST_RESPONSE' | 'RESOLUTION', seconds: number) => ({ slaClockId: uuid(), slaPolicyId: policyId, clockType: type, status: 'RUNNING', startedAt: ticket.createdAt, deadlineAt: new Date(started.getTime() + seconds * 1000).toISOString(), reminderDueAt: null, policyDurationSeconds: seconds, policyReminderBeforeSeconds: null, milestoneAt: null, breachedAt: null, satisfiedAt: null, triggers: [], lockVersion: 0 })
     this.sla.set(ticket.ticketId, { ticketId: ticket.ticketId, clocks: [clock('FIRST_RESPONSE', 3600), clock('RESOLUTION', 28800)] })
   }
 
+  /**
+   * 为待审批工单创建异步启动记录。
+   * 先返回已请求状态，再延迟建立实例、首级任务和通知，模拟真实异步处理边界。
+   */
   private createWorkflow(ticket: Ticket): void {
     const requestedAt = now()
     this.workflowStarts.set(ticket.ticketId, { ticketId: ticket.ticketId, status: 'REQUESTED', workflowInstanceId: null, requestedAt, establishedAt: null, recoveryRequiredAt: null, recoveryReasonCode: null, retryCount: 0, lastAttemptAt: requestedAt, lockVersion: 0, createdAt: requestedAt, updatedAt: requestedAt })
@@ -415,6 +532,10 @@ export class MockApi {
     }, 35)
   }
 
+  /**
+   * 处理单个工单详情、评论、时间线和状态动作。
+   * 校验可见性及版本，并同步分派、SLA、通知和审计信息。
+   */
   private async ticketDispatch<T>(id: string, action: string, method: string, params: URLSearchParams, options: MockOptions, headers: Headers): Promise<MockResult<T>> {
     const ticket = this.tickets.find(t => t.ticketId === id); if (!ticket) this.error(404, 'RESOURCE_NOT_FOUND', headers)
     const actor = this.requireUser(headers)
@@ -459,6 +580,10 @@ export class MockApi {
     this.error(409, 'STATE_CONFLICT', headers)
   }
 
+  /**
+   * 处理工作流定义详情、版本列表和草稿创建。
+   * 创建草稿时校验两级审批人并初始化校验状态和锁版本。
+   */
   private async workflowDispatch<T>(id: string, action: string, method: string, params: URLSearchParams, options: MockOptions, headers: Headers): Promise<MockResult<T>> {
     const definition = this.workflowDefinitions.find(d => d.definitionId === id); if (!definition) this.error(404, 'RESOURCE_NOT_FOUND', headers)
     if (!action && method === 'GET') return this.ok(definition as T, 200, headers, definition.lockVersion)
@@ -468,6 +593,10 @@ export class MockApi {
     this.error(404, 'RESOURCE_NOT_FOUND', headers)
   }
 
+  /**
+   * 处理草稿读取、修改、校验与发布。
+   * 写入先校验 ETag，维护校验摘要及草稿状态，并在发布时生成固定版本。
+   */
   private async draftDispatch<T>(id: string, action: string, method: string, options: MockOptions, headers: Headers): Promise<MockResult<T>> {
     const draft = [...this.drafts.values()].find(d => d.draftId === id); if (!draft) this.error(404, 'RESOURCE_NOT_FOUND', headers)
     if (method === 'GET' && !action) return this.ok(draft as T, 200, headers, draft.lockVersion)
@@ -478,6 +607,10 @@ export class MockApi {
     this.error(409, 'STATE_CONFLICT', headers)
   }
 
+  /**
+   * 读取审批人交接历史或提交审批人变更。
+   * 检查可见性、权限、幂等键、版本和审批人资格，同步任务与审计记录。
+   */
   private async handoffDispatch<T>(id: string, method: string, options: MockOptions, headers: Headers): Promise<MockResult<T>> {
     const actor = this.requireUser(headers), instance = this.instances.find(i => i.workflowInstanceId === id)
     if (!instance || (!actor.roles.includes('SERVICE_DESK_ADMIN') && !this.visibleTasks().some(t => t.workflowInstanceId === id))) this.error(404, 'RESOURCE_NOT_FOUND', headers)
@@ -497,6 +630,10 @@ export class MockApi {
     const candidate = this.users.find(u => u.userId === body.approverUserId && u.status === 'ACTIVE' && u.roleCodes.includes('APPROVER'))
     if (!candidate || !String(body.reason ?? '').trim()) this.error(422, 'WORKFLOW_APPROVER_NOT_ELIGIBLE', headers)
     const version = this.versions.find(v => v.workflowVersionId === instance.workflowVersionRef.workflowVersionId)
+    /**
+     * 解析指定审批级别当前采用的审批人。
+     * 依次查看已建任务、实例覆盖配置和发布版本中的原始配置。
+     */
     const assigned = (level: number) => this.tasks.find(t => t.workflowInstanceId === id && t.levelNo === level)?.approverUserId
       ?? this.approverOverrides.get(`${id}:${level}`) ?? (level === 1 ? version?.level1ApproverUserId : version?.level2ApproverUserId)
     const previous = assigned(body.levelNo)
@@ -515,8 +652,16 @@ export class MockApi {
     return this.ok(instance as T, 200, headers, instance.lockVersion)
   }
 
+  /**
+   * 按当前模拟用户过滤可见审批任务。
+   * 服务台管理员可见全部任务，其他用户仅可见分配给自己的任务。
+   */
   private visibleTasks(): ApprovalTask[] { return this.currentUser?.roles.includes('SERVICE_DESK_ADMIN') ? this.tasks : this.tasks.filter(t => t.approverUserId === this.currentUser?.userId) }
 
+  /**
+   * 读取审批任务或提交同意、拒绝决定。
+   * 检查任务可见性、待处理状态及版本，随后推进流程并更新工单和通知。
+   */
   private async taskDispatch<T>(id: string, action: string, method: string, options: MockOptions, headers: Headers): Promise<MockResult<T>> {
     const task = this.tasks.find(t => t.approvalTaskId === id); if (!task || (!this.currentUser?.roles.includes('SERVICE_DESK_ADMIN') && task.approverUserId !== this.currentUser?.userId)) this.error(404, 'APPROVAL_TASK_NOT_ASSIGNED', headers)
     if (!action && method === 'GET') return this.ok(task as T, 200, headers, task.lockVersion)
@@ -532,7 +677,10 @@ export class MockApi {
     return this.ok(task as T, 200, headers, task.lockVersion)
   }
 
-  /** Test-only bridge used by the mock Playwright profile; never rendered in the UI. */
+  /**
+   * 为模拟端到端场景注入告警触发或恢复事件。
+   * 同步维护告警聚合、关联工单和时间线，仅通过测试桥接入口调用。
+   */
   triggerAlert(eventType: 'FIRING' | 'RESOLVED' = 'FIRING'): void {
     const timestamp = now()
     const fingerprint = 'flowdesk-payment-api'
@@ -594,4 +742,5 @@ export class MockApi {
   }
 }
 
-export const mockApi = new MockApi()
+// 生产构建中的模拟调用均被消除，此纯初始化标记允许一并移除模拟数据。
+export const mockApi = /* @__PURE__ */ new MockApi()

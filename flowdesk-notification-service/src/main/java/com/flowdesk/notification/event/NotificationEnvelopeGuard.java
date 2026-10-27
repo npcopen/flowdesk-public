@@ -18,13 +18,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.regex.Pattern;
 
-/**
- * Strict Notification transport validation.
- *
- * <p>The envelope is validated completely before a tenant context can be
- * installed. Only after that boundary is crossed are payload/recipient
- * invariants classified as a tenant-owned deterministic rejection.</p>
- */
+/** 先完整校验路由、信封和原始报文，再校验收件人与业务意图；明确区分传输拒绝和租户内确定性拒绝。 */
 public final class NotificationEnvelopeGuard {
     private static final ObjectMapper JSON = JsonMapper.builder()
             .enable(StreamReadFeature.STRICT_DUPLICATE_DETECTION)
@@ -50,14 +44,23 @@ public final class NotificationEnvelopeGuard {
             "schemaVersion", "recipientUserId", "notificationKind", "sourceEffectKey",
             "sourceRefType", "sourceRefId", "title", "body");
 
+    /**
+     * 按主队列绑定校验信封、载荷和摘要，全部通过后才返回可信消息。
+     */
     public AcceptedNotification validateMain(NotificationTransportMessage message) {
         return validate(message, bindingForMain(message), false);
     }
 
+    /**
+     * 按死信绑定核对原始消息，防止错误队列或不完整信封进入恢复。
+     */
     public AcceptedNotification validateDlq(NotificationTransportMessage message) {
         return validate(message, bindingForDlq(message), true);
     }
 
+    /**
+     * 按主队列 Topic 与消费组定位冻结契约，未知路由在信任租户前被拒绝。
+     */
     private static NotificationEventContract.Binding bindingForMain(
             NotificationTransportMessage message) {
         requirePre(message != null, "DELIVERY_MISSING");
@@ -70,6 +73,9 @@ public final class NotificationEnvelopeGuard {
         throw pre("CONSUMER_DIRECTION_MISMATCH");
     }
 
+    /**
+     * 按死信 Topic 与接纳消费组定位原契约，避免将死信误当主队列消息。
+     */
     private static NotificationEventContract.Binding bindingForDlq(
             NotificationTransportMessage message) {
         requirePre(message != null, "DELIVERY_MISSING");
@@ -82,6 +88,9 @@ public final class NotificationEnvelopeGuard {
         throw pre("CONSUMER_DIRECTION_MISMATCH");
     }
 
+    /**
+     * 逐层核验路由、属性、摘要和载荷，明确区分租户可信前后的异常边界。
+     */
     private AcceptedNotification validate(NotificationTransportMessage message,
                                           NotificationEventContract.Binding binding,
                                           boolean dlq) {
@@ -89,7 +98,7 @@ public final class NotificationEnvelopeGuard {
         requirePre(message.keys() != null && !message.keys().isBlank()
                         && message.keys().length() <= 128,
                 "MESSAGE_KEY_INVALID");
-        // Tags are intentionally absent from the frozen contract.
+        // 固定契约不使用 Tags，额外标签必须拒绝。
         requirePre(message.tags() == null, "TAG_FORBIDDEN");
 
         Map<String, String> properties = message.userProperties();
@@ -156,8 +165,7 @@ public final class NotificationEnvelopeGuard {
                 aggregateId, correlationId, causationId, occurredAt, body, bodyHash, dlq);
 
         JsonNode payload = parsePayloadPre(body);
-        // Unknown payload fields are structural wire errors; semantic field
-        // errors below are deterministic tenant-owned rejections.
+        // 未知载荷字段属于传输结构错误；下面的字段语义错误才归类为租户内的确定性拒绝。
         payload.properties().forEach(entry -> {
             if (!PAYLOAD_FIELDS.contains(entry.getKey())) {
                 throw pre("PAYLOAD_UNKNOWN_FIELD:" + boundedCode(entry.getKey()));
@@ -201,6 +209,9 @@ public final class NotificationEnvelopeGuard {
                 bodyText, correlationId, causationId, occurredAt, body, bodyHash);
     }
 
+    /**
+     * 在租户可信前解析 JSON 与结构，非法字节或字段不产生租户业务事实。
+     */
     private static JsonNode parsePayloadPre(byte[] bytes) {
         try {
             String value = decodeUtf8Pre(bytes);
@@ -219,6 +230,9 @@ public final class NotificationEnvelopeGuard {
         }
     }
 
+    /**
+     * 严格按 UTF-8 解码消息体，拒绝不符合冻结传输契约的字节序列。
+     */
     private static String decodeUtf8Pre(byte[] bytes) {
         try {
             return StandardCharsets.UTF_8.newDecoder()
@@ -231,6 +245,9 @@ public final class NotificationEnvelopeGuard {
         }
     }
 
+    /**
+     * 读取可信信封阶段必填文本，格式错误时保留信封供记录租户内拒绝事实。
+     */
     private static String trustedText(JsonNode node, String field,
                                       NotificationEnvelope envelope) {
         JsonNode value = node.get(field);
@@ -238,20 +255,32 @@ public final class NotificationEnvelopeGuard {
         return value.stringValue();
     }
 
+    /**
+     * 读取可信信封阶段必填文本，格式错误时保留信封供记录租户内拒绝事实。
+     */
     private static void trustedText(JsonNode node, String field, String expected,
                                     NotificationEnvelope envelope) {
         trustedRequire(expected.equals(trustedText(node, field, envelope)),
                 "PAYLOAD_VALUE_INVALID:" + field, envelope);
     }
 
+    /**
+     * 解析载荷 UUID 并检查规范格式，非法值转换为确定性契约错误。
+     */
     private static UUID payloadUuid(JsonNode node, String field, NotificationEnvelope envelope) {
         return uuidTrusted(trustedText(node, field, envelope), field, envelope);
     }
 
+    /**
+     * 解析载荷中的十六进制键或摘要，核验长度及编码后返回字节值。
+     */
     private static byte[] payloadHex(JsonNode node, String field, NotificationEnvelope envelope) {
         return hexTrusted(trustedText(node, field, envelope), field, envelope);
     }
 
+    /**
+     * 在租户信任建立前解析契约时间字段，拒绝非规范时间表示。
+     */
     private static Instant instantPre(String value, String field) {
         requirePre(value != null && MICROS.matcher(value).matches(), "UTC_FORMAT_INVALID:" + field);
         try {
@@ -262,6 +291,9 @@ public final class NotificationEnvelopeGuard {
         }
     }
 
+    /**
+     * 在租户可信前解析 UUID，避免从非法身份字段派生租户上下文。
+     */
     private static UUID uuidPre(String value, String field) {
         requirePre(value != null && UUID_TEXT.matcher(value).matches(),
                 "UUID_FORMAT_INVALID:" + field);
@@ -275,6 +307,9 @@ public final class NotificationEnvelopeGuard {
         }
     }
 
+    /**
+     * 解析可信阶段的 UUID，失败时保留信封以便持久化拒绝事实。
+     */
     private static UUID uuidTrusted(String value, String field, NotificationEnvelope envelope) {
         trustedRequire(value != null && UUID_TEXT.matcher(value).matches(),
                 "UUID_FORMAT_INVALID:" + field, envelope);
@@ -291,6 +326,9 @@ public final class NotificationEnvelopeGuard {
         }
     }
 
+    /**
+     * 在租户可信前核验十六进制字段格式和长度，拒绝非法摘要或业务键。
+     */
     private static byte[] hexPre(String value, String field) {
         requirePre(value != null && HEX.matcher(value).matches(),
                 "SHA256_FORMAT_INVALID:" + field);
@@ -302,6 +340,9 @@ public final class NotificationEnvelopeGuard {
         }
     }
 
+    /**
+     * 解析可信信封的十六进制字段，错误附带原信封上下文供记录拒绝。
+     */
     private static byte[] hexTrusted(String value, String field, NotificationEnvelope envelope) {
         trustedRequire(value != null && HEX.matcher(value).matches(),
                 "SHA256_FORMAT_INVALID:" + field, envelope);
@@ -313,10 +354,16 @@ public final class NotificationEnvelopeGuard {
         }
     }
 
+    /**
+     * 在租户可信前核验固定字段值，拒绝不兼容协议进入业务处理。
+     */
     private static void fixedPre(Map<String, String> values, String key, String expected) {
         requirePre(expected.equals(values.get(key)), "ENVELOPE_VALUE_INVALID:" + key);
     }
 
+    /**
+     * 检查契约文本的字符和长度限制，防止非法内容进入后续校验。
+     */
     private static boolean safeText(String value) {
         for (int i = 0; i < value.length(); i++) {
             if (Character.isISOControl(value.charAt(i))) return false;
@@ -324,34 +371,55 @@ public final class NotificationEnvelopeGuard {
         return true;
     }
 
+    /**
+     * 核验错误码格式与长度，保证其可安全用于存储和错误响应。
+     */
     private static String boundedCode(String value) {
         if (value == null) return "unknown";
         String clean = value.replaceAll("[^A-Za-z0-9_.:-]", "_");
         return clean.substring(0, Math.min(96, clean.length()));
     }
 
+    /**
+     * 在租户可信前检查条件，失败时抛出不含可信租户事实的异常。
+     */
     private static void requirePre(boolean condition, String code) {
         if (!condition) throw pre(code);
     }
 
+    /**
+     * 在租户已可信后检查条件，失败时保留信封供记录拒绝事实。
+     */
     private static void trustedRequire(boolean condition, String code,
                                        NotificationEnvelope envelope) {
         if (!condition) throw trusted(code, envelope);
     }
 
+    /**
+     * 构造尚未建立可信租户上下文的异常，供入口按非法传输报文处置。
+     */
     private static NotificationContractViolation pre(String code) {
         return new NotificationContractViolation(code);
     }
 
+    /**
+     * 构造尚未建立可信租户上下文的异常，供入口按非法传输报文处置。
+     */
     private static NotificationContractViolation pre(String code, Throwable cause) {
         return new NotificationContractViolation(code, cause);
     }
 
+    /**
+     * 构造携带可信信封的异常，供入口在相应租户中记录拒绝事实。
+     */
     private static NotificationContractViolation trusted(String code,
                                                          NotificationEnvelope envelope) {
         return NotificationContractViolation.trusted(code, envelope);
     }
 
+    /**
+     * 构造携带可信信封的异常，供入口在相应租户中记录拒绝事实。
+     */
     private static NotificationContractViolation trusted(String code, Throwable cause,
                                                          NotificationEnvelope envelope) {
         return NotificationContractViolation.trusted(code, cause, envelope);

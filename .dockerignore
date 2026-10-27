@@ -1,12 +1,16 @@
 .git
 .data
 .idea
+.npm-cache
+tmp
 **/target
 **/node_modules
 flowdesk-gateway/src/main/resources/static
 flowdesk-web/dist
 flowdesk-web/playwright-report
 flowdesk-web/test-results
+# The frontend has its own build context and image.
+flowdesk-web
 *.log
 .env
 .env.*

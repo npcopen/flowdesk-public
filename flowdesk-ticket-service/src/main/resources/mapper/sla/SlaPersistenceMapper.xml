@@ -1,0 +1,285 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+  SLA 策略读取、时钟状态及触发记录的持久化接口。
+  按租户隔离计时周期，提供到期扫描、变更游标及通知收件人快照；身份和事务校验由业务实现负责。
+-->
+<mapper namespace="com.flowdesk.ticket.sla.SlaPersistenceMapper">
+  <!-- 将查询列映射为 SlaPolicyRow 的构造参数，明确 UUID 转换、字段类型及参数顺序。 -->
+  <resultMap id="SlaPolicyRow" type="com.flowdesk.ticket.model.sla.SlaPolicyRow">
+    <constructor>
+      <arg name="slaPolicyId" column="sla_policy_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="policyCode" column="policy_code" javaType="java.lang.String"/>
+      <arg name="policyName" column="policy_name" javaType="java.lang.String"/>
+      <arg name="firstResponseSeconds" column="first_response_seconds" javaType="_long"/>
+      <arg name="resolutionSeconds" column="resolution_seconds" javaType="_long"/>
+      <arg name="firstResponseReminderBeforeSeconds" column="first_response_reminder_before_seconds" javaType="java.lang.Long"/>
+      <arg name="resolutionReminderBeforeSeconds" column="resolution_reminder_before_seconds" javaType="java.lang.Long"/>
+      <arg name="status" column="status" javaType="java.lang.String"/>
+      <arg name="lockVersion" column="lock_version" javaType="_long"/>
+    </constructor>
+  </resultMap>
+  <!-- 将查询列映射为 SlaClockRow 的构造参数，明确 UUID 转换、字段类型及参数顺序。 -->
+  <resultMap id="SlaClockRow" type="com.flowdesk.ticket.model.sla.SlaClockRow">
+    <constructor>
+      <arg name="slaClockId" column="sla_clock_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="ticketId" column="ticket_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="slaPolicyId" column="sla_policy_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="clockType" column="clock_type" javaType="java.lang.String"/>
+      <arg name="status" column="status" javaType="java.lang.String"/>
+      <arg name="startedAt" column="started_at" javaType="java.time.Instant"/>
+      <arg name="deadlineAt" column="deadline_at" javaType="java.time.Instant"/>
+      <arg name="reminderDueAt" column="reminder_due_at" javaType="java.time.Instant"/>
+      <arg name="policyDurationSeconds" column="policy_duration_seconds" javaType="_long"/>
+      <arg name="policyReminderBeforeSeconds" column="policy_reminder_before_seconds" javaType="java.lang.Long"/>
+      <arg name="milestoneAt" column="milestone_at" javaType="java.time.Instant"/>
+      <arg name="breachedAt" column="breached_at" javaType="java.time.Instant"/>
+      <arg name="satisfiedAt" column="satisfied_at" javaType="java.time.Instant"/>
+      <arg name="lockVersion" column="lock_version" javaType="_long"/>
+      <arg name="cycleNo" column="cycle_no" javaType="_int"/>
+    </constructor>
+  </resultMap>
+  <!-- 将查询列映射为 SlaCandidateRow 的构造参数，明确 UUID 转换、字段类型及参数顺序。 -->
+  <resultMap id="SlaCandidateRow" type="com.flowdesk.ticket.model.sla.SlaCandidateRow">
+    <constructor>
+      <arg name="slaClockId" column="sla_clock_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="ticketId" column="ticket_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="status" column="status" javaType="java.lang.String"/>
+      <arg name="clockType" column="clock_type" javaType="java.lang.String"/>
+      <arg name="deadlineAt" column="deadline_at" javaType="java.time.Instant"/>
+      <arg name="reminderDueAt" column="reminder_due_at" javaType="java.time.Instant"/>
+      <arg name="updatedAt" column="updated_at" javaType="java.time.Instant"/>
+    </constructor>
+  </resultMap>
+  <!-- 将查询列映射为 SlaHighWaterRow 的构造参数，明确 UUID 转换、字段类型及参数顺序。 -->
+  <resultMap id="SlaHighWaterRow" type="com.flowdesk.ticket.model.sla.SlaHighWaterRow">
+    <constructor>
+      <arg name="updatedAt" column="updated_at" javaType="java.time.Instant"/>
+      <arg name="slaClockId" column="sla_clock_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+    </constructor>
+  </resultMap>
+  <!-- 将查询列映射为 SlaTriggerRow 的构造参数，明确 UUID 转换、字段类型及参数顺序。 -->
+  <resultMap id="SlaTriggerRow" type="com.flowdesk.ticket.model.sla.SlaTriggerRow">
+    <constructor>
+      <arg name="slaClockId" column="sla_clock_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="stage" column="stage" javaType="java.lang.String"/>
+      <arg name="dueAt" column="due_at" javaType="java.time.Instant"/>
+      <arg name="triggeredAt" column="triggered_at" javaType="java.time.Instant"/>
+    </constructor>
+  </resultMap>
+  <!-- 将查询列映射为 PendingSlaNotification 的构造参数，明确 UUID 转换、字段类型及参数顺序。 -->
+  <resultMap id="PendingSlaNotification" type="com.flowdesk.ticket.model.sla.PendingSlaNotification">
+    <constructor>
+      <arg name="triggerId" column="sla_trigger_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="clockId" column="sla_clock_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="ticketId" column="ticket_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="stage" column="stage" javaType="java.lang.String"/>
+    </constructor>
+  </resultMap>
+  <!-- 将查询列映射为 SlaTriggerDetailRow 的构造参数，明确 UUID 转换、字段类型及参数顺序。 -->
+  <resultMap id="SlaTriggerDetailRow" type="com.flowdesk.ticket.model.sla.SlaTriggerDetailRow">
+    <constructor>
+      <arg name="slaClockId" column="sla_clock_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="stage" column="stage" javaType="java.lang.String"/>
+      <arg name="effectKey" column="effect_key" javaType="[B"/>
+      <arg name="dueAt" column="due_at" javaType="java.time.Instant"/>
+      <arg name="triggeredAt" column="triggered_at" javaType="java.time.Instant"/>
+      <arg name="publicationKey" column="publication_key" javaType="[B"/>
+    </constructor>
+  </resultMap>
+  <!-- 按租户及策略标识读取策略详情，包含首响应、解决时限、提醒提前量和版本，不限制策略状态。 -->
+  <select id="findSlaPolicySelect" resultMap="SlaPolicyRow">
+    SELECT sla_policy_id, policy_code, policy_name, first_response_seconds,
+       resolution_seconds, first_response_reminder_before_seconds,
+       resolution_reminder_before_seconds, status, lock_version
+FROM sla_policy
+WHERE tenant_id = #{tenantId} AND sla_policy_id = #{slaPolicyId}
+  </select>
+  <!-- 仅返回指定租户及策略标识下状态为 ACTIVE 的策略，供新建时钟时读取有效时限配置。 -->
+  <select id="findActiveSlaPolicySelect" resultMap="SlaPolicyRow">
+    SELECT sla_policy_id, policy_code, policy_name, first_response_seconds,
+       resolution_seconds, first_response_reminder_before_seconds,
+       resolution_reminder_before_seconds, status, lock_version
+FROM sla_policy
+WHERE tenant_id = #{tenantId} AND sla_policy_id = #{slaPolicyId} AND status = 'ACTIVE'
+  </select>
+  <!-- 按租户和可选状态筛选策略；排序列仅允许策略编码或名称，并以排序值和策略标识组成稳定游标，最多 queryLimit 条。 -->
+  <select id="findSlaPoliciesSelect" resultMap="SlaPolicyRow">
+    SELECT sla_policy_id,policy_code,policy_name,first_response_seconds,resolution_seconds,first_response_reminder_before_seconds,resolution_reminder_before_seconds,status,lock_version FROM sla_policy WHERE tenant_id=#{tenantId} <if test="status != null"> AND status=#{status}</if><if test="cursorValue != null and cursorId != null"> AND (<choose><when test="sortColumn == 'policyCode'">policy_code</when><otherwise>policy_name</otherwise></choose><choose><when test="ascending"> &gt; </when><otherwise> &lt; </otherwise></choose>#{cursorValue} OR (<choose><when test="sortColumn == 'policyCode'">policy_code</when><otherwise>policy_name</otherwise></choose>=#{cursorValue} AND sla_policy_id<choose><when test="ascending"> &gt; </when><otherwise> &lt; </otherwise></choose>#{cursorId}))</if> ORDER BY <choose><when test="sortColumn == 'policyCode'">policy_code</when><otherwise>policy_name</otherwise></choose><choose><when test="ascending"> ASC</when><otherwise> DESC</otherwise></choose>,sla_policy_id<choose><when test="ascending"> ASC</when><otherwise> DESC</otherwise></choose> LIMIT #{queryLimit}
+  </select>
+  <!-- 创建指定工单及 cycleNo 的 RUNNING 时钟，保存起始、到期、提醒时间和策略时限快照，版本初始化为 0。 -->
+  <insert id="insertSlaClockUpdate" >
+    INSERT INTO sla_clock
+  (tenant_id, sla_clock_id, ticket_id, sla_policy_id, clock_type, status,
+   started_at, deadline_at, reminder_due_at, policy_duration_seconds,
+   policy_reminder_before_seconds, milestone_at, breached_at, satisfied_at,
+   lock_version, created_at, created_by_type, created_by_id,
+   updated_at, updated_by_type, updated_by_id, cycle_no)
+ VALUES (#{tenantId}, #{slaClockId}, #{ticketId}, #{slaPolicyId}, #{clockType}, 'RUNNING', #{startedAt}, #{deadlineAt}, #{reminderDueAt}, #{durationSeconds}, #{reminderBeforeSeconds}, NULL, NULL, NULL,
+         0, #{now}, 'SERVICE', NULL, #{now2}, 'SERVICE', NULL, #{cycleNo})
+  </insert>
+  <!-- 按租户、工单及 clockType 读取最大 cycleNo 的最新计时周期，最多返回一条，不加行锁。 -->
+  <select id="findSlaClockSelect" resultMap="SlaClockRow">
+    SELECT sla_clock_id, ticket_id, sla_policy_id, clock_type, status, cycle_no,
+       started_at, deadline_at, reminder_due_at, policy_duration_seconds,
+       policy_reminder_before_seconds, milestone_at, breached_at,
+       satisfied_at, lock_version
+FROM sla_clock
+WHERE tenant_id = #{tenantId} AND ticket_id = #{ticketId} AND clock_type = #{clockType}
+ORDER BY cycle_no DESC LIMIT 1
+  </select>
+  <!-- 按租户、工单及类型读取最新计时周期，追加 FOR UPDATE，供同一事务内检查并更新时钟。 -->
+  <select id="findSlaClockForUpdateSelect" resultMap="SlaClockRow">
+    SELECT sla_clock_id, ticket_id, sla_policy_id, clock_type, status, cycle_no,
+       started_at, deadline_at, reminder_due_at, policy_duration_seconds,
+       policy_reminder_before_seconds, milestone_at, breached_at,
+       satisfied_at, lock_version
+FROM sla_clock
+WHERE tenant_id = #{tenantId} AND ticket_id = #{ticketId} AND clock_type = #{clockType}
+ORDER BY cycle_no DESC LIMIT 1 FOR UPDATE
+  </select>
+  <!-- 按租户及时钟标识读取详情并加 FOR UPDATE 行锁，供触发或里程碑处理事务使用。 -->
+  <select id="findSlaClockByIdForUpdateSelect" resultMap="SlaClockRow">
+    SELECT sla_clock_id, ticket_id, sla_policy_id, clock_type, status, cycle_no,
+       started_at, deadline_at, reminder_due_at, policy_duration_seconds,
+       policy_reminder_before_seconds, milestone_at, breached_at,
+       satisfied_at, lock_version
+FROM sla_clock
+WHERE tenant_id = #{tenantId} AND sla_clock_id = #{slaClockId} FOR UPDATE
+  </select>
+  <!-- 按租户及时钟标识读取计时状态、策略快照、截止时间及当前版本，不加行锁。 -->
+  <select id="findSlaClockByIdSelect" resultMap="SlaClockRow">
+    SELECT sla_clock_id, ticket_id, sla_policy_id, clock_type, status, cycle_no,
+       started_at, deadline_at, reminder_due_at, policy_duration_seconds,
+       policy_reminder_before_seconds, milestone_at, breached_at,
+       satisfied_at, lock_version
+FROM sla_clock
+WHERE tenant_id = #{tenantId} AND sla_clock_id = #{slaClockId}
+  </select>
+  <!-- 扫描租户内提醒已到期或已超过截止时间的 RUNNING 时钟，以 updatedAt 和时钟标识升序游标分页，最多 limit 条。 -->
+  <select id="findSlaCandidatesSelect" resultMap="SlaCandidateRow">
+    SELECT sla_clock_id,ticket_id,status,clock_type,deadline_at,reminder_due_at,updated_at FROM sla_clock WHERE tenant_id=#{tenantId} AND status='RUNNING' AND ((reminder_due_at IS NOT NULL AND reminder_due_at &lt;= #{now}) OR deadline_at &lt;= #{now})<if test="cursorUpdatedAt != null and cursorClockId != null"> AND (updated_at &gt; #{cursorUpdatedAt} OR (updated_at=#{cursorUpdatedAt} AND sla_clock_id &gt; #{cursorClockId}))</if> ORDER BY updated_at,sla_clock_id LIMIT #{limit}
+  </select>
+  <!-- 扫描租户内全部 RUNNING 时钟，以更新时间及时钟标识升序分页，不限定是否到期，供索引重建使用。 -->
+  <select id="findRunningSlaCandidatesSelect" resultMap="SlaCandidateRow">
+    SELECT sla_clock_id,ticket_id,status,clock_type,deadline_at,reminder_due_at,updated_at FROM sla_clock WHERE tenant_id=#{tenantId} AND status='RUNNING'<if test="cursorUpdatedAt != null and cursorClockId != null"> AND (updated_at &gt; #{cursorUpdatedAt} OR (updated_at=#{cursorUpdatedAt} AND sla_clock_id &gt; #{cursorClockId}))</if> ORDER BY updated_at,sla_clock_id LIMIT #{limit}
+  </select>
+  <!-- 读取租户内按更新时间和时钟标识倒序排列的第一条，作为重建或增量追赶的高水位边界。 -->
+  <select id="findSlaHighWaterSelect" resultMap="SlaHighWaterRow">
+    SELECT updated_at, sla_clock_id
+FROM sla_clock
+WHERE tenant_id=#{tenantId}
+ORDER BY updated_at DESC, sla_clock_id DESC
+LIMIT 1
+  </select>
+  <!-- 读取严格位于 updatedAt 和 clockId 组合游标之后的时钟，不限制状态；按相同组合升序分页，最多 limit 条。 -->
+  <select id="findSlaChangesAfterSelect" resultMap="SlaCandidateRow">
+    SELECT sla_clock_id,ticket_id,status,clock_type,deadline_at,reminder_due_at,updated_at FROM sla_clock WHERE tenant_id=#{tenantId}<if test="updatedAt != null and clockId != null"> AND (updated_at &gt; #{updatedAt} OR (updated_at=#{updatedAt} AND sla_clock_id &gt; #{clockId}))</if> ORDER BY updated_at,sla_clock_id LIMIT #{limit}
+  </select>
+  <!-- 读取更新时间不早于 updatedAt 的时钟，包含边界时间，按更新时间及时钟标识升序返回最多 limit 条。 -->
+  <select id="findSlaChangesAtOrAfterSelect" resultMap="SlaCandidateRow">
+    SELECT sla_clock_id, ticket_id, status, clock_type, deadline_at,
+       reminder_due_at, updated_at
+FROM sla_clock
+WHERE tenant_id=#{tenantId} AND updated_at >= #{updatedAt}
+ORDER BY updated_at, sla_clock_id  LIMIT #{limit}
+  </select>
+  <!-- 分页枚举拥有 SLA 时钟的去重租户标识，按租户标识升序读取 afterTenantId 之后的批次。 -->
+  <select id="findTenantIdsWithSlaClocksSelect" resultType="java.util.UUID">
+    SELECT DISTINCT tenant_id FROM sla_clock <if test="afterTenantId != null"> WHERE tenant_id &gt; #{afterTenantId}</if> ORDER BY tenant_id LIMIT #{limit}
+  </select>
+  <!-- 按租户和工单读取全部计时周期，优先最新 cycleNo，再按时钟类型及时钟标识稳定排序。 -->
+  <select id="findSlaClocksSelect" resultMap="SlaClockRow">
+    SELECT sla_clock_id, ticket_id, sla_policy_id, clock_type, status, cycle_no,
+       started_at, deadline_at, reminder_due_at, policy_duration_seconds,
+       policy_reminder_before_seconds, milestone_at, breached_at,
+       satisfied_at, lock_version
+FROM sla_clock
+WHERE tenant_id = #{tenantId} AND ticket_id = #{ticketId}
+ORDER BY cycle_no DESC, clock_type, sla_clock_id
+  </select>
+  <!-- 批量查询租户内指定时钟集合的触发阶段、到期及触发时间，按到期时间及时钟标识排序；调用方需提供非空集合。 -->
+  <select id="findSlaTriggersSelect" resultMap="SlaTriggerRow">
+    SELECT sla_clock_id,stage,due_at,triggered_at FROM sla_trigger WHERE tenant_id=#{tenantId} AND sla_clock_id IN <foreach collection="slaClockIds" item="id" open="(" close=")" separator=",">#{id}</foreach> ORDER BY due_at,sla_clock_id
+  </select>
+  <!-- 仅将 RUNNING 且版本匹配的时钟转为 SATISFIED_ON_TIME，记录里程碑和满足时间；更新时间至少前进 1 微秒，以便增量扫描感知变化。 -->
+  <update id="updateSlaClockSatisfiedOnTimeUpdate" >
+    UPDATE sla_clock
+SET status = 'SATISFIED_ON_TIME',
+    milestone_at = #{now},
+    satisfied_at = #{now2},
+    lock_version = lock_version + 1,
+    updated_at = CASE WHEN updated_at >= #{now3}
+        THEN TIMESTAMPADD(MICROSECOND, 1, updated_at) ELSE #{now4} END,
+    updated_by_type = #{actorType},
+    updated_by_id = #{actorId}
+WHERE tenant_id = #{tenantId} AND sla_clock_id = #{slaClockId}
+  AND status = 'RUNNING' AND lock_version = #{expectedLockVersion}
+  </update>
+  <!-- 仅将 RUNNING 且版本匹配的时钟转为 BREACHED，记录违约时间；增加版本并保证更新时间单调递增。 -->
+  <update id="updateSlaClockBreachedUpdate" >
+    UPDATE sla_clock
+SET status = 'BREACHED',
+    breached_at = #{now},
+    lock_version = lock_version + 1,
+    updated_at = CASE WHEN updated_at >= #{now2}
+        THEN TIMESTAMPADD(MICROSECOND, 1, updated_at) ELSE #{now3} END,
+    updated_by_type = #{actorType},
+    updated_by_id = #{actorId}
+WHERE tenant_id = #{tenantId} AND sla_clock_id = #{slaClockId}
+  AND status = 'RUNNING' AND lock_version = #{expectedLockVersion}
+  </update>
+  <!-- 仅将 BREACHED 且版本匹配的时钟转为 SATISFIED_LATE，记录里程碑及满足时间；增加版本并保证更新时间单调递增。 -->
+  <update id="updateSlaClockSatisfiedLateUpdate" >
+    UPDATE sla_clock
+SET status = 'SATISFIED_LATE',
+    milestone_at = #{now},
+    satisfied_at = #{now2},
+    lock_version = lock_version + 1,
+    updated_at = CASE WHEN updated_at >= #{now3}
+        THEN TIMESTAMPADD(MICROSECOND, 1, updated_at) ELSE #{now4} END,
+    updated_by_type = #{actorType},
+    updated_by_id = #{actorId}
+WHERE tenant_id = #{tenantId} AND sla_clock_id = #{slaClockId}
+  AND status = 'BREACHED' AND lock_version = #{expectedLockVersion}
+  </update>
+  <!-- 扫描尚无任何收件人快照的触发记录，关联得到工单和阶段，以 triggerId 为升序游标返回待补发候选。 -->
+  <select id="findPendingSlaNotificationsSelect" resultMap="PendingSlaNotification">
+    SELECT t.sla_trigger_id,t.sla_clock_id,c.ticket_id,t.stage FROM sla_trigger t JOIN sla_clock c ON c.tenant_id=t.tenant_id AND c.sla_clock_id=t.sla_clock_id WHERE t.tenant_id=#{tenantId} AND NOT EXISTS (SELECT 1 FROM sla_trigger_recipient r WHERE r.tenant_id=t.tenant_id AND r.sla_trigger_id=t.sla_trigger_id)<if test="afterTriggerId != null"> AND t.sla_trigger_id &gt; #{afterTriggerId}</if> ORDER BY t.sla_trigger_id LIMIT #{limit}
+  </select>
+  <!-- 按租户、时钟及阶段读取触发效果键、到期时间、触发时间和发布键；lock 为 true 时追加 FOR UPDATE。 -->
+  <select id="findSlaTriggerSelect" resultMap="SlaTriggerDetailRow">
+    SELECT sla_clock_id, stage, effect_key, due_at, triggered_at, publication_key
+FROM sla_trigger
+WHERE tenant_id = #{tenantId} AND sla_clock_id = #{slaClockId} AND stage = #{stage} <if test="lock"> FOR UPDATE</if>
+  </select>
+  <!-- 写入指定时钟阶段的触发事实，保存业务效果键和通知发布键，以 SCHEDULER 主体记录触发及创建时间。 -->
+  <insert id="insertSlaTriggerUpdate" >
+    INSERT INTO sla_trigger
+  (tenant_id, sla_trigger_id, sla_clock_id, stage, effect_key, due_at,
+   triggered_at, publication_key, created_at, created_by_type, created_by_id)
+VALUES (#{tenantId}, #{triggerId}, #{slaClockId}, #{stage}, #{effectKey}, #{dueAt}, #{triggeredAt}, #{publicationKey}, #{triggeredAt2}, 'SCHEDULER', NULL)
+  </insert>
+  <!-- 为触发记录保存一位已确定收件人的快照及创建主体，供后续重试沿用同一收件人集合。 -->
+  <insert id="insertSlaTriggerRecipientSnapshotUpdate" >
+    INSERT INTO sla_trigger_recipient
+  (tenant_id,sla_trigger_id,recipient_user_id,created_at,
+   created_by_type,created_by_id)
+VALUES (#{tenantId},#{triggerId},#{recipient},#{now},#{createdByType},#{createdById})
+  </insert>
+  <!-- 按租户及触发标识读取已保存的收件人快照，按用户标识稳定排序。 -->
+  <select id="findSlaTriggerRecipientSnapshotSelect" resultType="java.util.UUID">
+    SELECT recipient_user_id
+FROM sla_trigger_recipient
+WHERE tenant_id=#{tenantId} AND sla_trigger_id=#{triggerId}
+ORDER BY recipient_user_id
+  </select>
+  <!-- 以调度器主体刷新时钟更新时间；若现有时间不小于 now 则递增 1 微秒，确保触发相关变化可被增量扫描发现。 -->
+  <update id="updateSlaClockUpdatedAtUpdate" >
+    UPDATE sla_clock
+SET updated_at = CASE WHEN updated_at >= #{now}
+    THEN TIMESTAMPADD(MICROSECOND, 1, updated_at) ELSE #{now2} END,
+    updated_by_type='SCHEDULER',updated_by_id=NULL
+WHERE tenant_id=#{tenantId} AND sla_clock_id=#{slaClockId}
+  </update>
+</mapper>

@@ -1,0 +1,71 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper
+  PUBLIC '-//mybatis.org//DTD Mapper 3.0//EN'
+  'https://mybatis.org/dtd/mybatis-3-mapper.dtd'>
+<!--
+  工单评论持久化接口，负责评论写入、详情查询及按时间游标分页。
+  语句与同名 Java Mapper 方法对应；租户参数、状态条件和并发版本共同限定数据访问。
+-->
+<mapper namespace="com.flowdesk.ticket.mapper.TicketCommentMapper">
+  <!--
+    将查询列按构造参数映射为 CommentRow，参数顺序、字段别名及类型须与对应模型一致。 UUID 字段通过二进制类型处理器转换。
+  -->
+  <resultMap id="CommentRow" type="com.flowdesk.ticket.model.CommentRow">
+    <constructor>
+      <arg name="commentId" column="comment_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="ticketId" column="ticket_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="body" column="body" javaType="java.lang.String"/>
+      <arg name="authorUserId" column="created_by_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="createdAt" column="created_at" javaType="java.time.Instant"/>
+      <arg name="correlationId" column="correlation_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+    </constructor>
+  </resultMap>
+  <!--
+    保存工单评论正文及作者、关联请求和创建时间。
+  -->
+  <insert id="insertComment">
+    INSERT INTO ticket_comment
+  (tenant_id, comment_id, ticket_id, body, correlation_id,
+   created_at, created_by_type, created_by_id)
+VALUES (#{tenantId}, #{commentId}, #{ticketId}, #{body}, #{correlationId}, #{now}, 'USER', #{authorId})
+  </insert>
+  <!--
+    按租户和评论 ID 查询评论，返回正文、所属工单及作者信息。
+  -->
+  <select id="findComment" resultMap="CommentRow">
+    SELECT comment_id, ticket_id, body, created_by_id, created_at, correlation_id
+FROM ticket_comment
+WHERE tenant_id = #{tenantId} AND comment_id = #{commentId}
+  </select>
+  <!--
+    查询指定工单的评论，以创建时间和评论 ID 组成稳定游标，按指定方向排序并多取一条。
+  -->
+  <select id="findComments" resultMap="CommentRow">
+    <bind name="pageSizePlusOne" value="pageSize + 1"/>
+    SELECT comment_id, ticket_id, body, created_by_id, created_at, correlation_id FROM ticket_comment WHERE tenant_id = #{tenantId} AND ticket_id = #{ticketId}
+    <if test="cursorValue != null and cursorId != null">
+       AND (created_at
+      <choose>
+        <when test="ascending">&gt;</when>
+        <otherwise>&lt;</otherwise>
+      </choose>
+       #{cursorValue} OR (created_at = #{cursorValue} AND comment_id
+      <choose>
+        <when test="ascending">&gt;</when>
+        <otherwise>&lt;</otherwise>
+      </choose>
+       #{cursorId}))
+    </if>
+     ORDER BY created_at
+    <choose>
+      <when test="ascending">ASC</when>
+      <otherwise>DESC</otherwise>
+    </choose>
+    , comment_id
+    <choose>
+      <when test="ascending">ASC</when>
+      <otherwise>DESC</otherwise>
+    </choose>
+     LIMIT #{pageSizePlusOne}
+  </select>
+</mapper>

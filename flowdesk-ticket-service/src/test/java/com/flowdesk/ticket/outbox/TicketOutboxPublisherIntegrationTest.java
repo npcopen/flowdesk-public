@@ -1,12 +1,16 @@
 package com.flowdesk.ticket.outbox;
 
+import com.flowdesk.ticket.mapper.*;
+import com.flowdesk.ticket.model.*;
+import com.flowdesk.ticket.persistence.Uuids;
+
 import com.flowdesk.common.tenant.ActorRef;
 import com.flowdesk.common.tenant.TenantContext;
 import com.flowdesk.common.tenant.TenantContextHolder;
 import com.flowdesk.common.tenant.TenantContextScope;
 import com.flowdesk.common.tenant.TenantContextSource;
 import com.flowdesk.ticket.event.TicketEventContract;
-import com.flowdesk.ticket.repository.TicketRepository.Uuids;
+import com.flowdesk.ticket.persistence.Uuids;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -45,6 +49,9 @@ import java.util.function.Supplier;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+/**
+ * 工单模块回归测试，覆盖该组件的正常流程、边界条件与关键一致性约束。
+ */
 @SpringBootTest(
         webEnvironment = SpringBootTest.WebEnvironment.NONE,
         properties = {
@@ -78,12 +85,15 @@ class TicketOutboxPublisherIntegrationTest {
     @Autowired
     private JdbcTemplate jdbc;
     @Autowired
-    private TicketOutboxRepository repository;
+    private WorkflowStartDispatchService repository;
     @Autowired
     private PlatformTransactionManager transactionManager;
     @Autowired
     private ApplicationContext applicationContext;
 
+    /**
+     * 清理控制字符与多余空白，并限制错误摘要长度。
+     */
     @BeforeEach
     void clean() {
         TenantContextHolder.clear();
@@ -92,11 +102,17 @@ class TicketOutboxPublisherIntegrationTest {
         jdbc.update("DELETE FROM workflow_start_link");
     }
 
+    /**
+     * 清理测试线程的租户上下文，避免后续场景继承前一租户。
+     */
     @AfterEach
     void clearContext() {
         TenantContextHolder.clear();
     }
 
+    /**
+     * 验证生产 MQ 适配器和轮询器默认关闭。
+     */
     @Test
     void productionMqAdapterAndPollingWorkerAreDisabledByDefault() {
         assertThat(applicationContext.getBeansOfType(RocketMqTicketOutboxTransport.class))
@@ -107,6 +123,9 @@ class TicketOutboxPublisherIntegrationTest {
                 .isEmpty();
     }
 
+    /**
+     * 验证候选扫描数量有界，并遵守到期时间及领取租约。
+     */
     @Test
     void candidateScanIsBoundedAndHonorsDueTimeAndLease() {
         Instant now = CREATED_AT.plusSeconds(100);
@@ -138,30 +157,33 @@ class TicketOutboxPublisherIntegrationTest {
         insertOutbox(recovery, UUID.randomUUID(), "RECOVERY_REQUIRED", 8,
                 CREATED_AT, null, null, 9, CREATED_AT, null);
 
-        List<TicketOutboxRepository.Candidate> candidates = repository.findCandidates(
+        List<com.flowdesk.ticket.model.outbox.Candidate> candidates = repository.findCandidates(
                 now, now.minusSeconds(30), 50);
 
         assertThat(candidates).hasSize(50);
-        assertThat(candidates).extracting(TicketOutboxRepository.Candidate::outboxId)
+        assertThat(candidates).extracting(com.flowdesk.ticket.model.outbox.Candidate::outboxId)
                 .containsExactlyInAnyOrderElementsOf(expected)
                 .doesNotContain(fiftyFirstDue, future, activeLease, published, recovery);
         assertThat(candidates).filteredOn(candidate -> "PUBLISHING".equals(candidate.status()))
-                .singleElement().extracting(TicketOutboxRepository.Candidate::outboxId)
+                .singleElement().extracting(com.flowdesk.ticket.model.outbox.Candidate::outboxId)
                 .isEqualTo(expiredLease);
     }
 
+    /**
+     * 验证并发领取只有一个成功者，且仅消耗一次尝试。
+     */
     @Test
     void concurrentClaimHasOneWinnerAndConsumesOneAttempt() throws Exception {
         UUID outboxId = UUID.randomUUID();
         insertOutbox(outboxId, UUID.randomUUID(), "PENDING", 0,
                 CREATED_AT, null, null, 0, CREATED_AT, null);
         Instant now = CREATED_AT.plusSeconds(1);
-        TicketOutboxRepository.Candidate candidate = repository.findCandidates(
+        com.flowdesk.ticket.model.outbox.Candidate candidate = repository.findCandidates(
                 now, now.minusSeconds(30), 50).get(0);
         CountDownLatch start = new CountDownLatch(1);
         ExecutorService executor = Executors.newFixedThreadPool(2);
         try {
-            List<Future<TicketOutboxRepository.ClaimedOutbox>> futures = new ArrayList<>();
+            List<Future<com.flowdesk.ticket.model.outbox.ClaimedOutbox>> futures = new ArrayList<>();
             for (int i = 0; i < 2; i++) {
                 futures.add(executor.submit(() -> {
                     start.await();
@@ -178,9 +200,9 @@ class TicketOutboxPublisherIntegrationTest {
                 }));
             }
             start.countDown();
-            List<TicketOutboxRepository.ClaimedOutbox> winners = new ArrayList<>();
-            for (Future<TicketOutboxRepository.ClaimedOutbox> future : futures) {
-                TicketOutboxRepository.ClaimedOutbox claimed = future.get(5, TimeUnit.SECONDS);
+            List<com.flowdesk.ticket.model.outbox.ClaimedOutbox> winners = new ArrayList<>();
+            for (Future<com.flowdesk.ticket.model.outbox.ClaimedOutbox> future : futures) {
+                com.flowdesk.ticket.model.outbox.ClaimedOutbox claimed = future.get(5, TimeUnit.SECONDS);
                 if (claimed != null) {
                     winners.add(claimed);
                 }
@@ -204,6 +226,9 @@ class TicketOutboxPublisherIntegrationTest {
         assertThat(TenantContextHolder.currentOrNull()).isNull();
     }
 
+    /**
+     * 验证发送在领取事务外执行，成功消息字节严格遵循冻结协议。
+     */
     @Test
     void sendOkPublishesExactFrozenWireOutsideTheClaimTransaction() {
         UUID outboxId = UUID.randomUUID();
@@ -269,6 +294,9 @@ class TicketOutboxPublisherIntegrationTest {
         assertThat(TenantContextHolder.currentOrNull()).isNull();
     }
 
+    /**
+     * 验证八次失败遵循固定退避，耗尽后原子创建恢复事实。
+     */
     @Test
     void failuresOneThroughEightUseFrozenBackoffThenCreateAtomicRecovery() {
         UUID outboxId = UUID.randomUUID();
@@ -336,6 +364,9 @@ class TicketOutboxPublisherIntegrationTest {
         assertThat(TenantContextHolder.currentOrNull()).isNull();
     }
 
+    /**
+     * 验证过期租约可被接管，旧执行者无法覆盖新结算。
+     */
     @Test
     void expiredLeaseCanBeReclaimedAndOldCompletionCannotWin() {
         UUID outboxId = UUID.randomUUID();
@@ -343,9 +374,9 @@ class TicketOutboxPublisherIntegrationTest {
         insertOutbox(outboxId, MESSAGE_ID, "PENDING", 0,
                 CREATED_AT, null, null, 0, CREATED_AT, null);
         Instant firstClaimAt = CREATED_AT.plusSeconds(1);
-        TicketOutboxRepository.Candidate candidate = repository.findCandidates(
+        com.flowdesk.ticket.model.outbox.Candidate candidate = repository.findCandidates(
                 firstClaimAt, firstClaimAt.minusSeconds(30), 50).get(0);
-        TicketOutboxRepository.ClaimedOutbox oldClaim = inTenantContext(() ->
+        com.flowdesk.ticket.model.outbox.ClaimedOutbox oldClaim = inTenantContext(() ->
                 new TransactionTemplate(transactionManager).execute(status ->
                         repository.claimForSend(candidate, "old-worker-claim",
                                         firstClaimAt, firstClaimAt.minusSeconds(30))
@@ -384,6 +415,9 @@ class TicketOutboxPublisherIntegrationTest {
         assertThat(oldFailure).isFalse();
     }
 
+    /**
+     * 验证第八次领取过期后直接恢复，不进行第九次发送。
+     */
     @Test
     void expiredEighthClaimConvergesRecoveryWithoutNinthSend() {
         UUID outboxId = UUID.randomUUID();
@@ -411,10 +445,16 @@ class TicketOutboxPublisherIntegrationTest {
                 .isEqualTo(8);
     }
 
+    /**
+     * 装配测试发布器，注入可控传输结果、事务管理器和时钟。
+     */
     private TicketOutboxPublisher publisher(Clock clock, TicketOutboxTransport transport) {
         return new TicketOutboxPublisher(repository, transport, transactionManager, clock);
     }
 
+    /**
+     * 在指定测试租户上下文执行动作，并在结束后清理作用域。
+     */
     private <T> T inTenantContext(Supplier<T> work) {
         TenantContext context = TenantContext.ofPersistedTask(
                 TENANT_ID,
@@ -425,6 +465,9 @@ class TicketOutboxPublisherIntegrationTest {
         }
     }
 
+    /**
+     * 保存测试启动关联，控制发件箱结算前的业务状态。
+     */
     private void insertWorkflowStartLink() {
         jdbc.update("""
                 INSERT INTO workflow_start_link
@@ -438,6 +481,9 @@ class TicketOutboxPublisherIntegrationTest {
                 Timestamp.from(CREATED_AT), Timestamp.from(CREATED_AT), Timestamp.from(CREATED_AT));
     }
 
+    /**
+     * 保存测试发件箱原文和状态，构造待发、耗尽或过期领取场景。
+     */
     private void insertOutbox(UUID outboxId, UUID messageId, String status, int attemptCount,
                               Instant nextAttemptAt, String lockedBy, Instant lockedAt,
                               long lockVersion, Instant createdAt, Instant brokerConfirmedAt) {
@@ -461,6 +507,9 @@ class TicketOutboxPublisherIntegrationTest {
                 Timestamp.from(createdAt), Timestamp.from(createdAt));
     }
 
+    /**
+     * 断言发件箱进入恢复状态，且其关联事实符合预期。
+     */
     private void assertOutboxRecovered(UUID outboxId) {
         Map<String, Object> row = jdbc.queryForMap("""
                 SELECT status, attempt_count, locked_by, locked_at, broker_confirmed_at,
@@ -483,6 +532,9 @@ class TicketOutboxPublisherIntegrationTest {
         assertThat(((Timestamp) row.get("created_at")).toInstant()).isEqualTo(CREATED_AT);
     }
 
+    /**
+     * 核对恢复项状态、来源和数量，保证重复执行未产生多余记录。
+     */
     private void assertRecovery(UUID outboxId, String errorCode, String errorSummary) {
         Map<String, Object> row = jdbc.queryForMap("""
                 SELECT direction, source_record_id, business_intent_key, state, attempt_count,
@@ -500,6 +552,9 @@ class TicketOutboxPublisherIntegrationTest {
         assertThat(row.get("dead_lettered_at")).isNull();
     }
 
+    /**
+     * 读取夹具信封字段，供构造与冻结协议一致的消息。
+     */
     private static Map<String, String> fixtureEnvelopeProperties() {
         Map<String, String> properties = new HashMap<>();
         for (String name : WIRE.stringPropertyNames()) {
@@ -510,6 +565,9 @@ class TicketOutboxPublisherIntegrationTest {
         return properties;
     }
 
+    /**
+     * 读取冻结消息夹具，供编码与实际传输内容逐字段核验。
+     */
     private static Properties loadFixture() {
         Properties properties = new Properties();
         try (InputStream input = TicketOutboxPublisherIntegrationTest.class
@@ -525,6 +583,9 @@ class TicketOutboxPublisherIntegrationTest {
         }
     }
 
+    /**
+     * 读取测试夹具必需字段，缺失时立即失败以避免不完整测试输入。
+     */
     private static String required(String name) {
         String value = WIRE.getProperty(name);
         if (value == null || value.isBlank()) {
@@ -533,10 +594,16 @@ class TicketOutboxPublisherIntegrationTest {
         return value;
     }
 
+    /**
+     * 转换业务标识与规范 UUID 字节表示，遵循既有空值与格式校验约定。
+     */
     private static UUID uuid(String name) {
         return UUID.fromString(required(name));
     }
 
+    /**
+     * 计算输入内容 SHA-256 摘要，供消息完整性和业务意图核验。
+     */
     private static byte[] sha256(byte[] value) {
         try {
             return MessageDigest.getInstance("SHA-256").digest(value);
@@ -546,22 +613,37 @@ class TicketOutboxPublisherIntegrationTest {
         }
     }
 
+    /**
+     * 用于该测试的内部替身，提供可控制的时钟、调度或依赖行为。
+     */
     private static final class MutableClock extends Clock {
         private Instant current;
 
+        /**
+         * 初始化工作流启动发布测试替身，保存当前场景使用的可控状态与依赖。
+         */
         private MutableClock(Instant current) {
             this.current = current;
         }
 
+        /**
+         * 推进可变测试时钟，供精确控制重试到期和领取租约边界。
+         */
         private void set(Instant current) {
             this.current = current;
         }
 
+        /**
+         * 返回测试时钟使用的时区。
+         */
         @Override
         public ZoneId getZone() {
             return ZoneOffset.UTC;
         }
 
+        /**
+         * 按测试时钟约定返回指定时区视图，保持可控时间不变。
+         */
         @Override
         public Clock withZone(ZoneId zone) {
             if (!ZoneOffset.UTC.equals(zone)) {
@@ -570,6 +652,9 @@ class TicketOutboxPublisherIntegrationTest {
             return this;
         }
 
+        /**
+         * 取得当前规范精度时间。
+         */
         @Override
         public Instant instant() {
             return current;

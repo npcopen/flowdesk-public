@@ -1,4 +1,5 @@
 <script setup lang="ts">
+/** 为页面资源提供统一的加载、失败、空数据和正常内容展示。 */
 defineProps<{
   loading?: boolean;
   empty?: boolean;

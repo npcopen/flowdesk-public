@@ -10,9 +10,8 @@ import java.util.Objects;
 import java.util.UUID;
 
 /**
- * Canonical, deliberately small Ticket-owned Notification intent.  The payload
- * contains only a safe title/body and immutable source references; it never
- * carries the Ticket description or an incoming transport body.
+ * 工单侧最小通知意图，只保存安全的标题、正文及不可变来源引用。
+ * 不携带完整工单描述或外来消息体，收件人的通知身份由来源效果进一步派生。
  */
 public final class TicketNotificationIntent {
     public static final String SOURCE_SERVICE = "flowdesk-ticket-service";
@@ -28,9 +27,13 @@ public final class TicketNotificationIntent {
     public static final String SLA_REMINDER = "SLA_REMINDER";
     public static final String SLA_BREACH = "SLA_BREACH";
 
+    /**
+     * 私有构造方法，阻止工具类实例化，调用方应使用静态入口。
+     */
     private TicketNotificationIntent() {
     }
 
+    /** 为具体收件人派生消息、Outbox 和发布身份，并将经过边界处理的文案编码为固定载荷。 */
     public static Intent create(UUID tenantId, UUID recipientUserId, String kind,
                                 byte[] sourceEffectKey, String sourceRefType,
                                 UUID sourceRefId, String title, String body,
@@ -61,8 +64,7 @@ public final class TicketNotificationIntent {
                 occurredAt);
     }
 
-    /** Recipient is part of the child identity; a trigger root is never reused
-     * as a publication key when a reminder/breach fans out to multiple users. */
+    /** 收件人参与子通知身份派生；提醒或超时通知扇出给多个用户时，不能直接复用触发根键作为发布键。 */
     public static byte[] deriveChildIntentKey(UUID tenantId, byte[] triggerEffectKey,
                                                UUID recipientUserId, String kind) {
         Objects.requireNonNull(tenantId, "tenantId");
@@ -74,6 +76,9 @@ public final class TicketNotificationIntent {
                 recipientUserId, kind);
     }
 
+    /**
+     * 从父身份派生子消息发布键，隔离不同用途并保持可重复计算。
+     */
     public static byte[] deriveChildPublicationKey(UUID tenantId, byte[] triggerEffectKey,
                                                     UUID recipientUserId, String kind) {
         Objects.requireNonNull(tenantId, "tenantId");
@@ -85,6 +90,9 @@ public final class TicketNotificationIntent {
                 recipientUserId, kind);
     }
 
+    /**
+     * 将输入限制于约定范围，避免异常参数扩大处理规模。
+     */
     private static String bounded(String value, int max) {
         StringBuilder result = new StringBuilder(Math.min(value.length(), max));
         for (int i = 0; i < value.length() && result.length() < max; i++) {
@@ -103,17 +111,26 @@ public final class TicketNotificationIntent {
         return normalized;
     }
 
+    /**
+     * 转换业务标识与规范 UUID 字节表示，遵循既有空值与格式校验约定。
+     */
     private static UUID uuid(byte[] key) {
         byte[] first = Arrays.copyOf(key, 16);
         ByteBuffer buffer = ByteBuffer.wrap(first);
         return new UUID(buffer.getLong(), buffer.getLong());
     }
 
+    /**
+     * 通知规范意图快照，保存发布所需的业务身份、内容与摘要。
+     */
     public record Intent(UUID outboxId, UUID messageId, byte[] businessIntentKey,
                          byte[] publicationKey, byte[] sourceEffectKey,
                          String sourceRefType, UUID sourceRefId, UUID recipientUserId,
                          String notificationKind, byte[] bodyBytes, byte[] bodySha256,
                          UUID correlationId, UUID causationId, Instant occurredAt) {
+        /**
+         * 保存记录字段，并对可变字节数组作防御性复制，避免调用方修改已构造的业务快照。
+         */
         public Intent {
             businessIntentKey = businessIntentKey.clone();
             publicationKey = publicationKey.clone();
@@ -122,10 +139,25 @@ public final class TicketNotificationIntent {
             bodySha256 = bodySha256.clone();
         }
 
+        /**
+         * 返回业务意图键的防御性副本，避免外部改写已保存的业务事实。
+         */
         @Override public byte[] businessIntentKey() { return businessIntentKey.clone(); }
+        /**
+         * 返回消息发布幂等键的防御性副本，避免外部改写已保存的业务事实。
+         */
         @Override public byte[] publicationKey() { return publicationKey.clone(); }
+        /**
+         * 返回来源副作用键的防御性副本，避免外部改写已保存的业务事实。
+         */
         @Override public byte[] sourceEffectKey() { return sourceEffectKey.clone(); }
+        /**
+         * 返回消息原文字节的防御性副本，避免外部改写已保存的业务事实。
+         */
         @Override public byte[] bodyBytes() { return bodyBytes.clone(); }
+        /**
+         * 返回消息 SHA-256 摘要的防御性副本，避免外部改写已保存的业务事实。
+         */
         @Override public byte[] bodySha256() { return bodySha256.clone(); }
     }
 }

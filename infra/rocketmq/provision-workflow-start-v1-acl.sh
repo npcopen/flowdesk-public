@@ -70,11 +70,25 @@ if [ "${FLOWDESK_ROCKETMQ_M8_ENABLED:-false}" = "true" ]; then
   : "${FLOWDESK_NOTIFICATION_ROCKETMQ_SECRET_KEY:?set FLOWDESK_NOTIFICATION_ROCKETMQ_SECRET_KEY}"
 fi
 
+# 输出当前脚本的稳定失败标记及诊断并退出，阻止后续初始化或验证继续执行。
 fail() {
   printf '%s\n' "FLOWDESK_ROCKETMQ_ACL_PROVISION_FAILED: $*" >&2
   exit 1
 }
 
+# Deployment can provision and read back metadata without publishing probe messages.
+# With no option, retain the existing negative authorization checks.
+provision_only=false
+case "$#" in
+  0) ;;
+  1)
+    [ "$1" = "--provision-only" ] || fail "usage: provision-workflow-start-v1-acl.sh [--provision-only]"
+    provision_only=true
+    ;;
+  *) fail "usage: provision-workflow-start-v1-acl.sh [--provision-only]" ;;
+esac
+
+# 要求配置值仅含 ASCII 字母和数字，拒绝空值及可能破坏配置格式的字符。
 validate_alphanumeric() {
   label="$1"
   value="$2"
@@ -131,6 +145,7 @@ printf 'accessKey: %s\nsecretKey: %s\n' \
   "$FLOWDESK_ROCKETMQ_ADMIN_SECRET_KEY" > ../conf/tools.yml
 
 mqadmin_output=''
+# 执行管理命令并保存输出，同时检查退出码和文本错误标记，避免 mqadmin 返回零仍误报成功。
 run_mqadmin() {
   operation="$1"
   shift
@@ -145,6 +160,7 @@ run_mqadmin() {
   fi
 }
 
+# 解析 Broker 配置键值并要求与冻结 ACL 栈完全一致，避免在不受支持的安全配置上写入授权。
 require_broker_value() {
   key="$1"
   expected="$2"
@@ -179,6 +195,7 @@ require_broker_value "authorizationMetadataProvider" \
 require_broker_value "authorizationStrategy" \
   "org.apache.rocketmq.auth.authorization.strategy.StatefulAuthorizationStrategy"
 
+# 创建或更新业务用户密码，并用独立管理命令确保用户类型为 Normal 且状态启用。
 upsert_user() {
   username="$1"
   password="$2"
@@ -202,6 +219,7 @@ upsert_user() {
     -n "$nameserver" -b "$broker_address" -u "$username" -s enable
 }
 
+# 删除主体已有的整套 ACL，为精确授权重建清场，防止旧通配或多余权限残留。
 reset_acl() {
   subject="$1"
   run_mqadmin "list ACL for $subject" listAcl \
@@ -217,6 +235,7 @@ reset_acl() {
   fi
 }
 
+# 为指定主体、资源及动作创建明确的 Allow 授权，不增加额外资源范围。
 create_acl_entry() {
   subject="$1"
   resources="$2"
@@ -226,6 +245,7 @@ create_acl_entry() {
     -r "$resources" -a "$actions" -d Allow
 }
 
+# 读回用户，确认身份存在且为已启用的 Normal 用户，否则判定授权初始化失败。
 verify_user() {
   username="$1"
   run_mqadmin "verify user $username" getUser \
@@ -238,6 +258,7 @@ verify_user() {
   fi
 }
 
+# 逐项核对指定资源上的 Allow 动作，并恢复字段分隔符，保证每项期望权限都已落地。
 verify_acl_resources() {
   subject="$1"
   resources="$2"
@@ -264,6 +285,7 @@ verify_acl_resources() {
 
 }
 
+# 统计主体实际 ACL 数量，要求与精确预期一致，以发现额外授权。
 verify_acl_count() {
   subject="$1"
   expected_count="$2"
@@ -277,12 +299,17 @@ verify_acl_count() {
     fail "$subject has unexpected additional ACL entries after provision"
 }
 
+# 用指定身份尝试向禁止主题发送探针，要求明确授权拒绝；仅初始化模式跳过探针，模糊结果仍判失败。
 expect_publish_denied() {
   marker="$1"
   label="$2"
   username="$3"
   password="$4"
   topic="$5"
+  if [ "$provision_only" = "true" ]; then
+    printf '%s\n' "FLOWDESK_ROCKETMQ_${marker}_NEGATIVE_ACL_SKIPPED identity=$label topic=$topic mode=provision-only"
+    return
+  fi
   printf 'accessKey: %s\nsecretKey: %s\n' "$username" "$password" > ../conf/tools.yml
   denied_status=0
   denied_output="$(sh mqadmin sendMessage \

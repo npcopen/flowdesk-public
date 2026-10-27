@@ -23,13 +23,9 @@ import java.util.Set;
 import java.util.UUID;
 
 /**
- * Edge guard for the fixed webhook entry before any business side effect.
- *
- * <p>It rejects query strings, wrong method/media type/content encoding, forbidden
- * browser credentials, missing or duplicated security headers, unsupported signature
- * versions and bodies larger than 64 KiB. HMAC verification and nonce/eventId replay
- * protection remain the Alert Service's responsibility; this filter only enforces the
- * protocol envelope while preserving the raw body bytes.</p>
+ * 在产生业务副作用前校验固定 Webhook 入口的请求协议。
+ * 拒绝查询参数、错误方法或媒体类型、浏览器凭据、缺失或重复的安全头、不支持的签名版本及超大请求体。
+ * 保留原始请求体字节；HMAC 验签和 nonce/eventId 防重放由告警服务执行。
  */
 @Component
 public class WebhookRequestGuardFilter implements GlobalFilter, Ordered {
@@ -40,10 +36,17 @@ public class WebhookRequestGuardFilter implements GlobalFilter, Ordered {
             "x-flowdesk-nonce", "x-flowdesk-signature");
     private final FlowDeskGatewayProperties properties;
 
+    /**
+     * 注入网关安全配置，使 Webhook 检查能够读取真实 TLS 等部署要求。
+     */
     public WebhookRequestGuardFilter(FlowDeskGatewayProperties properties) {
         this.properties = properties;
     }
 
+    /**
+     * 按部署开关检查实际 TLS，再校验 POST、无查询参数、UTF-8 JSON、内容编码及唯一的 v1 安全头。
+     * 拒绝 Authorization 和 Cookie，并有界缓冲原始正文；签名真实性与防重放仍由告警服务判定。
+     */
     @Override
     public Mono<Void> filter(ServerWebExchange exchange, GatewayFilterChain chain) {
         String path = exchange.getRequest().getPath().value();
@@ -125,13 +128,22 @@ public class WebhookRequestGuardFilter implements GlobalFilter, Ordered {
                                 "Webhook body 超过 64 KiB。"));
     }
 
+    /**
+     * 设置 Webhook 协议检查顺序，在转发告警服务前拒绝非法请求。
+     */
     @Override
     public int getOrder() {
         return Ordered.HIGHEST_PRECEDENCE + 15;
     }
 
+    /**
+     * 用已缓冲的原始字节流装饰请求，使下游验签与网关检查读取相同载荷。
+     */
     private static ServerHttpRequest buffered(ServerHttpRequest request, Flux<DataBuffer> body) {
         return new ServerHttpRequestDecorator(request) {
+            /**
+             * 返回已缓冲的原始正文流，确保下游验签读取与网关检查相同的字节。
+             */
             @Override
             public Flux<DataBuffer> getBody() {
                 return body;
@@ -139,6 +151,9 @@ public class WebhookRequestGuardFilter implements GlobalFilter, Ordered {
         };
     }
 
+    /**
+     * 提取或补齐关联 UUID，并委托统一网关错误写入器返回协议错误。
+     */
     private static Mono<Void> error(ServerWebExchange exchange,
                                     HttpStatus status,
                                     String code,

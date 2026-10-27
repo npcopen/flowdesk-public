@@ -2,7 +2,7 @@ package com.flowdesk.notification;
 
 import com.flowdesk.common.notification.NotificationEventContract;
 import com.flowdesk.notification.event.NotificationConsumeResult;
-import com.flowdesk.notification.service.NotificationService;
+import com.flowdesk.notification.event.NotificationConsumerService;
 import com.jayway.jsonpath.JsonPath;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -25,7 +25,9 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
-/** M8 recipient isolation, optimistic read state and idempotency API slice. */
+/**
+ * 通知 API 集成测试，验证接收人隔离、读状态版本控制、幂等写入与游标筛选。
+ */
 @SpringBootTest
 @AutoConfigureMockMvc
 class NotificationApiIntegrationTest {
@@ -33,15 +35,21 @@ class NotificationApiIntegrationTest {
     @Autowired
     private MockMvc mockMvc;
     @Autowired
-    private NotificationService service;
+    private NotificationConsumerService service;
     @Autowired
     private JdbcTemplate jdbc;
 
+    /**
+     * 注册当前集成测试所需的隔离数据库、身份密钥和组件配置。
+     */
     @DynamicPropertySource
     static void testProperties(DynamicPropertyRegistry registry) {
         NotificationIntegrationFixtures.properties(registry, "notification-api");
     }
 
+    /**
+     * 清空本测试涉及的持久化表，隔离用例之间的 Inbox、恢复、审计及业务状态。
+     */
     @BeforeEach
     void clean() {
         for (String table : List.of("message_recovery", "audit_record", "inbox_message", "notification")) {
@@ -49,6 +57,9 @@ class NotificationApiIntegrationTest {
         }
     }
 
+    /**
+     * 验证通知接收人隔离、读状态更新及幂等重放同时生效，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void recipientIsolationReadStateAndIdempotencyAreEnforced() throws Exception {
         NotificationIntegrationFixtures.Delivery recipientA = NotificationIntegrationFixtures.delivery(
@@ -135,4 +146,31 @@ class NotificationApiIntegrationTest {
                 .andExpect(jsonPath("$.data.length()").value(1))
                 .andExpect(jsonPath("$.data[0].notificationId").value(notificationA.toString()));
     }
+    /**
+     * 验证Mapper 游标分页保持接收人范围和已绑定筛选条件，并检查相关业务事实或错误响应符合约定。
+     */
+    @Test
+    void mapperCursorPagingKeepsRecipientAndBoundFilters() throws Exception {
+        for (int i = 0; i < 3; i++) {
+            var delivery = NotificationIntegrationFixtures.delivery(NotificationEventContract.TICKET,
+                    NotificationIntegrationFixtures.USER_A, UUID.randomUUID(), "ASSIGNMENT_NOTICE", "notice " + i);
+            assertThat(service.consume(delivery.main())).isEqualTo(NotificationConsumeResult.ack("NOTIFICATION_PROCESSED"));
+        }
+        String auth = "Bearer " + NotificationIntegrationFixtures.userToken(NotificationIntegrationFixtures.USER_A);
+        for (String sort : List.of("createdAt", "-createdAt")) {
+            var first = mockMvc.perform(get("/api/v1/notifications").header("Authorization", auth)
+                    .param("state", "UNREAD").param("notificationKind", "ASSIGNMENT_NOTICE")
+                    .param("pageSize", "1").param("sort", sort))
+                    .andExpect(status().isOk()).andExpect(jsonPath("$.data.length()").value(1)).andReturn();
+            String token = JsonPath.read(first.getResponse().getContentAsString(), "$.meta.page.nextPageToken");
+            String firstId = JsonPath.read(first.getResponse().getContentAsString(), "$.data[0].notificationId");
+            var second = mockMvc.perform(get("/api/v1/notifications").header("Authorization", auth)
+                    .param("state", "UNREAD").param("notificationKind", "ASSIGNMENT_NOTICE")
+                    .param("pageSize", "1").param("sort", sort).param("pageToken", token))
+                    .andExpect(status().isOk()).andExpect(jsonPath("$.data.length()").value(1)).andReturn();
+            String secondId = JsonPath.read(second.getResponse().getContentAsString(), "$.data[0].notificationId");
+            assertThat(secondId).isNotEqualTo(firstId);
+        }
+    }
+
 }

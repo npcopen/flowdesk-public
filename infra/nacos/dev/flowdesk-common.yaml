@@ -1,0 +1,12 @@
+# Namespace: flowdesk-dev | Group: FLOWDESK_GROUP | Data ID: flowdesk-common.yaml
+# Startup-loaded configuration; restart instances after publishing a change.
+# Secrets and key/token file paths are supplied by the deployment, never here.
+flowdesk:
+  configuration:
+    environment: dev
+  security:
+    jwt:
+      clock-skew: PT2S
+logging:
+  level:
+    root: INFO

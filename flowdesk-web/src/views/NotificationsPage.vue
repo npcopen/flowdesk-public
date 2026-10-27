@@ -1,4 +1,5 @@
 <script setup lang="ts">
+/** 维护个人通知的游标分页、已读状态及相关业务资源跳转。 */
 import { computed, onMounted, ref } from "vue";
 import { Bell, Check, CheckCheck, Eye, RefreshCw, X } from "lucide-vue-next";
 import { notificationApi, ticketApi } from "@/api/endpoints";
@@ -22,6 +23,10 @@ const router = useRouter();
 const auth = useAuthStore();
 const openingRelated = ref(false);
 const relatedError = ref<unknown>(null);
+/**
+ * 根据通知关联资源类型和当前权限生成跳转文案。
+ * 没有可访问业务入口时提供相应说明，避免展示不可用操作。
+ */
 function relatedLabel(notification: Notification): string | null {
   if (notification.sourceDomain === "TICKET" && ["TICKET", "SLA_CLOCK"].includes(notification.sourceRefType)
       && auth.canAny(["TICKET_READ_OWN", "TICKET_READ_ASSIGNED", "TICKET_READ_TENANT"])) return "查看工单";
@@ -29,11 +34,16 @@ function relatedLabel(notification: Notification): string | null {
       && auth.canAny(["APPROVAL_READ_ASSIGNED", "WORKFLOW_RUNTIME_READ_TENANT"])) return "查看审批";
   return null;
 }
+/**
+ * 按通知关联资源导航到对应业务页面。
+ * SLA 时钟先解析所属工单，查询或导航失败独立展示，保持通知详情可用。
+ */
 async function openRelated(notification: Notification): Promise<void> {
   if (openingRelated.value || !relatedLabel(notification)) return;
   openingRelated.value = true;
   relatedError.value = null;
   try {
+    // SLA 通知引用的是时钟标识，先由工单服务解析到工单，再跳转详情。
     const id = notification.sourceRefType === "SLA_CLOCK"
       ? (await ticketApi.ticketForSlaClock(notification.sourceRefId)).data.ticketId
       : notification.sourceRefId;
@@ -56,6 +66,10 @@ const selectedNotification = ref<Notification | null>(null);
 const modeText = computed(() => featureNotice(featureFlags.notification));
 const currentToken = ref("");
 
+/**
+ * 读取当前筛选页通知和权威未读总数。
+ * 请求独立处理并区分能力不可用，切换页时清理旧列表防止结果混淆。
+ */
 async function load(token = "", reset = false): Promise<void> {
   loading.value = true;
   error.value = null;
@@ -72,8 +86,7 @@ async function load(token = "", reset = false): Promise<void> {
     tokenStack.value = [];
     selectedNotification.value = null;
   }
-  // A cursor request replaces the visible page. Keeping the previous page
-  // around after a failed request would make it look like current data.
+  // 翻页前清空旧页；新页请求失败时，避免将上一页内容误显示为当前页数据。
   if (!reset) {
     notifications.value = [];
     nextToken.value = null;
@@ -120,15 +133,27 @@ async function load(token = "", reset = false): Promise<void> {
     loading.value = false;
   }
 }
+/**
+ * 重置通知游标并刷新第一页。
+ * 同步重新读取未读总数，保持列表和徽标一致。
+ */
 function refresh(): void {
   void load("", true);
 }
+/**
+ * 记录当前游标并读取下一页通知。
+ * 仅在接口返回后续游标时推进分页。
+ */
 function nextPage(): void {
   if (nextToken.value) {
     tokenStack.value.push(nextToken.value);
     void load(nextToken.value);
   }
 }
+/**
+ * 从游标历史恢复上一页通知。
+ * 继续沿用当前已读状态等筛选条件。
+ */
 function previousPage(): void {
   if (tokenStack.value.length < 2) {
     tokenStack.value = [];
@@ -138,9 +163,17 @@ function previousPage(): void {
   tokenStack.value.pop();
   void load(tokenStack.value[tokenStack.value.length - 1] || "");
 }
+/**
+ * 使用当前页游标重试通知查询。
+ * 保留现有筛选与分页位置，便于临时故障后继续查看。
+ */
 function retryList(): void {
   void load(currentToken.value);
 }
+/**
+ * 切换通知已读状态并提交当前 ETag。
+ * 成功后重新读取权威未读数，避免按当前页条目推算全量统计。
+ */
 async function toggle(notification: Notification): Promise<void> {
   savingId.value = notification.notificationId;
   mutationError.value = null;
@@ -155,8 +188,7 @@ async function toggle(notification: Notification): Promise<void> {
     notification.state = result.data.state;
     notification.readAt = result.data.readAt;
     notification.lockVersion = result.data.lockVersion;
-    // API-056 is authoritative for the whole recipient scope. Do not derive
-    // a total from the current page, which may be only a cursor slice.
+    // 未读总数以汇总接口为准，不能根据当前游标页的数据推算整个收件范围。
     try {
       const countResult = await notificationApi.unreadCount();
       unreadCount.value = countResult.data.unreadCount;
@@ -173,18 +205,25 @@ async function toggle(notification: Notification): Promise<void> {
       }
     }
   } catch (reason) {
-    // A failed write must not hide an otherwise readable list. For a disabled
-    // feature show the rollout notice; all server errors stay actionable.
+    // 修改失败时保留可读列表；区分功能未启用与服务端错误，分别展示能力提示和可处理的错误。
     if (isFeatureUnavailableError(reason)) mutationUnavailable.value = true;
     else mutationError.value = reason;
   } finally {
     savingId.value = null;
   }
 }
+/**
+ * 选中通知并打开详情。
+ * 保留完整通知数据，供展示正文和相关业务入口。
+ */
 function openDetail(notification: Notification): void {
   relatedError.value = null;
   selectedNotification.value = notification;
 }
+/**
+ * 清除当前选中通知并关闭详情。
+ * 列表及其分页状态保持可继续浏览。
+ */
 function closeDetail(): void {
   selectedNotification.value = null;
 }

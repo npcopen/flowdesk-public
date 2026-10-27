@@ -15,12 +15,18 @@ import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+/**
+ * 反向事件冻结样例测试，保证实例建立及审批完成编码与工单侧共享协议一致。
+ */
 class WorkflowReverseV1WireContractFixtureTest {
     private static final String ESTABLISHED =
             "contracts/flowdesk-workflow-instance-established-v1-wire.properties";
     private static final String FINALIZED =
             "contracts/flowdesk-workflow-approval-finalized-v1-wire.properties";
 
+    /**
+     * 验证实例建立编码和绑定与工单共享样例一致，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void instanceEstablishedCodecAndBindingMatchTheSharedTicketFixture() throws Exception {
         Properties fixture = load(ESTABLISHED);
@@ -43,6 +49,9 @@ class WorkflowReverseV1WireContractFixtureTest {
                 WorkflowReverseEventContract.InstanceEstablished.DLQ_ACCEPTOR_GROUP);
     }
 
+    /**
+     * 验证审批完成编码和绑定与工单共享样例一致，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void approvalFinalizedCodecAndBindingMatchTheSharedTicketFixture() throws Exception {
         Properties fixture = load(FINALIZED);
@@ -64,6 +73,9 @@ class WorkflowReverseV1WireContractFixtureTest {
                 WorkflowReverseEventContract.ApprovalFinalized.DLQ_ACCEPTOR_GROUP);
     }
 
+    /**
+     * 验证反向事件传输边界保持冻结值，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void reverseTransportBoundariesRemainExact() {
         assertThat(WorkflowReverseEventContract.SEND_TIMEOUT).isEqualTo(Duration.ofSeconds(5));
@@ -79,6 +91,9 @@ class WorkflowReverseV1WireContractFixtureTest {
                 Duration.ofHours(2)));
     }
 
+    /**
+     * 断言当前场景的冻结样例载荷与摘要，失败时直接报告对应证据差异。
+     */
     private static void assertFixture(byte[] body, Properties fixture, byte[] intent)
             throws Exception {
         assertThat(body).containsExactly(Base64.getDecoder().decode(required(fixture, "body.base64")));
@@ -92,6 +107,9 @@ class WorkflowReverseV1WireContractFixtureTest {
                 .hasSize(32);
     }
 
+    /**
+     * 断言当前场景的Topic、事件及分组绑定，失败时直接报告对应证据差异。
+     */
     private static void assertBinding(Properties fixture, String topic, String event,
                                       String contract, String producerGroup,
                                       String consumerGroup, String acceptorGroup) {
@@ -106,6 +124,9 @@ class WorkflowReverseV1WireContractFixtureTest {
                 .containsEntry("dlq.acceptor.group", acceptorGroup);
     }
 
+    /**
+     * 读取冻结消息资源及属性，为后续传输和摘要断言提供固定输入。
+     */
     private static Properties load(String path) throws Exception {
         Properties value = new Properties();
         try (InputStream input = WorkflowReverseV1WireContractFixtureTest.class
@@ -115,6 +136,9 @@ class WorkflowReverseV1WireContractFixtureTest {
         }
         return value;
     }
+    /**
+     * 读取样例必填属性，缺失时立即使测试失败，避免构造不完整基线。
+     */
     private static String required(Properties fixture, String name) {
         String value = fixture.getProperty(name);
         if (value == null || value.isBlank()) throw new IllegalStateException(name);

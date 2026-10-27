@@ -1,0 +1,398 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+  工作流回传 Inbox 接口，处理重复消息、流程关联、审批结果落库及恢复状态。
+  语句与同名 Java Mapper 方法对应；租户参数、状态条件和并发版本共同限定数据访问。
+-->
+<mapper namespace="com.flowdesk.ticket.reverse.WorkflowReverseInboxPersistenceMapper">
+  <!--
+    将查询列按构造参数映射为 Inbox，参数顺序、字段别名及类型须与对应模型一致。 UUID 字段通过二进制类型处理器转换。
+  -->
+  <resultMap id="Inbox" type="com.flowdesk.ticket.model.reverse.Inbox">
+    <constructor>
+      <arg name="inboxId" column="inbox_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="messageId" column="message_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="intent" column="business_intent_key" javaType="[B"/>
+      <arg name="contractRef" column="contract_ref" javaType="java.lang.String"/>
+      <arg name="contractVersion" column="contract_version" javaType="_int"/>
+      <arg name="body" column="body_bytes" javaType="[B"/>
+      <arg name="bodyHash" column="body_sha256" javaType="[B"/>
+      <arg name="correlationId" column="correlation_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="causationId" column="causation_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="occurredAt" column="occurred_at" javaType="java.time.Instant"/>
+      <arg name="status" column="status" javaType="java.lang.String"/>
+      <arg name="resultType" column="result_type" javaType="java.lang.String"/>
+      <arg name="resultId" column="result_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="attemptCount" column="attempt_count" javaType="_int"/>
+      <arg name="lastErrorCode" column="last_error_code" javaType="java.lang.String"/>
+      <arg name="lockVersion" column="lock_version" javaType="_long"/>
+    </constructor>
+  </resultMap>
+  <!--
+    将查询列按构造参数映射为 Aggregate，参数顺序、字段别名及类型须与对应模型一致。 UUID 字段通过二进制类型处理器转换。
+  -->
+  <resultMap id="Aggregate" type="com.flowdesk.ticket.model.reverse.Aggregate">
+    <constructor>
+      <arg name="ticketId" column="ticket_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="ticketNo" column="ticket_no" javaType="java.lang.String"/>
+      <arg name="ticketStatus" column="ticket_status" javaType="java.lang.String"/>
+      <arg name="definitionId" column="workflow_definition_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="versionId" column="workflow_version_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="versionNo" column="workflow_version_no" javaType="java.lang.Integer"/>
+      <arg name="requesterUserId" column="requester_user_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="assigneeUserId" column="assignee_user_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="firstProcessableAt" column="first_processable_at" javaType="java.time.Instant"/>
+      <arg name="ticketLockVersion" column="ticket_lock_version" javaType="_long"/>
+      <arg name="startIntentKey" column="start_intent_key" javaType="[B"/>
+      <arg name="linkStatus" column="link_status" javaType="java.lang.String"/>
+      <arg name="workflowInstanceId" column="workflow_instance_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="requestedAt" column="requested_at" javaType="java.time.Instant"/>
+      <arg name="establishedAt" column="established_at" javaType="java.time.Instant"/>
+      <arg name="linkLockVersion" column="link_lock_version" javaType="_long"/>
+      <arg name="slaPolicyId" column="sla_policy_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="firstResponseSeconds" column="first_response_seconds" javaType="java.lang.Long"/>
+      <arg name="resolutionSeconds" column="resolution_seconds" javaType="java.lang.Long"/>
+      <arg name="firstResponseReminderSeconds" column="first_response_reminder_before_seconds" javaType="java.lang.Long"/>
+      <arg name="resolutionReminderSeconds" column="resolution_reminder_before_seconds" javaType="java.lang.Long"/>
+      <arg name="policyStatus" column="policy_status" javaType="java.lang.String"/>
+    </constructor>
+  </resultMap>
+  <!--
+    将查询列按构造参数映射为 RecoveryState，参数顺序、字段别名及类型须与对应模型一致。 UUID 字段通过二进制类型处理器转换。
+  -->
+  <resultMap id="RecoveryState" type="com.flowdesk.ticket.model.reverse.RecoveryState">
+    <constructor>
+      <arg name="recoveryId" column="recovery_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="state" column="state" javaType="java.lang.String"/>
+      <arg name="lockVersion" column="lock_version" javaType="_long"/>
+    </constructor>
+  </resultMap>
+  <!--
+    将查询列按构造参数映射为 ClockIdentity，参数顺序、字段别名及类型须与对应模型一致。 UUID 字段通过二进制类型处理器转换。
+  -->
+  <resultMap id="ClockIdentity" type="com.flowdesk.ticket.model.reverse.ClockIdentity">
+    <constructor>
+      <arg name="clockId" column="sla_clock_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="slaPolicyId" column="sla_policy_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="status" column="status" javaType="java.lang.String"/>
+      <arg name="startedAt" column="started_at" javaType="java.time.Instant"/>
+      <arg name="deadlineAt" column="deadline_at" javaType="java.time.Instant"/>
+      <arg name="reminderDueAt" column="reminder_due_at" javaType="java.time.Instant"/>
+      <arg name="duration" column="policy_duration_seconds" javaType="_long"/>
+      <arg name="reminder" column="policy_reminder_before_seconds" javaType="java.lang.Long"/>
+    </constructor>
+  </resultMap>
+  <!--
+    将查询列按构造参数映射为 Timeline，参数顺序、字段别名及类型须与对应模型一致。 UUID 字段通过二进制类型处理器转换。
+  -->
+  <resultMap id="Timeline" type="com.flowdesk.ticket.model.reverse.Timeline">
+    <constructor>
+      <arg name="timelineId" column="timeline_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="eventType" column="event_type" javaType="java.lang.String"/>
+      <arg name="summary" column="summary" javaType="java.lang.String"/>
+      <arg name="relatedRefType" column="related_ref_type" javaType="java.lang.String"/>
+      <arg name="relatedRefId" column="related_ref_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="actorType" column="actor_type" javaType="java.lang.String"/>
+      <arg name="actorId" column="actor_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="occurredAt" column="occurred_at" javaType="java.time.Instant"/>
+      <arg name="correlationId" column="correlation_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="causationId" column="causation_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="effectKey" column="effect_key" javaType="[B"/>
+    </constructor>
+  </resultMap>
+  <!--
+    将查询列按构造参数映射为 RecoveryIdentity，参数顺序、字段别名及类型须与对应模型一致。 UUID 字段通过二进制类型处理器转换。
+  -->
+  <resultMap id="RecoveryIdentity" type="com.flowdesk.ticket.model.reverse.RecoveryIdentity">
+    <constructor>
+      <arg name="recoveryId" column="recovery_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="intent" column="business_intent_key" javaType="[B"/>
+      <arg name="state" column="state" javaType="java.lang.String"/>
+      <arg name="attemptCount" column="attempt_count" javaType="_int"/>
+      <arg name="errorCode" column="last_error_code" javaType="java.lang.String"/>
+      <arg name="summary" column="last_error_summary" javaType="java.lang.String"/>
+    </constructor>
+  </resultMap>
+  <!--
+    将查询列按构造参数映射为 Audit，参数顺序、字段别名及类型须与对应模型一致。 UUID 字段通过二进制类型处理器转换。
+  -->
+  <resultMap id="Audit" type="com.flowdesk.ticket.model.reverse.Audit">
+    <constructor>
+      <arg name="auditId" column="audit_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="actionCode" column="action_code" javaType="java.lang.String"/>
+      <arg name="targetType" column="target_type" javaType="java.lang.String"/>
+      <arg name="targetId" column="target_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="outcome" column="outcome" javaType="java.lang.String"/>
+      <arg name="actorType" column="actor_type" javaType="java.lang.String"/>
+      <arg name="actorId" column="actor_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="reason" column="reason" javaType="java.lang.String"/>
+      <arg name="errorCode" column="error_code" javaType="java.lang.String"/>
+      <arg name="correlationId" column="correlation_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="causationId" column="causation_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+    </constructor>
+  </resultMap>
+  <!--
+    按租户、生产方和消息 ID 查询重复 Inbox，供同一消息的重复投递识别。
+    lock 为 true 时附加 FOR UPDATE，行锁需在事务内使用。
+  -->
+  <select id="findDuplicateSelect" resultMap="Inbox">
+    SELECT inbox_id,message_id,business_intent_key,contract_ref,contract_version,
+       body_bytes,body_sha256,correlation_id,causation_id,occurred_at,status,
+       result_type,result_id,attempt_count,last_error_code,lock_version
+FROM inbox_message  WHERE tenant_id=#{tenantId} AND producer_service=#{producer} AND message_id=#{messageId}<if test="lock"> FOR UPDATE</if>
+  </select>
+  <!--
+    按租户、生产方、契约和业务意图键查询 Inbox，识别消息 ID 不同但业务意图相同的投递。
+    lock 为 true 时附加 FOR UPDATE，行锁需在事务内使用。
+  -->
+  <select id="findDuplicateSelect2" resultMap="Inbox">
+    SELECT inbox_id,message_id,business_intent_key,contract_ref,contract_version,
+       body_bytes,body_sha256,correlation_id,causation_id,occurred_at,status,
+       result_type,result_id,attempt_count,last_error_code,lock_version
+FROM inbox_message  WHERE tenant_id=#{tenantId} AND producer_service=#{producer} AND contract_ref=#{contractRef} AND business_intent_key=#{businessIntentKey}<if test="lock"> FOR UPDATE</if>
+  </select>
+  <!--
+    锁定联查工单、流程启动关联、服务目录和 SLA 策略，供回传消息在同一事务中校验并落库。
+    查询使用 FOR UPDATE 行锁，应在调用方事务内执行。
+  -->
+  <select id="findAggregateSelect" resultMap="Aggregate">
+    SELECT t.ticket_id,t.ticket_no,t.status AS ticket_status,t.workflow_definition_id,
+       t.workflow_version_id,t.workflow_version_no,t.catalog_item_id,
+       t.requester_user_id,t.assignee_user_id,t.first_processable_at,
+       t.lock_version AS ticket_lock_version,
+       l.start_intent_key,l.status AS link_status,l.workflow_instance_id,
+       l.requested_at,l.established_at,COALESCE(l.lock_version,0) AS link_lock_version,
+       c.sla_policy_id,p.first_response_seconds,p.resolution_seconds,
+       p.first_response_reminder_before_seconds,
+       p.resolution_reminder_before_seconds,p.status AS policy_status
+FROM ticket t
+LEFT JOIN workflow_start_link l
+  ON l.tenant_id=t.tenant_id AND l.ticket_id=t.ticket_id
+LEFT JOIN service_catalog_item c
+  ON c.tenant_id=t.tenant_id AND c.catalog_item_id=t.catalog_item_id
+LEFT JOIN sla_policy p
+  ON p.tenant_id=c.tenant_id AND p.sla_policy_id=c.sla_policy_id
+WHERE t.tenant_id=#{tenantId} AND t.ticket_id=#{ticketId}
+FOR UPDATE
+  </select>
+  <!--
+    按关联版本将 REQUESTED 或 RECOVERY_REQUIRED 的流程关联置为 ESTABLISHED，并清除恢复原因。
+    WHERE 同时校验锁版本；受影响行数为 0 时，调用方需处理记录缺失或并发状态变化。
+  -->
+  <update id="establishLinkUpdate" >
+    UPDATE workflow_start_link
+SET status='ESTABLISHED',workflow_instance_id=#{workflowInstanceId},established_at=#{now},
+    recovery_required_at=NULL,recovery_reason_code=NULL,
+    lock_version=lock_version+1,updated_at=#{now2},updated_by_type='SERVICE',
+    updated_by_id=NULL
+WHERE tenant_id=#{tenantId} AND ticket_id=#{ticketId} AND status IN ('REQUESTED','RECOVERY_REQUIRED')
+  AND lock_version=#{linkLockVersion}
+  </update>
+  <!--
+    锁定查询指定工单对应的工作流启动 Outbox 恢复项，供收到流程回传后关闭。
+    查询使用 FOR UPDATE 行锁，应在调用方事务内执行。
+  -->
+  <select id="resolveStartPublicationRecoverySelect" resultMap="RecoveryState">
+    SELECT r.recovery_id,r.state,r.lock_version
+FROM message_recovery r
+JOIN outbox_event o ON o.tenant_id=r.tenant_id AND o.outbox_id=r.source_record_id
+WHERE r.tenant_id=#{tenantId} AND r.direction='OUTBOX'
+  AND o.aggregate_type='TICKET' AND o.aggregate_id=#{ticketId}
+  AND o.contract_ref='flowdesk.workflow.start.v1' AND o.contract_version=1
+FOR UPDATE
+  </select>
+  <!--
+    按读取到的状态及版本完成启动消息恢复项，清除重试时间。
+    WHERE 同时校验锁版本；受影响行数为 0 时，调用方需处理记录缺失或并发状态变化。
+  -->
+  <update id="resolveStartPublicationRecoveryUpdate2" >
+    UPDATE message_recovery
+SET state='RESOLVED',resolved_at=#{now},next_attempt_at=NULL,
+    lock_version=lock_version+1,updated_at=#{now2},updated_by_type='SERVICE',updated_by_id=NULL
+WHERE tenant_id=#{tenantId} AND recovery_id=#{recoveryId} AND state=#{state} AND lock_version=#{lockVersion}
+  </update>
+  <!--
+    按工单版本将待审批工单转为 PENDING_ASSIGNMENT，写入首次可处理时间并保证更新时间递增。
+    WHERE 同时校验锁版本；受影响行数为 0 时，调用方需处理记录缺失或并发状态变化。
+  -->
+  <update id="finalizeTicketUpdate" >
+    UPDATE ticket
+SET status='PENDING_ASSIGNMENT',first_processable_at=#{now},terminal_at=NULL,
+    lock_version=lock_version+1,
+    updated_at=CASE WHEN updated_at >= #{now2}
+        THEN TIMESTAMPADD(MICROSECOND,1,updated_at) ELSE #{now3} END,
+    updated_by_type='SERVICE',
+    updated_by_id=NULL
+WHERE tenant_id=#{tenantId} AND ticket_id=#{ticketId} AND status='AWAITING_APPROVAL'
+  AND lock_version=#{ticketLockVersion}
+  </update>
+  <!--
+    按工单版本将待审批工单转为 APPROVAL_REJECTED，设置终态时间并清除首次可处理时间。
+    WHERE 同时校验锁版本；受影响行数为 0 时，调用方需处理记录缺失或并发状态变化。
+  -->
+  <update id="finalizeTicketUpdate2" >
+    UPDATE ticket
+SET status='APPROVAL_REJECTED',terminal_at=#{now},first_processable_at=NULL,
+    lock_version=lock_version+1,
+    updated_at=CASE WHEN updated_at >= #{now2}
+        THEN TIMESTAMPADD(MICROSECOND,1,updated_at) ELSE #{now3} END,
+    updated_by_type='SERVICE',
+    updated_by_id=NULL
+WHERE tenant_id=#{tenantId} AND ticket_id=#{ticketId} AND status='AWAITING_APPROVAL'
+  AND lock_version=#{ticketLockVersion}
+  </update>
+  <!--
+    检查指定工单和类型是否已有 SLA 时钟，供审批通过后避免重复初始化。
+  -->
+  <select id="insertClockSelect" resultMap="ClockIdentity">
+    SELECT sla_clock_id,sla_policy_id,status,started_at,deadline_at,reminder_due_at,
+       policy_duration_seconds,policy_reminder_before_seconds,updated_at
+FROM sla_clock
+WHERE tenant_id=#{tenantId} AND ticket_id=#{ticketId} AND clock_type=#{type}
+LIMIT 1
+  </select>
+  <!--
+    审批通过后创建 RUNNING SLA 时钟，保存策略时限、提醒时间和截止时间快照。
+  -->
+  <insert id="insertClockUpdate2" >
+    INSERT INTO sla_clock
+  (tenant_id,sla_clock_id,ticket_id,sla_policy_id,clock_type,status,
+   started_at,deadline_at,reminder_due_at,policy_duration_seconds,
+   policy_reminder_before_seconds,milestone_at,breached_at,satisfied_at,
+   lock_version,created_at,created_by_type,created_by_id,
+   updated_at,updated_by_type,updated_by_id)
+VALUES (#{tenantId},#{clockId},#{ticketId},#{slaPolicyId},#{type},'RUNNING',#{started},#{deadline},#{reminderAt},#{duration},#{reminder},NULL,NULL,NULL,0,
+        #{recordedAt},'SERVICE',NULL,#{recordedAt2},'SERVICE',NULL)
+  </insert>
+  <!--
+    按工单和时钟类型回查既有时钟，供插入冲突后校验策略及计时信息。
+  -->
+  <select id="insertClockSelect3" resultMap="ClockIdentity">
+    SELECT sla_clock_id,sla_policy_id,status,started_at,deadline_at,reminder_due_at,
+       policy_duration_seconds,policy_reminder_before_seconds,updated_at
+FROM sla_clock
+WHERE tenant_id=#{tenantId} AND ticket_id=#{ticketId} AND clock_type=#{type}
+LIMIT 1
+  </select>
+  <!--
+    写入关联工作流实例的工单时间线，保留副作用键、业务发生时间及消息链路。
+  -->
+  <insert id="insertTimelineUpdate" >
+    INSERT INTO ticket_timeline_entry
+  (tenant_id,timeline_id,ticket_id,effect_key,event_type,summary,
+   related_ref_type,related_ref_id,actor_type,actor_id,occurred_at,
+   correlation_id,causation_id,created_at)
+ VALUES (#{tenantId},#{timelineId},#{ticketId},#{effectKey},#{event},#{summary},'WORKFLOW_INSTANCE',#{workflowInstanceId},'SERVICE',NULL,#{businessOccurredAt},#{correlationId},#{causationId},#{recordedAt})
+  </insert>
+  <!--
+    按工单和副作用键回查时间线，供审批结果重复投递时核验既有业务效果。
+  -->
+  <select id="findTimelineSelect" resultMap="Timeline">
+    SELECT timeline_id,effect_key,event_type,summary,related_ref_type,related_ref_id,
+       actor_type,actor_id,occurred_at,correlation_id,causation_id
+FROM ticket_timeline_entry
+WHERE tenant_id=#{tenantId} AND ticket_id=#{ticketId} AND effect_key=#{effectKey}
+  </select>
+  <!--
+    保存工作流回传消息原文、摘要、契约和业务处理结果，初始化 Inbox 版本。
+  -->
+  <insert id="insertInboxUpdate" >
+    INSERT INTO inbox_message
+  (tenant_id,inbox_id,producer_service,message_id,business_intent_key,
+   contract_ref,contract_version,body_bytes,body_sha256,correlation_id,
+   causation_id,occurred_at,status,result_type,result_id,attempt_count,
+   last_error_code,first_received_at,last_attempt_at,processed_at,
+   lock_version,created_at,updated_at,updated_by_type,updated_by_id)
+VALUES (#{tenantId},#{stableInboxId},#{producer},#{messageId},#{businessIntentKey},#{contractRef},#{version},#{bodyBytes},#{bodySha256},#{correlationId},#{causationId},#{envelopeOccurredAt},#{status},#{resultType},#{resultId},#{attempts},#{error},#{now},#{now2},#{processedAt},0,#{now3},#{now4},'SERVICE',NULL)
+  </insert>
+  <!--
+    按预期版本将恢复中的 Inbox 置为 PROCESSED，绑定工单结果并记录处理时间。
+    WHERE 同时校验锁版本；受影响行数为 0 时，调用方需处理记录缺失或并发状态变化。
+  -->
+  <update id="completeRecoveredInboxUpdate" >
+    UPDATE inbox_message
+SET status='PROCESSED',result_type='TICKET',result_id=#{ticketId},
+    attempt_count=attempt_count+1,last_error_code=NULL,processed_at=#{now},
+    last_attempt_at=#{now2},lock_version=lock_version+1,updated_at=#{now3},
+    updated_by_type='SERVICE',updated_by_id=NULL
+WHERE tenant_id=#{tenantId} AND inbox_id=#{inboxId} AND status='RECOVERY_REQUIRED' AND lock_version=#{lockVersion}
+  </update>
+  <!--
+    按预期版本将恢复中的 Inbox 置为 REJECTED，记录拒绝码并递增尝试次数。
+    WHERE 同时校验锁版本；受影响行数为 0 时，调用方需处理记录缺失或并发状态变化。
+  -->
+  <update id="rejectRecoveredInboxUpdate" >
+    UPDATE inbox_message
+SET status='REJECTED',attempt_count=attempt_count+1,last_error_code=#{code},
+    processed_at=#{now},last_attempt_at=#{now2},lock_version=lock_version+1,
+    updated_at=#{now3},updated_by_type='SERVICE',updated_by_id=NULL
+WHERE tenant_id=#{tenantId} AND inbox_id=#{inboxId} AND status='RECOVERY_REQUIRED' AND lock_version=#{lockVersion}
+  </update>
+  <!--
+    为失败的工作流回传 Inbox 创建 OPEN 恢复记录，保存业务意图、次数及错误摘要。
+  -->
+  <insert id="insertRecoveryUpdate" >
+    INSERT INTO message_recovery
+  (tenant_id,recovery_id,direction,source_record_id,business_intent_key,
+   state,attempt_count,next_attempt_at,last_error_code,last_error_summary,
+   dead_lettered_at,recovery_required_at,replay_count,resolved_at,
+   lock_version,created_at,updated_at,updated_by_type,updated_by_id)
+VALUES (#{tenantId},#{stableRecoveryId},'INBOX',#{stableInboxId},#{businessIntentKey},'OPEN',#{deliveryAttempts},NULL,#{code},#{summary},NULL,#{now},0,NULL,0,#{now2},#{now3},'SERVICE',NULL)
+  </insert>
+  <!--
+    按 Inbox 来源回查恢复记录身份及错误信息，供重复写入时核验。
+  -->
+  <select id="insertRecoverySelect2" resultMap="RecoveryIdentity">
+    SELECT recovery_id,business_intent_key,state,attempt_count,last_error_code,
+       last_error_summary
+FROM message_recovery
+WHERE tenant_id=#{tenantId} AND direction='INBOX' AND source_record_id=#{stableInboxId}
+  </select>
+  <!--
+    锁定读取 Inbox 对应恢复项的当前状态及版本。
+    查询使用 FOR UPDATE 行锁，应在调用方事务内执行。
+  -->
+  <select id="resolveRecoverySelect" resultMap="RecoveryState">
+    SELECT recovery_id,state,lock_version
+FROM message_recovery
+WHERE tenant_id=#{tenantId} AND direction='INBOX' AND source_record_id=#{inboxId}
+FOR UPDATE
+  </select>
+  <!--
+    按当前状态和版本将 Inbox 恢复项置为 RESOLVED，并清除重试时间。
+    WHERE 同时校验锁版本；受影响行数为 0 时，调用方需处理记录缺失或并发状态变化。
+  -->
+  <update id="resolveRecoveryUpdate2" >
+    UPDATE message_recovery
+SET state='RESOLVED',resolved_at=#{now},next_attempt_at=NULL,
+    lock_version=lock_version+1,updated_at=#{now2},updated_by_type='SERVICE',updated_by_id=NULL
+WHERE tenant_id=#{tenantId} AND recovery_id=#{recoveryId} AND state=#{state} AND lock_version=#{lockVersion}
+  </update>
+  <!--
+    按租户和 Inbox ID 读取回传消息及处理结果，供重放与重复消费检查。
+    lock 为 true 时附加 FOR UPDATE，行锁需在事务内使用。
+  -->
+  <select id="findInboxSelect" resultMap="Inbox">
+    SELECT inbox_id,message_id,business_intent_key,contract_ref,contract_version,
+       body_bytes,body_sha256,correlation_id,causation_id,occurred_at,status,
+       result_type,result_id,attempt_count,last_error_code,lock_version
+FROM inbox_message  WHERE tenant_id=#{tenantId} AND inbox_id=#{inboxId}<if test="lock"> FOR UPDATE</if>
+  </select>
+  <!--
+    保存工作流回传影响工单的服务操作审计，记录业务结果、错误及消息链路。
+  -->
+  <insert id="insertAuditUpdate" >
+    INSERT INTO audit_record
+  (tenant_id,audit_id,action_code,target_type,target_id,outcome,
+   actor_type,actor_id,reason,error_code,correlation_id,causation_id,occurred_at)
+VALUES (#{tenantId},#{auditId},#{action},'TICKET',#{targetId},#{outcome},'SERVICE',NULL,#{reason},#{error},#{correlationId},#{causationId},#{now})
+  </insert>
+  <!--
+    按租户和审计 ID 读取审计内容，供重复消息处理时核对既有操作。
+  -->
+  <select id="findAuditSelect" resultMap="Audit">
+    SELECT audit_id,action_code,target_type,target_id,outcome,actor_type,actor_id,
+       reason,error_code,correlation_id,causation_id
+FROM audit_record WHERE tenant_id=#{tenantId} AND audit_id=#{auditId}
+  </select>
+</mapper>

@@ -15,8 +15,8 @@ import java.util.List;
 import java.util.UUID;
 
 /**
- * Gateway edge JWT first check (ARCH-DEC-005). Target services still re-verify the same
- * token locally; this filter never adds any internal trust header.
+ * 网关入口的人类 JWT 首次校验。
+ * 目标业务服务仍须本地复验同一令牌；网关不会添加可绕过验签的内部信任头。
  */
 @Component
 public class JwtEdgeVerificationFilter implements GlobalFilter, Ordered {
@@ -24,11 +24,17 @@ public class JwtEdgeVerificationFilter implements GlobalFilter, Ordered {
     private final JwtVerifier verifier;
     private final Scheduler verificationScheduler;
 
+    /**
+     * 注入 JWT 验证器和专用验签调度器，避免后续 RSA 校验占用网关事件循环。
+     */
     public JwtEdgeVerificationFilter(JwtVerifier verifier, Scheduler verificationScheduler) {
         this.verifier = verifier;
         this.verificationScheduler = verificationScheduler;
     }
 
+    /**
+     * 对受保护的人类 API 提前验签，在独立调度器执行 RSA 校验，失败返回 401，成功继续路由。
+     */
     @Override
     public Mono<Void> filter(ServerWebExchange exchange, GatewayFilterChain chain) {
         String path = exchange.getRequest().getPath().value();
@@ -41,7 +47,7 @@ public class JwtEdgeVerificationFilter implements GlobalFilter, Ordered {
             return GatewayErrorWriter.write(exchange, HttpStatus.UNAUTHORIZED,
                     "AUTHENTICATION_REQUIRED", "缺少人类 Bearer 身份。", correlationId);
         }
-        // RSA verification is CPU-bound and must not run on the Netty event loop.
+        // RSA 验签占用 CPU，使用独立调度器以免阻塞 Netty 事件循环。
         Mono<Boolean> verified = Mono.fromCallable(() -> {
             verifier.verifyHuman(token);
             return true;
@@ -55,11 +61,17 @@ public class JwtEdgeVerificationFilter implements GlobalFilter, Ordered {
                 });
     }
 
+    /**
+     * 设置边缘 JWT 检查顺序，确保受保护请求在业务路由前完成认证。
+     */
     @Override
     public int getOrder() {
         return Ordered.HIGHEST_PRECEDENCE + 30;
     }
 
+    /**
+     * 仅从唯一 Authorization 头提取 Bearer，重复头或格式不符返回 null。
+     */
     private static String bearerToken(ServerWebExchange exchange) {
         List<String> headers = exchange.getRequest().getHeaders().get("Authorization");
         if (headers == null || headers.size() != 1) {
@@ -72,13 +84,16 @@ public class JwtEdgeVerificationFilter implements GlobalFilter, Ordered {
         return header.substring("Bearer ".length()).trim();
     }
 
+    /**
+     * 从请求头读取 UUID，缺失或非法时生成新标识用于认证错误响应。
+     */
     private static UUID correlationId(ServerWebExchange exchange) {
         List<String> values = exchange.getRequest().getHeaders().get("X-Correlation-Id");
         if (values != null && values.size() == 1) {
             try {
                 return UUID.fromString(values.get(0));
             } catch (IllegalArgumentException ignored) {
-                // fall through
+                // 格式无效时使用下方新生成的追踪标识。
             }
         }
         return UUID.randomUUID();

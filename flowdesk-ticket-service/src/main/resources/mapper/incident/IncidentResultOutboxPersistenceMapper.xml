@@ -1,0 +1,244 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+  事件建单结果 Outbox 接口，负责候选扫描、发送认领、结果确认及失败恢复。
+  语句与同名 Java Mapper 方法对应；租户参数、状态条件和并发版本共同限定数据访问。
+-->
+<mapper namespace="com.flowdesk.ticket.incident.IncidentResultOutboxPersistenceMapper">
+  <!--
+    将查询列按构造参数映射为 Candidate，参数顺序、字段别名及类型须与对应模型一致。 UUID 字段通过二进制类型处理器转换。
+  -->
+  <resultMap id="Candidate" type="com.flowdesk.ticket.model.incident.result.Candidate">
+    <constructor>
+      <arg name="tenantId" column="tenant_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="outboxId" column="outbox_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="status" column="status" javaType="java.lang.String"/>
+      <arg name="attemptCount" column="attempt_count" javaType="_int"/>
+      <arg name="lockedBy" column="locked_by" javaType="java.lang.String"/>
+      <arg name="correlationId" column="correlation_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="lockVersion" column="lock_version" javaType="_long"/>
+    </constructor>
+  </resultMap>
+  <!--
+    将查询列按构造参数映射为 Claimed，参数顺序、字段别名及类型须与对应模型一致。 UUID 字段通过二进制类型处理器转换。
+  -->
+  <resultMap id="Claimed" type="com.flowdesk.ticket.model.incident.result.Claimed">
+    <constructor>
+      <arg name="tenantId" column="tenant_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="outboxId" column="outbox_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="messageId" column="message_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="publicationKey" column="publication_key" javaType="[B"/>
+      <arg name="intent" column="business_intent_key" javaType="[B"/>
+      <arg name="incidentId" column="aggregate_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="body" column="body_bytes" javaType="[B"/>
+      <arg name="hash" column="body_sha256" javaType="[B"/>
+      <arg name="correlationId" column="correlation_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="causationId" column="causation_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="attemptCount" column="attempt_count" javaType="_int"/>
+      <arg name="token" column="locked_by" javaType="java.lang.String"/>
+      <arg name="lockedAt" column="locked_at" javaType="java.time.Instant"/>
+      <arg name="lockVersion" column="lock_version" javaType="_long"/>
+      <arg name="createdAt" column="created_at" javaType="java.time.Instant"/>
+    </constructor>
+  </resultMap>
+  <!--
+    将查询列按构造参数映射为 RecoveryState，参数顺序、字段别名及类型须与对应模型一致。 UUID 字段通过二进制类型处理器转换。
+  -->
+  <resultMap id="RecoveryState" type="com.flowdesk.ticket.model.incident.result.RecoveryState">
+    <constructor>
+      <arg name="recoveryId" column="recovery_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="intent" column="business_intent_key" javaType="[B"/>
+      <arg name="state" column="state" javaType="java.lang.String"/>
+      <arg name="attemptCount" column="attempt_count" javaType="_int"/>
+      <arg name="errorCode" column="last_error_code" javaType="java.lang.String"/>
+      <arg name="summary" column="last_error_summary" javaType="java.lang.String"/>
+      <arg name="lockVersion" column="lock_version" javaType="_long"/>
+    </constructor>
+  </resultMap>
+  <!--
+    将查询列按构造参数映射为 AuditState，参数顺序、字段别名及类型须与对应模型一致。 UUID 字段通过二进制类型处理器转换。
+  -->
+  <resultMap id="AuditState" type="com.flowdesk.ticket.model.incident.result.AuditState">
+    <constructor>
+      <arg name="action" column="action_code" javaType="java.lang.String"/>
+      <arg name="targetType" column="target_type" javaType="java.lang.String"/>
+      <arg name="targetId" column="target_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="outcome" column="outcome" javaType="java.lang.String"/>
+      <arg name="actorType" column="actor_type" javaType="java.lang.String"/>
+      <arg name="actorId" column="actor_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="reason" column="reason" javaType="java.lang.String"/>
+      <arg name="errorCode" column="error_code" javaType="java.lang.String"/>
+      <arg name="correlationId" column="correlation_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="causationId" column="causation_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+    </constructor>
+  </resultMap>
+  <!--
+    跨租户扫描契约匹配的到期 PENDING 或租约过期 PUBLISHING 消息，按待处理时间、租户和 ID 限量排序。
+  -->
+  <select id="candidatesSelect" resultMap="Candidate">
+    SELECT tenant_id,outbox_id,status,attempt_count,locked_by,correlation_id,lock_version
+FROM outbox_event
+WHERE contract_ref=#{establishedContractRef} AND contract_version=#{version} AND aggregate_type='INCIDENT'
+  AND attempt_count&lt;=#{maxAttempts}
+  AND ((status='PENDING' AND next_attempt_at&lt;=#{now})
+       OR (status='PUBLISHING' AND locked_at&lt;=#{cutoff}))
+ORDER BY CASE WHEN status='PENDING' THEN next_attempt_at ELSE locked_at END,
+         tenant_id,outbox_id
+LIMIT #{outboxMaxClaims}
+  </select>
+  <!--
+    认领已到期的 PENDING 消息，写入发送令牌和租约时间，并递增发送次数与锁版本。
+    WHERE 同时校验锁版本；受影响行数为 0 时，调用方需处理记录缺失或并发状态变化。
+  -->
+  <update id="claimUpdate" >
+    UPDATE outbox_event
+SET status='PUBLISHING',attempt_count=attempt_count+1,
+    locked_by=#{token},locked_at=#{now},lock_version=lock_version+1,
+    updated_at=#{now2},updated_by_type='SERVICE',updated_by_id=NULL
+WHERE tenant_id=#{tenantId} AND outbox_id=#{outboxId} AND status='PENDING'
+  AND attempt_count=#{attemptCount} AND attempt_count&lt;#{maxAttempts} AND lock_version=#{lockVersion}
+  AND next_attempt_at&lt;=#{now3}
+  </update>
+  <!--
+    接管租约已过期的 PUBLISHING 消息，核对原令牌、次数和版本后重新认领并增加发送次数。
+    WHERE 同时校验锁版本；受影响行数为 0 时，调用方需处理记录缺失或并发状态变化。
+  -->
+  <update id="claimUpdate2" >
+    UPDATE outbox_event
+SET attempt_count=attempt_count+1,locked_by=#{token},locked_at=#{now},
+    lock_version=lock_version+1,updated_at=#{now2},updated_by_type='SERVICE',
+    updated_by_id=NULL
+WHERE tenant_id=#{tenantId} AND outbox_id=#{outboxId} AND status='PUBLISHING'
+  AND attempt_count=#{attemptCount} AND attempt_count&lt;#{maxAttempts} AND locked_by=#{lockedBy}
+  AND lock_version=#{lockVersion} AND locked_at&lt;=#{cutoff}
+  </update>
+  <!--
+    认领已达自动发送上限的到期 PENDING 消息，供进入恢复流程；不再增加发送次数。
+    WHERE 同时校验锁版本；受影响行数为 0 时，调用方需处理记录缺失或并发状态变化。
+  -->
+  <update id="claimRecoveryUpdate" >
+    UPDATE outbox_event
+SET status='PUBLISHING',locked_by=#{token},locked_at=#{now},lock_version=lock_version+1,
+    updated_at=#{now2},updated_by_type='SERVICE',updated_by_id=NULL
+WHERE tenant_id=#{tenantId} AND outbox_id=#{outboxId} AND status='PENDING'
+  AND attempt_count=#{maxAttempts} AND lock_version=#{lockVersion} AND next_attempt_at&lt;=#{now3}
+  </update>
+  <!--
+    接管已达发送上限且租约过期的 PUBLISHING 消息，供恢复处理；不再增加发送次数。
+    WHERE 同时校验锁版本；受影响行数为 0 时，调用方需处理记录缺失或并发状态变化。
+  -->
+  <update id="claimRecoveryUpdate2" >
+    UPDATE outbox_event
+SET locked_by=#{token},locked_at=#{now},lock_version=lock_version+1,
+    updated_at=#{now2},updated_by_type='SERVICE',updated_by_id=NULL
+WHERE tenant_id=#{tenantId} AND outbox_id=#{outboxId} AND status='PUBLISHING'
+  AND attempt_count=#{maxAttempts} AND locked_by=#{lockedBy} AND lock_version=#{lockVersion} AND locked_at&lt;=#{cutoff}
+  </update>
+  <!--
+    按租户、消息 ID、发送次数、令牌和版本读取仍处于 PUBLISHING 的消息正文，确认当前任务持有发送权。
+  -->
+  <select id="claimedSelect" resultMap="Claimed">
+    SELECT tenant_id,outbox_id,message_id,publication_key,business_intent_key,
+       aggregate_id,body_bytes,body_sha256,correlation_id,causation_id,
+       attempt_count,locked_by,locked_at,lock_version,created_at
+FROM outbox_event
+WHERE tenant_id=#{tenantId} AND outbox_id=#{outboxId} AND status='PUBLISHING'
+  AND attempt_count=#{attempt} AND locked_by=#{token} AND lock_version=#{version}
+  </select>
+  <!--
+    在发送令牌、次数、版本和有效租约均匹配时确认 PUBLISHED，记录 Broker 确认时间并清除租约。
+    WHERE 同时校验锁版本；受影响行数为 0 时，调用方需处理记录缺失或并发状态变化。
+  -->
+  <update id="publishedUpdate" >
+    UPDATE outbox_event
+SET status='PUBLISHED',locked_by=NULL,locked_at=NULL,last_error_code=NULL,
+    broker_confirmed_at=#{now},lock_version=lock_version+1,updated_at=#{now2},
+    updated_by_type='SERVICE',updated_by_id=NULL
+WHERE tenant_id=#{tenantId} AND outbox_id=#{outboxId} AND status='PUBLISHING'
+  AND attempt_count=#{attemptCount} AND locked_by=#{token} AND lock_version=#{lockVersion} AND locked_at>#{cutoff}
+  </update>
+  <!--
+    按预期锁版本将 REPLAYING 恢复项置为 RESOLVED，记录完成时间并清除重试时间。
+    WHERE 同时校验锁版本；受影响行数为 0 时，调用方需处理记录缺失或并发状态变化。
+  -->
+  <update id="resolveReplayRecoveryUpdate" >
+    UPDATE message_recovery
+SET state='RESOLVED',resolved_at=#{now},next_attempt_at=NULL,
+    lock_version=lock_version+1,updated_at=#{now2},updated_by_type='SERVICE',updated_by_id=NULL
+WHERE tenant_id=#{tenantId} AND recovery_id=#{recoveryId} AND state='REPLAYING' AND lock_version=#{lockVersion}
+  </update>
+  <!--
+    在当前发送租约仍有效时退回 PENDING，保存错误码及下次尝试时间并释放租约。
+    WHERE 同时校验锁版本；受影响行数为 0 时，调用方需处理记录缺失或并发状态变化。
+  -->
+  <update id="pendingUpdate" >
+    UPDATE outbox_event
+SET status='PENDING',next_attempt_at=#{next},locked_by=NULL,locked_at=NULL,
+    last_error_code=#{safeCode},broker_confirmed_at=NULL,lock_version=lock_version+1,
+    updated_at=#{now},updated_by_type='SERVICE',updated_by_id=NULL
+WHERE tenant_id=#{tenantId} AND outbox_id=#{outboxId} AND status='PUBLISHING'
+  AND attempt_count=#{attemptCount} AND locked_by=#{token} AND lock_version=#{lockVersion} AND locked_at>#{cutoff}
+  </update>
+  <!--
+    在当前发送租约有效且次数达到上限时，将事件结果消息转为 RECOVERY_REQUIRED。
+    WHERE 同时校验锁版本；受影响行数为 0 时，调用方需处理记录缺失或并发状态变化。
+  -->
+  <update id="recoverUpdate" >
+    UPDATE outbox_event
+SET status='RECOVERY_REQUIRED',next_attempt_at=#{now},locked_by=NULL,locked_at=NULL,
+    last_error_code=#{safeCode},broker_confirmed_at=NULL,lock_version=lock_version+1,
+    updated_at=#{now2},updated_by_type='SERVICE',updated_by_id=NULL
+WHERE tenant_id=#{tenantId} AND outbox_id=#{outboxId} AND status='PUBLISHING'
+  AND attempt_count=#{maxAttempts} AND locked_by=#{token} AND lock_version=#{lockVersion} AND locked_at>#{cutoff}
+  </update>
+  <!--
+    按预期版本将重放失败的事件结果恢复项重新置为 OPEN，更新错误摘要。
+    WHERE 同时校验锁版本；受影响行数为 0 时，调用方需处理记录缺失或并发状态变化。
+  -->
+  <update id="ensureRecoveryUpdate" >
+    UPDATE message_recovery
+SET state='OPEN',last_error_code=#{code},last_error_summary=#{summary},resolved_at=NULL,
+    next_attempt_at=NULL,lock_version=lock_version+1,updated_at=#{now},
+    updated_by_type='SERVICE',updated_by_id=NULL
+WHERE tenant_id=#{tenantId} AND recovery_id=#{recoveryId} AND state='REPLAYING' AND lock_version=#{lockVersion}
+  </update>
+  <!--
+    为事件结果 Outbox 创建 OPEN 恢复记录，保留业务意图、发送上限及失败原因。
+  -->
+  <insert id="ensureRecoveryUpdate2" >
+    INSERT INTO message_recovery
+  (tenant_id,recovery_id,direction,source_record_id,business_intent_key,state,
+   attempt_count,next_attempt_at,last_error_code,last_error_summary,dead_lettered_at,
+   recovery_required_at,replay_count,last_replay_correlation_id,resolved_at,
+   lock_version,created_at,updated_at,updated_by_type,updated_by_id)
+VALUES (#{tenantId},#{recoveryId},'OUTBOX',#{outboxId},#{intent},'OPEN',#{maxAttempts},NULL,#{code},#{summary},NULL,#{now},0,NULL,NULL,0,#{now2},#{now3},'SERVICE',NULL)
+  </insert>
+  <!--
+    写入事件结果消息进入恢复的失败审计，审计 ID 由调用方用于重复写入识别。
+  -->
+  <insert id="insertAuditOnceUpdate" >
+    INSERT INTO audit_record
+  (tenant_id,audit_id,action_code,target_type,target_id,outcome,actor_type,actor_id,
+   reason,error_code,correlation_id,causation_id,occurred_at)
+VALUES (#{tenantId},#{auditId},'INCIDENT_RESULT_OUTBOX_RECOVERY_REQUIRED','MESSAGE_RECOVERY',#{outboxId},
+        'FAILED','SERVICE',NULL,#{summary},#{code},#{correlationId}, #{causationId},#{now})
+  </insert>
+  <!--
+    按 Outbox 来源读取事件结果恢复记录，供重复记录校验及重放状态处理。
+    lock 为 true 时附加 FOR UPDATE，行锁需在事务内使用。
+  -->
+  <select id="findRecoverySelect" resultMap="RecoveryState">
+    SELECT recovery_id,business_intent_key,state,attempt_count,last_error_code,
+       last_error_summary,lock_version
+FROM message_recovery
+WHERE tenant_id=#{tenantId} AND direction='OUTBOX' AND source_record_id=#{outboxId} <if test="lock"> FOR UPDATE</if>
+  </select>
+  <!--
+    读取既有事件结果恢复审计，供核验重复操作的动作、目标和链路。
+  -->
+  <select id="findAuditSelect" resultMap="AuditState">
+    SELECT action_code,target_type,target_id,outcome,actor_type,actor_id,
+       reason,error_code,correlation_id,causation_id
+FROM audit_record WHERE tenant_id=#{tenantId} AND audit_id=#{auditId}
+  </select>
+</mapper>

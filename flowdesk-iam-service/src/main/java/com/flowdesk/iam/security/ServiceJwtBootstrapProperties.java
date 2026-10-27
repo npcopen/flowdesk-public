@@ -7,12 +7,8 @@ import java.util.ArrayList;
 import java.util.List;
 
 /**
- * Optional local/bootstrap service-JWT issuance configuration.
- *
- * <p>Disabled by default. When enabled, {@code mappings} entries use the form
- * {@code tenantId:serviceId}. The default preserves the one-shot bootstrap mode;
- * local long-running IAM processes can disable {@code exit-after-issue} and rotate
- * the files before the short-lived service JWTs expire. Tokens are never logged.</p>
+ * 本地环境可选的服务 JWT 文件签发配置，默认关闭；映射格式为 tenantId:serviceId。
+ * 默认签发一次后退出；常驻模式按刷新间隔轮换，且不记录令牌内容。
  */
 @ConfigurationProperties(prefix = "flowdesk.iam.service-jwt-bootstrap")
 public class ServiceJwtBootstrapProperties {
@@ -23,26 +19,44 @@ public class ServiceJwtBootstrapProperties {
     private String outputDirectory = ".data/service-tokens";
     private List<String> mappings = new ArrayList<>();
 
+    /**
+     * 返回组件启用开关，供组件组装或运行时判断使用。
+     */
     public boolean isEnabled() {
         return enabled;
     }
 
+    /**
+     * 更新组件启用开关，供 Spring 配置绑定及组件初始化使用。
+     */
     public void setEnabled(boolean enabled) {
         this.enabled = enabled;
     }
 
+    /**
+     * 返回签发 JWT 后退出应用的开关，供组件组装或运行时判断使用。
+     */
     public boolean isExitAfterIssue() {
         return exitAfterIssue;
     }
 
+    /**
+     * 更新签发 JWT 后退出应用的开关，供 Spring 配置绑定及组件初始化使用。
+     */
     public void setExitAfterIssue(boolean exitAfterIssue) {
         this.exitAfterIssue = exitAfterIssue;
     }
 
+    /**
+     * 返回服务 JWT 轮换间隔，供组件组装或运行时判断使用。
+     */
     public Duration getRefreshInterval() {
         return refreshInterval;
     }
 
+    /**
+     * 设置服务 JWT 轮换周期并要求为正时长，启动签发后还会与令牌剩余有效期比较。
+     */
     public void setRefreshInterval(Duration refreshInterval) {
         if (refreshInterval == null || refreshInterval.isZero() || refreshInterval.isNegative()) {
             throw new IllegalArgumentException("service-jwt-bootstrap refresh-interval must be positive");
@@ -50,10 +64,16 @@ public class ServiceJwtBootstrapProperties {
         this.refreshInterval = refreshInterval;
     }
 
+    /**
+     * 返回服务 JWT 文件输出目录，供组件组装或运行时判断使用。
+     */
     public String getOutputDirectory() {
         return outputDirectory;
     }
 
+    /**
+     * 更新服务 JWT 文件输出目录，供 Spring 配置绑定及组件初始化使用。
+     */
     public void setOutputDirectory(String outputDirectory) {
         if (outputDirectory == null || outputDirectory.isBlank()) {
             throw new IllegalArgumentException("service-jwt-bootstrap output-directory must not be blank");
@@ -61,10 +81,16 @@ public class ServiceJwtBootstrapProperties {
         this.outputDirectory = outputDirectory;
     }
 
+    /**
+     * 返回租户与服务身份映射列表，供组件组装或运行时判断使用。
+     */
     public List<String> getMappings() {
         return mappings;
     }
 
+    /**
+     * 更新租户与服务身份映射列表，供 Spring 配置绑定及组件初始化使用。
+     */
     public void setMappings(List<String> mappings) {
         this.mappings = mappings == null ? new ArrayList<>() : new ArrayList<>(mappings);
     }

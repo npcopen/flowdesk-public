@@ -14,6 +14,9 @@ public sealed interface ActorRef permits ActorRef.Human, ActorRef.Service, Actor
 
     /** 人类操作者：IAM 权威用户标识。 */
     record Human(UUID userId) implements ActorRef {
+        /**
+         * 要求非空用户 UUID，建立人类操作者的不可变引用。
+         */
         public Human {
             Objects.requireNonNull(userId, "userId");
         }
@@ -21,6 +24,9 @@ public sealed interface ActorRef permits ActorRef.Human, ActorRef.Service, Actor
 
     /** 受认证服务主体：部署单元名（如 flowdesk-ticket-service）。 */
     record Service(String serviceId) implements ActorRef {
+        /**
+         * 要求非空且非空白的服务名，避免建立无法归属的服务操作者。
+         */
         public Service {
             Objects.requireNonNull(serviceId, "serviceId");
             if (serviceId.isBlank()) {
@@ -31,6 +37,9 @@ public sealed interface ActorRef permits ActorRef.Human, ActorRef.Service, Actor
 
     /** Webhook 集成主体：唯一通过全量验签的 MonitoringIntegration 标识。 */
     record Integration(UUID integrationId) implements ActorRef {
+        /**
+         * 要求非空集成 UUID，建立已认证 Webhook 集成的操作者引用。
+         */
         public Integration {
             Objects.requireNonNull(integrationId, "integrationId");
         }

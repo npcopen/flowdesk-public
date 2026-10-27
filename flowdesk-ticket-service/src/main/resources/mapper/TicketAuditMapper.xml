@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper
+  PUBLIC '-//mybatis.org//DTD Mapper 3.0//EN'
+  'https://mybatis.org/dtd/mybatis-3-mapper.dtd'>
+<!--
+  工单审计持久化接口，记录操作主体、业务结果及请求链路信息。
+  语句与同名 Java Mapper 方法对应；租户参数、状态条件和并发版本共同限定数据访问。
+-->
+<mapper namespace="com.flowdesk.ticket.mapper.TicketAuditMapper">
+  <!--
+    将查询列按构造参数映射为 AuditRow，参数顺序、字段别名及类型须与对应模型一致。 UUID 字段通过二进制类型处理器转换。
+  -->
+  <resultMap id="AuditRow" type="com.flowdesk.ticket.model.AuditRow">
+    <constructor>
+      <arg name="auditId" column="audit_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="actionCode" column="action_code" javaType="java.lang.String"/>
+      <arg name="targetType" column="target_type" javaType="java.lang.String"/>
+      <arg name="targetId" column="target_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="outcome" column="outcome" javaType="java.lang.String"/>
+      <arg name="actorType" column="actor_type" javaType="java.lang.String"/>
+      <arg name="actorId" column="actor_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="reason" column="reason" javaType="java.lang.String"/>
+      <arg name="errorCode" column="error_code" javaType="java.lang.String"/>
+      <arg name="correlationId" column="correlation_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="causationId" column="causation_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="occurredAt" column="occurred_at" javaType="java.time.Instant"/>
+      <arg name="recordedAt" column="recorded_at" javaType="java.time.Instant"/>
+    </constructor>
+  </resultMap>
+  <!--
+    写入工单操作审计，保存操作主体、结果、错误信息、关联链路及业务发生时间和记录时间。
+  -->
+  <insert id="insertAudit">
+    <bind name="recordTime" value="recordedAt == null ? occurredAt : recordedAt"/>
+    INSERT INTO audit_record
+  (tenant_id, audit_id, action_code, target_type, target_id, outcome,
+   actor_type, actor_id, reason, error_code, correlation_id, causation_id,
+   occurred_at, recorded_at)
+ VALUES (#{tenantId}, #{auditId}, #{actionCode}, #{targetType}, #{targetId}, #{outcome}, #{actorType}, #{actorId}, #{reason}, #{errorCode}, #{correlationId}, #{causationId}, #{occurredAt}, #{recordTime})
+  </insert>
+  <!--
+    按租户和审计 ID 读取审计详情，供查询操作结果或验证重复操作使用。
+  -->
+  <select id="findAudit" resultMap="AuditRow">
+    SELECT audit_id, action_code, target_type, target_id, outcome,
+       actor_type, actor_id, reason, error_code, correlation_id,
+       causation_id, occurred_at, recorded_at
+FROM audit_record
+WHERE tenant_id = #{tenantId} AND audit_id = #{auditId}
+  </select>
+</mapper>

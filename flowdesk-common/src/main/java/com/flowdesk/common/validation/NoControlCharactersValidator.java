@@ -3,7 +3,9 @@ package com.flowdesk.common.validation;
 import jakarta.validation.ConstraintValidator;
 import jakarta.validation.ConstraintValidatorContext;
 
-/** Validator implementation for {@link NoControlCharacters}. */
+/**
+ * {@link NoControlCharacters} 的约束校验实现。
+ */
 public final class NoControlCharactersValidator
         implements ConstraintValidator<NoControlCharacters, CharSequence> {
 
@@ -11,6 +13,9 @@ public final class NoControlCharactersValidator
     private static final int LF = 0x0A;
     private static final int CR = 0x0D;
 
+    /**
+     * 按 Unicode 码点扫描文本，允许制表符及换行符，拒绝其他 ISO 控制字符；null 交由独立非空约束处理。
+     */
     @Override
     public boolean isValid(CharSequence value, ConstraintValidatorContext context) {
         if (value == null) {

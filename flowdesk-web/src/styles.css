@@ -1,3 +1,4 @@
+/** 全局布局、基础组件及响应式样式，供业务页面保持一致的视觉规则。 */
 :root {
   font-family: Inter, "Noto Sans SC", "Microsoft YaHei", system-ui, sans-serif;
   color: #17212b;

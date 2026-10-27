@@ -1,0 +1,195 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+  工单消息恢复持久化接口，提供恢复列表、来源读取、重放状态及操作审计。
+  语句与同名 Java Mapper 方法对应；租户参数、状态条件和并发版本共同限定数据访问。
+-->
+<mapper namespace="com.flowdesk.ticket.recovery.TicketRecoveryPersistenceMapper">
+  <!--
+    将查询列按构造参数映射为 Recovery，参数顺序、字段别名及类型须与对应模型一致。 UUID 字段通过二进制类型处理器转换。
+  -->
+  <resultMap id="Recovery" type="com.flowdesk.ticket.model.recovery.Recovery">
+    <constructor>
+      <arg name="recoveryId" column="recovery_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="direction" column="direction" javaType="java.lang.String"/>
+      <arg name="sourceRecordId" column="source_record_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="businessIntentKey" column="business_intent_key" javaType="[B"/>
+      <arg name="state" column="state" javaType="java.lang.String"/>
+      <arg name="attemptCount" column="attempt_count" javaType="_int"/>
+      <arg name="nextAttemptAt" column="next_attempt_at" javaType="java.time.Instant"/>
+      <arg name="lastErrorCode" column="last_error_code" javaType="java.lang.String"/>
+      <arg name="lastErrorSummary" column="last_error_summary" javaType="java.lang.String"/>
+      <arg name="deadLetteredAt" column="dead_lettered_at" javaType="java.time.Instant"/>
+      <arg name="recoveryRequiredAt" column="recovery_required_at" javaType="java.time.Instant"/>
+      <arg name="replayCount" column="replay_count" javaType="_int"/>
+      <arg name="lastReplayedAt" column="last_replayed_at" javaType="java.time.Instant"/>
+      <arg name="lastReplayedByType" column="last_replayed_by_type" javaType="java.lang.String"/>
+      <arg name="lastReplayedById" column="last_replayed_by_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="lastReplayReason" column="last_replay_reason" javaType="java.lang.String"/>
+      <arg name="lastReplayCorrelationId" column="last_replay_correlation_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="resolvedAt" column="resolved_at" javaType="java.time.Instant"/>
+      <arg name="lockVersion" column="lock_version" javaType="_long"/>
+      <arg name="createdAt" column="created_at" javaType="java.time.Instant"/>
+      <arg name="updatedAt" column="updated_at" javaType="java.time.Instant"/>
+    </constructor>
+  </resultMap>
+  <!--
+    将查询列按构造参数映射为 InboxSource，参数顺序、字段别名及类型须与对应模型一致。 UUID 字段通过二进制类型处理器转换。
+  -->
+  <resultMap id="InboxSource" type="com.flowdesk.ticket.model.recovery.InboxSource">
+    <constructor>
+      <arg name="inboxId" column="inbox_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="messageId" column="message_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="businessIntentKey" column="business_intent_key" javaType="[B"/>
+      <arg name="contractRef" column="contract_ref" javaType="java.lang.String"/>
+      <arg name="contractVersion" column="contract_version" javaType="_int"/>
+      <arg name="bodyBytes" column="body_bytes" javaType="[B"/>
+      <arg name="bodySha256" column="body_sha256" javaType="[B"/>
+      <arg name="correlationId" column="correlation_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="causationId" column="causation_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="occurredAt" column="occurred_at" javaType="java.time.Instant"/>
+      <arg name="status" column="status" javaType="java.lang.String"/>
+      <arg name="lockVersion" column="lock_version" javaType="_long"/>
+    </constructor>
+  </resultMap>
+  <!--
+    将查询列按构造参数映射为 OutboxSource，参数顺序、字段别名及类型须与对应模型一致。 UUID 字段通过二进制类型处理器转换。
+  -->
+  <resultMap id="OutboxSource" type="com.flowdesk.ticket.model.recovery.OutboxSource">
+    <constructor>
+      <arg name="outboxId" column="outbox_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="contractRef" column="contract_ref" javaType="java.lang.String"/>
+      <arg name="contractVersion" column="contract_version" javaType="_int"/>
+      <arg name="ticketId" column="aggregate_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="correlationId" column="correlation_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="status" column="status" javaType="java.lang.String"/>
+      <arg name="lockVersion" column="lock_version" javaType="_long"/>
+      <arg name="linkStatus" column="link_status" javaType="java.lang.String"/>
+      <arg name="linkLockVersion" column="link_lock_version" javaType="_long"/>
+    </constructor>
+  </resultMap>
+  <!--
+    将查询列按构造参数映射为 Audit，参数顺序、字段别名及类型须与对应模型一致。 UUID 字段通过二进制类型处理器转换。
+  -->
+  <resultMap id="Audit" type="com.flowdesk.ticket.model.recovery.Audit">
+    <constructor>
+      <arg name="action" column="action_code" javaType="java.lang.String"/>
+      <arg name="targetId" column="target_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="outcome" column="outcome" javaType="java.lang.String"/>
+      <arg name="actorType" column="actor_type" javaType="java.lang.String"/>
+      <arg name="actorId" column="actor_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="reason" column="reason" javaType="java.lang.String"/>
+      <arg name="errorCode" column="error_code" javaType="java.lang.String"/>
+      <arg name="correlationId" column="correlation_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="causationId" column="causation_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+    </constructor>
+  </resultMap>
+  <!--
+    按租户和恢复 ID 读取恢复详情，包含来源方向、重放信息和锁版本。
+    lock 为 true 时附加 FOR UPDATE，行锁需在事务内使用。
+  -->
+  <select id="findSelect" resultMap="Recovery">
+    SELECT recovery_id,direction,source_record_id,business_intent_key,state,
+       attempt_count,next_attempt_at,last_error_code,last_error_summary,
+       dead_lettered_at,recovery_required_at,replay_count,last_replayed_at,
+       last_replayed_by_type,last_replayed_by_id,last_replay_reason,
+       last_replay_correlation_id,resolved_at,lock_version,created_at,updated_at
+FROM message_recovery WHERE tenant_id=#{tenantId} AND recovery_id=#{recoveryId} <if test="lock"> FOR UPDATE</if>
+  </select>
+  <!--
+    按方向、状态、死信标记、错误码和时间范围筛选恢复项，以选定时间列和恢复 ID 组成游标分页。
+  -->
+  <select id="listSelect" resultMap="Recovery">
+    SELECT recovery_id,direction,source_record_id,business_intent_key,state,attempt_count,next_attempt_at,last_error_code,last_error_summary,dead_lettered_at,recovery_required_at,replay_count,last_replayed_at,last_replayed_by_type,last_replayed_by_id,last_replay_reason,last_replay_correlation_id,resolved_at,lock_version,created_at,updated_at FROM message_recovery WHERE tenant_id=#{tenantId} <if test="direction != null"> AND direction=#{direction}</if><if test="state != null"> AND state=#{state}</if><if test="deadLettered != null"><choose><when test="deadLettered"> AND dead_lettered_at IS NOT NULL</when><otherwise> AND dead_lettered_at IS NULL</otherwise></choose></if><if test="error != null"> AND last_error_code=#{error}</if><if test="from != null"> AND recovery_required_at &gt;= #{from}</if><if test="to != null"> AND recovery_required_at &lt;= #{to}</if><if test="deadSort"> AND dead_lettered_at IS NOT NULL</if><if test="cursorTime != null"> AND (<choose><when test="deadSort">dead_lettered_at</when><otherwise>recovery_required_at</otherwise></choose><choose><when test="ascending"> &gt; </when><otherwise> &lt; </otherwise></choose>#{cursorTime} OR (<choose><when test="deadSort">dead_lettered_at</when><otherwise>recovery_required_at</otherwise></choose>=#{cursorTime} AND recovery_id<choose><when test="ascending"> &gt; </when><otherwise> &lt; </otherwise></choose>#{cursorId}))</if> ORDER BY <choose><when test="deadSort">dead_lettered_at</when><otherwise>recovery_required_at</otherwise></choose><choose><when test="ascending"> ASC</when><otherwise> DESC</otherwise></choose>,recovery_id<choose><when test="ascending"> ASC</when><otherwise> DESC</otherwise></choose> LIMIT #{limit}
+  </select>
+  <!--
+    锁定读取恢复项对应的 Inbox 原文、契约及状态，供沿原消费路径重放。
+    lock 为 true 时附加 FOR UPDATE，行锁需在事务内使用。
+  -->
+  <select id="inboxSourceSelect" resultMap="InboxSource">
+    SELECT inbox_id,message_id,business_intent_key,contract_ref,contract_version,
+       body_bytes,body_sha256,correlation_id,causation_id,occurred_at,status,lock_version
+FROM inbox_message WHERE tenant_id=#{tenantId} AND inbox_id=#{inboxId} <if test="lock"> FOR UPDATE</if>
+  </select>
+  <!--
+    锁定读取 Outbox 来源，并联查工单流程启动关联状态及版本，供受控重放。
+    lock 为 true 时附加 FOR UPDATE，行锁需在事务内使用。
+  -->
+  <select id="outboxSourceSelect" resultMap="OutboxSource">
+    SELECT o.outbox_id,o.contract_ref,o.contract_version,o.aggregate_id,
+       o.correlation_id,o.status,o.lock_version,
+       l.status AS link_status,COALESCE(l.lock_version,0) AS link_lock_version
+FROM outbox_event o
+LEFT JOIN workflow_start_link l ON l.tenant_id=o.tenant_id
+  AND l.ticket_id=o.aggregate_id
+WHERE o.tenant_id=#{tenantId} AND o.outbox_id=#{outboxId} <if test="lock"> FOR UPDATE</if>
+  </select>
+  <!--
+    按审计 ID 查询恢复操作记录，供识别重复请求并核验已有操作意图。
+  -->
+  <select id="auditSelect" resultMap="Audit">
+    SELECT action_code,target_id,outcome,actor_type,actor_id,reason,error_code,
+       correlation_id,causation_id FROM audit_record
+WHERE tenant_id=#{tenantId} AND audit_id=#{auditId}
+  </select>
+  <!--
+    按预期版本将 RECOVERY_REQUIRED 消息重新置为 PENDING，清零发送次数和错误信息以启动重放。
+    WHERE 同时校验锁版本；受影响行数为 0 时，调用方需处理记录缺失或并发状态变化。
+  -->
+  <update id="acceptOutboxUpdate" >
+    UPDATE outbox_event SET status='PENDING',attempt_count=0,next_attempt_at=#{now},
+    locked_by=NULL,locked_at=NULL,last_error_code=NULL,broker_confirmed_at=NULL,
+    lock_version=lock_version+1,updated_at=#{now2},updated_by_type='SERVICE',updated_by_id=NULL
+WHERE tenant_id=#{tenantId} AND outbox_id=#{outboxId} AND status='RECOVERY_REQUIRED' AND lock_version=#{lockVersion}
+  </update>
+  <!--
+    按预期关联版本将 RECOVERY_REQUIRED 流程启动关联退回 REQUESTED，记录发起重放的用户。
+    WHERE 同时校验锁版本；受影响行数为 0 时，调用方需处理记录缺失或并发状态变化。
+  -->
+  <update id="acceptOutboxUpdate2" >
+    UPDATE workflow_start_link SET status='REQUESTED',
+    lock_version=lock_version+1,updated_at=#{now},
+    updated_by_type='USER',updated_by_id=#{actorId}
+WHERE tenant_id=#{tenantId} AND ticket_id=#{ticketId} AND status='RECOVERY_REQUIRED' AND lock_version=#{linkLockVersion}
+  </update>
+  <!--
+    按来源方向、来源 ID 和锁版本将 OPEN 恢复项置为 REPLAYING，记录重放用户、原因、关联 ID 和租约。
+    WHERE 同时校验锁版本；受影响行数为 0 时，调用方需处理记录缺失或并发状态变化。
+  -->
+  <update id="markReplayingUpdate" >
+    UPDATE message_recovery SET state='REPLAYING',next_attempt_at=#{replayLeaseUntil},
+    replay_count=replay_count+1,last_replayed_at=#{now},last_replayed_by_type='USER',
+    last_replayed_by_id=#{actorId},last_replay_reason=#{reason},last_replay_correlation_id=#{attemptCorrelation},
+    lock_version=lock_version+1,updated_at=#{now2},updated_by_type='USER',updated_by_id=#{actorId2}
+WHERE tenant_id=#{tenantId} AND recovery_id=#{recoveryId} AND direction=#{direction} AND source_record_id=#{sourceRecordId}
+  AND state='OPEN' AND lock_version=#{lockVersion}
+  </update>
+  <!--
+    仅当本次重放关联 ID 和租约截止时间仍匹配时，将未达到终态的恢复项退回 OPEN。
+  -->
+  <update id="reopenUpdate" >
+    UPDATE message_recovery SET state='OPEN',next_attempt_at=NULL,last_error_code=#{error},
+    last_error_summary='Controlled same-path replay did not reach a local terminal result.',
+    lock_version=lock_version+1,updated_at=#{now},updated_by_type='SERVICE',updated_by_id=NULL
+WHERE tenant_id=#{tenantId} AND recovery_id=#{recoveryId} AND state='REPLAYING'
+  AND last_replay_correlation_id=#{attemptCorrelation} AND next_attempt_at=#{leaseUntil}
+  </update>
+  <!--
+    仅当本次关联 ID 和租约匹配时，完成 Inbox 方向的 REPLAYING 恢复项并清除租约。
+  -->
+  <update id="resolveTerminalUpdate" >
+    UPDATE message_recovery SET state='RESOLVED',next_attempt_at=NULL,resolved_at=#{now},
+    lock_version=lock_version+1,updated_at=#{now2},updated_by_type='SERVICE',updated_by_id=NULL
+WHERE tenant_id=#{tenantId} AND recovery_id=#{recoveryId} AND direction='INBOX' AND state='REPLAYING'
+  AND last_replay_correlation_id=#{attemptCorrelation} AND next_attempt_at=#{leaseUntil}
+  </update>
+  <!--
+    保存用户对消息恢复项的操作审计，记录动作、结果、原因及请求链路。
+  -->
+  <insert id="insertAuditUpdate" >
+    INSERT INTO audit_record
+  (tenant_id,audit_id,action_code,target_type,target_id,outcome,actor_type,
+   actor_id,reason,error_code,correlation_id,causation_id,occurred_at)
+VALUES (#{tenantId},#{auditId},#{action},'MESSAGE_RECOVERY',#{recoveryId},#{outcome},'USER',#{actorId},#{reason},#{error},#{correlation},#{causation},#{now})
+  </insert>
+</mapper>

@@ -30,6 +30,9 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+/**
+ * 工作流恢复 API 集成测试，覆盖恢复路由可见性、权限、版本及原 Outbox 重排队。
+ */
 @SpringBootTest(properties = {
         "flowdesk.workflow.start.entry.enabled=true",
         "flowdesk.workflow.start.consumer.enabled=false"
@@ -47,6 +50,9 @@ class WorkflowRecoveryApiIntegrationTest {
     @Autowired MockMvc mockMvc;
     @Autowired JdbcTemplate jdbc;
 
+    /**
+     * 注册测试专用数据库、密钥和开关配置，使应用上下文使用隔离依赖。
+     */
     @DynamicPropertySource
     static void properties(DynamicPropertyRegistry registry) {
         registry.add("flowdesk.security.jwt.public-key-pem", WorkflowRecoveryApiIntegrationTest::pem);
@@ -62,6 +68,9 @@ class WorkflowRecoveryApiIntegrationTest {
         registry.add("spring.sql.init.schema-locations", () -> "classpath:schema-test.sql");
     }
 
+    /**
+     * 清空本测试涉及的持久化表，隔离用例之间的 Inbox、恢复、审计及业务状态。
+     */
     @BeforeEach
     void clean() {
         for (String table : List.of("message_recovery", "audit_record", "inbox_message",
@@ -71,6 +80,9 @@ class WorkflowRecoveryApiIntegrationTest {
         }
     }
 
+    /**
+     * 验证Outbox 恢复按租户可读且只重新排队原始事实，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void workflowOutboxRecoveryIsReadableTenantScopedAndQueuesOnlyItsOriginalFact()
             throws Exception {
@@ -136,6 +148,9 @@ class WorkflowRecoveryApiIntegrationTest {
                 """, Integer.class, uuid(TENANT_A))).isEqualTo(1);
     }
 
+    /**
+     * 建立当前测试场景的持久化前置事实，保留指定租户、身份和状态供后续业务路径验证。
+     */
     private void seedOutboxRecovery(UUID tenant, UUID outbox, UUID recovery, UUID message,
                                     byte[] body, String contract) {
         UUID instance = UUID.randomUUID();
@@ -162,6 +177,9 @@ class WorkflowRecoveryApiIntegrationTest {
                 """, uuid(tenant), uuid(recovery), uuid(outbox), intent);
     }
 
+    /**
+     * 建立当前测试场景的持久化前置事实，保留指定租户、身份和状态供后续业务路径验证。
+     */
     private void seedRecoveryOnly(UUID tenant, UUID recovery, UUID source) {
         jdbc.update("""
                 INSERT INTO message_recovery
@@ -173,35 +191,62 @@ class WorkflowRecoveryApiIntegrationTest {
                 """, uuid(tenant), uuid(recovery), uuid(source), bytes(3));
     }
 
+    /**
+     * 签发当前场景需要的测试身份令牌，固定租户、角色与最小权限供真实认证路径校验。
+     */
     private String adminToken() {
         return ISSUER.issueHuman(TENANT_A, ADMIN, Set.of(RoleCode.SERVICE_DESK_ADMIN), Set.of(
                 PermissionCode.RECOVERY_READ_TENANT,
                 PermissionCode.RECOVERY_REPLAY_TENANT)).token();
     }
+    /**
+     * 签发当前场景需要的测试身份令牌，固定租户、角色与最小权限供真实认证路径校验。
+     */
     private String requesterToken() {
         return ISSUER.issueHuman(TENANT_A, REQUESTER, Set.of(RoleCode.REQUESTER),
                 Set.of(PermissionCode.TICKET_READ_OWN)).token();
     }
+    /**
+     * 为测试令牌添加 Bearer 认证前缀，供真实 HTTP 安全过滤链读取。
+     */
     private static String bearer(String token) { return "Bearer " + token; }
+    /**
+     * 在 UUID 与持久化表示之间转换，保持标识高低位的编码顺序一致。
+     */
     private static byte[] uuid(UUID value) { return WorkflowIdempotencyCodec.uuidBytes(value); }
+    /**
+     * 构造按固定字节填充的测试数组，用于生成可重复的摘要、意图键和非法内容变体。
+     */
     private static byte[] bytes(int seed) {
         byte[] value = new byte[32];
         java.util.Arrays.fill(value, (byte) seed);
         return value;
     }
+    /**
+     * 计算输入字节的 SHA-256 摘要，用于内容一致性核对及稳定业务键派生。
+     */
     private static byte[] sha256(byte[] body) {
         try { return MessageDigest.getInstance("SHA-256").digest(body); }
         catch (Exception impossible) { throw new IllegalStateException(impossible); }
     }
+    /**
+     * 生成测试专用 RSA 密钥对，供真实 JWT 编码和认证断言复用。
+     */
     private static KeyPair keyPair() {
         try { return KeyPairGenerator.getInstance("RSA").generateKeyPair(); }
         catch (Exception failure) { throw new IllegalStateException(failure); }
     }
+    /**
+     * 将测试 RSA 公钥包装为 PEM 文本，供动态配置绑定。
+     */
     private static String pem() {
         return "-----BEGIN PUBLIC KEY-----\n"
                 + Base64.getEncoder().encodeToString(KEYS.getPublic().getEncoded())
                 + "\n-----END PUBLIC KEY-----";
     }
+    /**
+     * 生成固定测试游标签名密钥，使翻页编码与验签可重复。
+     */
     private static String cursorKey() {
         return Base64.getEncoder().encodeToString(
                 "0123456789abcdef0123456789abcdef".getBytes(StandardCharsets.UTF_8));

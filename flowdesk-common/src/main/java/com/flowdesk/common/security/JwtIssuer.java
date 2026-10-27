@@ -19,10 +19,8 @@ import java.util.Objects;
 import java.util.UUID;
 
 /**
- * IAM-only JWT issuer.
- *
- * <p>Uses RS256 (RSA PKCS#1 v1.5 signature with SHA-256) and only exists in the IAM
- * deployment unit. Verifiers accept RS256 only and never HMAC/HS algorithms.</p>
+ * 仅供 IAM 使用的 JWT 签发器。
+ * 采用 RS256（RSA PKCS#1 v1.5 + SHA-256）；验签方也仅接受 RS256，不接受 HMAC 算法。
  */
 public final class JwtIssuer {
 
@@ -33,6 +31,9 @@ public final class JwtIssuer {
     private final long humanTtlSeconds;
     private final long serviceTtlSeconds;
 
+    /**
+     * 保存 RSA 签名私钥、签发方及两类受众，要求人类和服务令牌的有效时长均为正数。
+     */
     public JwtIssuer(PrivateKey privateKey,
                      String issuer,
                      String humanAudience,
@@ -50,6 +51,9 @@ public final class JwtIssuer {
         this.serviceTtlSeconds = serviceTtlSeconds;
     }
 
+    /**
+     * 校验身份及角色权限集合，按角色上限裁剪权限并排序去重，再签发带独立标识和到期时间的人类 JWT。
+     */
     public IssuedJwt issueHuman(UUID tenantId,
                                 UUID userId,
                                 Collection<RoleCode> roles,
@@ -89,6 +93,9 @@ public final class JwtIssuer {
         return sign(claims, expiresAt);
     }
 
+    /**
+     * 签发指定租户的服务 JWT，使用服务专属受众且不写入人类权限；空白服务名直接拒绝。
+     */
     public IssuedJwt issueService(UUID tenantId, String serviceId) {
         Objects.requireNonNull(tenantId, "tenantId");
         Objects.requireNonNull(serviceId, "serviceId");
@@ -110,6 +117,9 @@ public final class JwtIssuer {
         return sign(claims, expiresAt);
     }
 
+    /**
+     * 使用 RSA 私钥和 RS256 对声明签名，返回序列化令牌和到期时间，失败时抛出内部状态异常。
+     */
     private IssuedJwt sign(JWTClaimsSet claims, Instant expiresAt) {
         try {
             JWSHeader header = new JWSHeader.Builder(JWSAlgorithm.RS256)

@@ -29,7 +29,15 @@ import DashboardPage from './DashboardPage.vue'
 import ApprovalDetailPage from './ApprovalDetailPage.vue'
 import NotificationsPage from './NotificationsPage.vue'
 
+/**
+ * 构造单资源 API 测试结果。
+ * 附带当前资源 ETag 和基础元数据，供页面测试验证并发条件及详情读取。
+ */
 const result = (data: unknown) => ({ data, headers: new Headers({ ETag: '"lv:0"' }), meta: {} })
+/**
+ * 构造分页集合的 API 测试结果。
+ * 保留条目及下一页游标结构，供列表加载与分页行为断言使用。
+ */
 const list = (items: unknown[] = []) => ({ items, meta: { page: { nextPageToken: null } } })
 const task = { approvalTaskId: 'task-1', workflowInstanceId: 'instance-1', approverUserId: 'approver-1', levelNo: 1, status: 'PENDING', lockVersion: 0 }
 const context = { ticketId: 'ticket-1', ticketNo: 'FD-001', subject: '生产系统权限申请', description: '需要临时只读权限，使用两小时。', status: 'AWAITING_APPROVAL', catalogName: '数据库访问', requesterUserId: 'requester-1', createdAt: '2026-09-07T08:00:00Z' }

@@ -13,11 +13,9 @@ import java.util.List;
 import java.util.UUID;
 
 /**
- * Normalizes X-Correlation-Id for every request.
- *
- * <p>Public entry semantics are owned by Gateway, but each service also runs this filter
- * so direct calls still receive a safe tracing id. Service-internal paths are strict:
- * malformed/duplicated correlation is a protocol error (ERR-015).</p>
+ * 为每个请求规范化 X-Correlation-Id。
+ * Gateway 定义公开入口规则，各业务服务也执行本地检查以支持直接调用；
+ * 内部服务路径严格拒绝格式错误或重复的关联标识，避免破坏调用链追踪。
  */
 public class CorrelationIdFilter extends OncePerRequestFilter {
 
@@ -25,15 +23,24 @@ public class CorrelationIdFilter extends OncePerRequestFilter {
     private final List<String> strictPaths;
     private final ObjectMapper mapper;
 
+    /**
+     * 复制严格路径配置并保存 JSON 映射器，简化重载使用默认映射器输出错误响应。
+     */
     public CorrelationIdFilter(List<String> strictPaths) {
         this(strictPaths, new ObjectMapper());
     }
 
+    /**
+     * 复制严格路径配置并保存 JSON 映射器，简化重载使用默认映射器输出错误响应。
+     */
     public CorrelationIdFilter(List<String> strictPaths, ObjectMapper mapper) {
         this.strictPaths = List.copyOf(strictPaths);
         this.mapper = mapper;
     }
 
+    /**
+     * 校验或生成关联 UUID，严格路径拒绝缺失或歧义请求头，再把选定标识写入请求属性及响应头。
+     */
     @Override
     protected void doFilterInternal(HttpServletRequest request,
                                     HttpServletResponse response,
@@ -64,6 +71,9 @@ public class CorrelationIdFilter extends OncePerRequestFilter {
         filterChain.doFilter(request, response);
     }
 
+    /**
+     * 判断 URI 是否命中必须严格校验关联标识的路径模式。
+     */
     private boolean isStrict(String uri) {
         for (String pattern : strictPaths) {
             if (pathMatcher.match(pattern, uri)) {
@@ -73,6 +83,9 @@ public class CorrelationIdFilter extends OncePerRequestFilter {
         return false;
     }
 
+    /**
+     * 检查标识是否具有合法 UUID 格式，格式错误时返回 false。
+     */
     private static boolean isUuid(String value) {
         if (value == null || value.length() != 36) {
             return false;
@@ -85,6 +98,9 @@ public class CorrelationIdFilter extends OncePerRequestFilter {
         }
     }
 
+    /**
+     * 将请求头枚举复制为列表，便于检测重复头及单值协议。
+     */
     private static List<String> list(java.util.Enumeration<String> enumeration) {
         java.util.ArrayList<String> values = new java.util.ArrayList<>();
         while (enumeration.hasMoreElements()) {

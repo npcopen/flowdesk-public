@@ -16,19 +16,30 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.UUID;
 
-/** Canonical payload and identity helpers for the M8 notification wire. */
+/**
+ * 通知消息的规范化编解码与身份工具，统一消息摘要、受保护属性和持久化标识的计算方式。
+ */
 public final class NotificationWireCodec {
     private static final ObjectMapper JSON = new ObjectMapper();
     private static final DateTimeFormatter MICROS = new java.time.format.DateTimeFormatterBuilder()
             .appendInstant(6).toFormatter();
 
+    /**
+     * 禁止直接实例化该工具类型，统一通过静态方法或工厂入口使用。
+     */
     private NotificationWireCodec() {
     }
 
+    /**
+     * 通知消息的不可变契约数据，包含接收人、业务效果键、来源引用及展示正文。
+     */
     public record Payload(String schemaVersion, UUID recipientUserId,
                           String notificationKind, String sourceEffectKey,
                           String sourceRefType, UUID sourceRefId,
                           String title, String body) {
+        /**
+         * 校验通知必需字段均非空，并将缺失或空白 schemaVersion 规范为版本 1。
+         */
         public Payload {
             Objects.requireNonNull(recipientUserId, "recipientUserId");
             Objects.requireNonNull(notificationKind, "notificationKind");
@@ -43,6 +54,9 @@ public final class NotificationWireCodec {
         }
     }
 
+    /**
+     * 按固定契约字段编码通知 JSON；结果超过 64 KiB 时拒绝发送，序列化失败转为内部状态异常。
+     */
     public static byte[] encodePayload(Payload payload) {
         Map<String, Object> values = new LinkedHashMap<>();
         values.put("schemaVersion", payload.schemaVersion());
@@ -68,7 +82,7 @@ public final class NotificationWireCodec {
         }
     }
 
-    /** Build the protected fd_* properties carried alongside a payload. */
+    /** 构造随消息载荷传递的受保护 fd_* 属性，用于消费者校验消息身份。 */
     public static Map<String, String> envelope(NotificationEventContract.Binding binding,
                                                 UUID tenantId, UUID messageId,
                                                 byte[] businessIntentKey,
@@ -103,6 +117,9 @@ public final class NotificationWireCodec {
         return Map.copyOf(values);
     }
 
+    /**
+     * 将命名空间和业务字段按长度分帧后求 SHA-256，生成稳定且不受字段拼接歧义影响的键。
+     */
     public static byte[] deriveKey(String namespace, Object... fields) {
         Object[] all = new Object[fields.length + 1];
         all[0] = namespace;
@@ -110,6 +127,9 @@ public final class NotificationWireCodec {
         return sha256(frame(all));
     }
 
+    /**
+     * 计算输入字节的 SHA-256 摘要；标准算法不可用时抛出内部状态异常。
+     */
     public static byte[] sha256(byte[] value) {
         try {
             return MessageDigest.getInstance("SHA-256").digest(value);
@@ -119,14 +139,23 @@ public final class NotificationWireCodec {
         }
     }
 
+    /**
+     * 将字节转换为统一十六进制字符串，供摘要、消息键和诊断输出使用。
+     */
     public static String hex(byte[] bytes) {
         return HexFormat.of().formatHex(bytes);
     }
 
+    /**
+     * 将时间截断为微秒后按固定格式输出，保持数据库精度与消息契约一致。
+     */
     public static String format(Instant instant) {
         return MICROS.format(instant.truncatedTo(ChronoUnit.MICROS));
     }
 
+    /**
+     * 按字段写入四字节长度及内容；UUID 使用二进制，文本采用 UTF-8，避免字段边界歧义。
+     */
     public static byte[] frame(Object... fields) {
         ByteArrayOutputStream output = new ByteArrayOutputStream();
         for (Object field : fields) {
@@ -146,11 +175,17 @@ public final class NotificationWireCodec {
         return output.toByteArray();
     }
 
+    /**
+     * 按高位在前的顺序编码 UUID 为 16 字节，与持久化及摘要编码保持一致。
+     */
     public static byte[] uuidBytes(UUID value) {
         return ByteBuffer.allocate(16).putLong(value.getMostSignificantBits())
                 .putLong(value.getLeastSignificantBits()).array();
     }
 
+    /**
+     * 检查输入恰好为 16 字节后还原 UUID，空值或错误长度直接拒绝。
+     */
     public static UUID uuidFromBytes(byte[] value) {
         if (value == null || value.length != 16) {
             throw new IllegalArgumentException("UUID bytes must contain exactly 16 bytes");
@@ -160,10 +195,8 @@ public final class NotificationWireCodec {
     }
 
     /**
-     * Derive the persisted UUID projection used by notification message ids
-     * from a full SHA-256 identity key.  Keeping this separate from
-     * {@link #uuidFromBytes(byte[])} prevents accidentally accepting a
-     * truncated or malformed UUID column as a key.
+     * 从完整的 SHA-256 身份键派生通知消息持久化使用的 UUID 投影。
+     * 与 {@link #uuidFromBytes(byte[])} 分开，防止将截断或格式错误的 UUID 列误当成身份键。
      */
     public static UUID uuidFromKey(byte[] value) {
         if (value == null || value.length != 32) {

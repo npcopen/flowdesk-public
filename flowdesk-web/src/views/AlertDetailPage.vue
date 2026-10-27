@@ -1,4 +1,5 @@
 <script setup lang="ts">
+/** 读取事件或告警详情及关联工单，按接口权限显示当前可见资源。 */
 import { computed, onMounted, ref } from "vue";
 import {
   ArrowLeft,
@@ -34,6 +35,10 @@ const link = ref<IncidentTicketLink | null>(null);
 const ticket = ref<Ticket | null>(null);
 const linkError = ref<unknown>(null);
 const ticketError = ref<unknown>(null);
+/**
+ * 加载告警聚合或接入事件详情，并独立读取工单关联。
+ * 仅在聚合返回通用不存在时尝试事件视图，权限或服务错误不会被回退隐藏。
+ */
 async function load(): Promise<void> {
   loading.value = true;
   error.value = null;

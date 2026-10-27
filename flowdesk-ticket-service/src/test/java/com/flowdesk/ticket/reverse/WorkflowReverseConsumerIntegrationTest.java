@@ -1,7 +1,11 @@
 package com.flowdesk.ticket.reverse;
 
+import com.flowdesk.ticket.mapper.*;
+import com.flowdesk.ticket.model.*;
+import com.flowdesk.ticket.persistence.Uuids;
+
 import com.flowdesk.ticket.event.TicketEventContract;
-import com.flowdesk.ticket.repository.TicketRepository.Uuids;
+import com.flowdesk.ticket.persistence.Uuids;
 import com.flowdesk.ticket.service.IdempotencyCodec;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -29,6 +33,9 @@ import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+/**
+ * 工单模块回归测试，覆盖该组件的正常流程、边界条件与关键一致性约束。
+ */
 @SpringBootTest(properties = {
         "spring.main.web-application-type=none",
         "flowdesk.ticket.workflow-reverse.entry.enabled=true",
@@ -36,6 +43,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 })
 @Import(WorkflowReverseConsumerIntegrationTest.FixedTicketClockConfiguration.class)
 class WorkflowReverseConsumerIntegrationTest {
+    /**
+     * 验证拒绝原因进入申请人时间线，并保持重复消费安全。
+     */
     @Test
     void rejectionReasonReachesTheApplicantTimelineAndRemainsDuplicateSafe() {
         consumer.consume(established(UUID.randomUUID(),"RUNNING"));
@@ -69,6 +79,9 @@ class WorkflowReverseConsumerIntegrationTest {
     @Autowired WorkflowReverseDlqAcceptor dlq;
     @Autowired JdbcTemplate jdbc;
 
+    /**
+     * 注册隔离测试数据库、密钥和功能开关，使场景在可控环境运行。
+     */
     @DynamicPropertySource
     static void properties(DynamicPropertyRegistry registry) {
         registry.add("FLOWDESK_TICKET_DB_PASSWORD", () -> "");
@@ -83,6 +96,9 @@ class WorkflowReverseConsumerIntegrationTest {
         registry.add("spring.sql.init.schema-locations", () -> "classpath:schema-test.sql");
     }
 
+    /**
+     * 保存本场景前置业务事实，使用参数控制租户、身份、状态及时间边界。
+     */
     @BeforeEach
     void seed() {
         for (String table : List.of("message_recovery", "inbox_message", "audit_record",
@@ -124,6 +140,9 @@ class WorkflowReverseConsumerIntegrationTest {
                 Timestamp.from(REQUESTED));
     }
 
+    /**
+     * 验证实例建立后审批通过原子提交，重复消息不重复效果。
+     */
     @Test
     void establishedThenPassedIsAtomicAndDuplicateSafe() {
         assertThat(consumer.consume(established(UUID.randomUUID(), "RUNNING")).code())
@@ -146,6 +165,9 @@ class WorkflowReverseConsumerIntegrationTest {
         assertThat(count("ticket_timeline_entry")).isEqualTo(1);
     }
 
+    /**
+     * 验证终态先到仍可收敛，相反结论不能覆盖既有结果。
+     */
     @Test
     void finalizedBeforeEstablishedConvergesAndOppositeIntentCannotOverwrite() {
         assertThat(consumer.consume(finalized(UUID.randomUUID(), "REJECTED")).code())
@@ -166,6 +188,9 @@ class WorkflowReverseConsumerIntegrationTest {
         assertThat(count("inbox_message")).isEqualTo(2);
     }
 
+    /**
+     * 验证死信仅建立一个可恢复 Inbox，不产生工单业务副作用。
+     */
     @Test
     void dlqCreatesOneRecoverableInboxWithoutBusinessEffects() {
         WorkflowReverseTransportMessage main = established(UUID.randomUUID(), "RUNNING");
@@ -181,6 +206,9 @@ class WorkflowReverseConsumerIntegrationTest {
         assertThat(count("message_recovery")).isEqualTo(1);
     }
 
+    /**
+     * 构造实例建立反向消息，供验证启动关联与后续终态处理。
+     */
     private WorkflowReverseTransportMessage established(UUID messageId, String status) {
         byte[] body = ("{\"schemaVersion\":\"1\",\"ticketId\":\"" + TICKET
                 + "\",\"workflowInstanceId\":\"" + INSTANCE
@@ -195,6 +223,9 @@ class WorkflowReverseConsumerIntegrationTest {
                         WorkflowReverseContract.INSTANCE_ESTABLISHED.intentNamespace(), TENANT, TICKET));
     }
 
+    /**
+     * 构造审批终态反向消息，控制结论与顺序以覆盖重复和冲突。
+     */
     private WorkflowReverseTransportMessage finalized(UUID messageId, String outcome) {
         byte[] body = ("{\"schemaVersion\":\"1\",\"ticketId\":\"" + TICKET
                 + "\",\"workflowInstanceId\":\"" + INSTANCE
@@ -209,6 +240,9 @@ class WorkflowReverseConsumerIntegrationTest {
                         WorkflowReverseContract.APPROVAL_FINALIZED.intentNamespace(), TENANT, INSTANCE));
     }
 
+    /**
+     * 按契约构造传输消息，保留测试控制的原文字节、身份和路由。
+     */
     private WorkflowReverseTransportMessage wire(WorkflowReverseContract.Binding binding,
                                                   UUID messageId, byte[] body, byte[] intent) {
         Map<String, String> p = new LinkedHashMap<>();
@@ -227,22 +261,40 @@ class WorkflowReverseConsumerIntegrationTest {
                 messageId.toString(), null, body, p);
     }
 
+    /**
+     * 构造工作流启动的规范意图，使反向消息与原工单建立可核验关联。
+     */
     private static byte[] startIntent() {
         return IdempotencyCodec.derivedKey(
                 TicketEventContract.WorkflowStartRequested.BUSINESS_INTENT_KEY_NAMESPACE,
                 TENANT, TICKET);
     }
+    /**
+     * 计算输入内容 SHA-256 摘要，供消息完整性和业务意图核验。
+     */
     private static byte[] sha256(byte[] value) {
         try { return MessageDigest.getInstance("SHA-256").digest(value); }
         catch (Exception impossible) { throw new IllegalStateException(impossible); }
     }
+    /**
+     * 统计指定表中的测试记录，供断言效果数量和幂等性。
+     */
     private int count(String table) {
         return jdbc.queryForObject("SELECT COUNT(*) FROM " + table, Integer.class);
     }
+    /**
+     * 执行单值查询并返回文本，供核对测试落库的原因或状态字段。
+     */
     private String text(String sql) { return jdbc.queryForObject(sql, String.class); }
 
+    /**
+     * 用于该测试的内部替身，提供可控制的时钟、调度或依赖行为。
+     */
     @TestConfiguration(proxyBeanMethods = false)
     static class FixedTicketClockConfiguration {
+        /**
+         * 装配工作流反向结果的 fixedTicketClock 组件，将配置与依赖交由 Spring 管理。
+         */
         @Bean
         @Primary
         Clock fixedTicketClock() {

@@ -13,8 +13,14 @@ import java.util.Map;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+/**
+ * 工单模块回归测试，覆盖该组件的正常流程、边界条件与关键一致性约束。
+ */
 class RocketMqTicketOutboxTransportTest {
 
+    /**
+     * 验证生产者固定组、超时与零 SDK 自动重试配置。
+     */
     @Test
     void configuredProducerLocksFrozenGroupTimeoutAndZeroSdkRetries() {
         TicketOutboxPublisherProperties properties = enabledProperties();
@@ -35,6 +41,9 @@ class RocketMqTicketOutboxTransportTest {
         assertThat(producer.isRetryAnotherBrokerWhenNotStoreOK()).isFalse();
     }
 
+    /**
+     * 验证同步发送保留原传输内容，且仅 SEND_OK 被认定成功。
+     */
     @Test
     void synchronousSendCopiesWireAndOnlyRocketMqSendOkConfirms() throws Exception {
         CapturingProducer producer = new CapturingProducer();
@@ -74,6 +83,9 @@ class RocketMqTicketOutboxTransportTest {
                 .isInstanceOf(IllegalStateException.class);
     }
 
+    /**
+     * 验证启用发送时缺少规定 ACL 身份或密钥会拒绝启动。
+     */
     @Test
     void optInFailsClosedWithoutFrozenAclIdentityAndSecret() {
         TicketOutboxPublisherProperties disabled = new TicketOutboxPublisherProperties();
@@ -95,6 +107,9 @@ class RocketMqTicketOutboxTransportTest {
                 .hasMessageContaining("secretKey");
     }
 
+    /**
+     * 构造显式启用的测试配置，供验证身份和生产者参数。
+     */
     private static TicketOutboxPublisherProperties enabledProperties() {
         TicketOutboxPublisherProperties properties = new TicketOutboxPublisherProperties();
         properties.setEnabled(true);
@@ -103,12 +118,18 @@ class RocketMqTicketOutboxTransportTest {
         return properties;
     }
 
+    /**
+     * 创建本场景需要的发送或发布统计结果，精确控制调度分支。
+     */
     private static SendResult result(SendStatus status) {
         SendResult result = new SendResult();
         result.setSendStatus(status);
         return result;
     }
 
+    /**
+     * 用于该测试的内部替身，提供可控制的时钟、调度或依赖行为。
+     */
     private static final class CapturingProducer extends DefaultMQProducer {
         private Message captured;
         private long timeoutMillis;
@@ -116,11 +137,17 @@ class RocketMqTicketOutboxTransportTest {
         private int startCount;
         private int shutdownCount;
 
+        /**
+         * 仅累加测试生产者启动次数，不连接实际 Broker。
+         */
         @Override
         public void start() {
             startCount++;
         }
 
+        /**
+         * 捕获消息和超时参数并返回预设结果，供断言传输内容与成功映射。
+         */
         @Override
         public SendResult send(Message message, long timeout) {
             captured = message;
@@ -128,6 +155,9 @@ class RocketMqTicketOutboxTransportTest {
             return nextResult;
         }
 
+        /**
+         * 关闭测试生产者替身并记录资源释放行为。
+         */
         @Override
         public void shutdown() {
             shutdownCount++;

@@ -2,7 +2,9 @@ package com.flowdesk.workflow.start;
 
 import org.springframework.boot.context.properties.ConfigurationProperties;
 
-/** Credentials and opt-in switch for both frozen Workflow consumer groups. */
+/**
+ * 主消费组与死信接收组的启用开关、Broker 地址和访问凭证配置。
+ */
 @ConfigurationProperties(prefix = "flowdesk.workflow.start.consumer")
 public class WorkflowStartRocketMqProperties {
 
@@ -13,38 +15,65 @@ public class WorkflowStartRocketMqProperties {
     private String accessKey = "";
     private String secretKey = "";
 
+    /**
+     * 读取功能启用开关，供组件装配及启动校验使用。
+     */
     public boolean isEnabled() {
         return enabled;
     }
 
+    /**
+     * 设置功能启用开关，供配置绑定和组件初始化使用。
+     */
     public void setEnabled(boolean enabled) {
         this.enabled = enabled;
     }
 
+    /**
+     * 读取RocketMQ NameServer 地址，供组件装配及启动校验使用。
+     */
     public String getNameServer() {
         return nameServer;
     }
 
+    /**
+     * 设置RocketMQ NameServer 地址，供配置绑定和组件初始化使用。
+     */
     public void setNameServer(String nameServer) {
         this.nameServer = nameServer;
     }
 
+    /**
+     * 读取RocketMQ 访问身份，供组件装配及启动校验使用。
+     */
     public String getAccessKey() {
         return accessKey;
     }
 
+    /**
+     * 设置RocketMQ 访问身份，供配置绑定和组件初始化使用。
+     */
     public void setAccessKey(String accessKey) {
         this.accessKey = accessKey;
     }
 
+    /**
+     * 读取RocketMQ 密钥，供组件装配及启动校验使用。
+     */
     public String getSecretKey() {
         return secretKey;
     }
 
+    /**
+     * 设置RocketMQ 密钥，供配置绑定和组件初始化使用。
+     */
     public void setSecretKey(String secretKey) {
         this.secretKey = secretKey;
     }
 
+    /**
+     * 组件启用时严格验证消息代理地址及固定访问身份，不合法配置阻止启动。
+     */
     void validateEnabledConfiguration() {
         if (!enabled) {
             throw new IllegalStateException("Workflow RocketMQ consumers are disabled");

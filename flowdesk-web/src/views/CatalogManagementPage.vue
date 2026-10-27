@@ -1,4 +1,5 @@
 <script setup lang="ts">
+/** 维护服务目录及其 SLA、流程版本绑定，区分新增幂等提交与已有配置的版本更新。 */
 import '@/management.css'
 import { computed, onMounted, ref } from 'vue'
 import { catalogApi, workflowApi, type CatalogWrite } from '@/api/endpoints'
@@ -14,11 +15,23 @@ const auth=useAuthStore(), intent=mutationIntent()
 const items=ref<ServiceCatalogItem[]>([]), policies=ref<SlaPolicySummary[]>([]), versions=ref<WorkflowVersion[]>([]), definitions=ref<WorkflowDefinition[]>([])
 const loading=ref(true), saving=ref(false), opened=ref(false), editing=ref<ServiceCatalogItem|null>(null)
 const error=ref<unknown>(null), actionError=ref<unknown>(null), ruleError=ref<unknown>(null), search=ref(''), versionId=ref('')
+/**
+ * 生成服务目录新增表单的默认配置。
+ * 集中初始化目录字段、风险级别、审批和 SLA 选项，供打开或重置表单使用。
+ */
 const empty=():CatalogWrite=>({itemCode:'',itemName:'',description:'',riskLevel:'NORMAL',slaPolicyId:'',workflowRef:null,status:'ACTIVE'})
 const form=ref<CatalogWrite>(empty())
 const filtered=computed(()=>items.value.filter(i=>`${i.itemName} ${i.itemCode}`.toLowerCase().includes(search.value.toLowerCase())))
 const highVersions=computed(()=>versions.value.filter(v=>v.status==='PUBLISHED'&&v.condition.value==='HIGH'))
+/**
+ * 生成工作流发布版本的可读名称。
+ * 优先展示定义名称及版本号，旧引用信息不足时使用兼容说明。
+ */
 const versionName=(id:string)=>{const v=versions.value.find(v=>v.workflowVersionId===id);return v?`${definitions.value.find(d=>d.definitionId===v.definitionId)?.definitionName||'审批规则'} · 第 ${v.versionNo} 版`:'原有审批版本'}
+/**
+ * 读取完整目录、SLA 策略及有权限查看的工作流发布规则。
+ * 流程规则错误单独展示，避免影响基本目录管理。
+ */
 async function load(){
  loading.value=true;error.value=null;ruleError.value=null
  try{[items.value,policies.value]=await Promise.all([allPages(t=>catalogApi.items({pageSize:100,pageToken:t,sort:'itemName'})),allPages(t=>catalogApi.slaPolicies({pageSize:100,pageToken:t,sort:'policyName'}))])}
@@ -28,12 +41,20 @@ async function load(){
   versions.value=(await Promise.all(definitions.value.map(d=>allPages(t=>workflowApi.versions(d.definitionId,{pageSize:100,pageToken:t,sort:'-versionNo'}))))).flat()
  }catch(e){ruleError.value=e}
 }
+/**
+ * 将选中目录或默认值载入编辑表单。
+ * 重置本次写入意图，并为新增配置选择可用 SLA 默认项。
+ */
 function edit(item:ServiceCatalogItem|null){
  editing.value=item;actionError.value=null;opened.value=true;intent.reset()
  form.value=item?{itemCode:item.itemCode,itemName:item.itemName,description:item.description||'',riskLevel:item.riskLevel as 'NORMAL'|'HIGH',slaPolicyId:item.slaPolicyId,workflowRef:item.workflowRef,status:item.status as 'ACTIVE'|'INACTIVE'}:empty()
  if(!form.value.slaPolicyId)form.value.slaPolicyId=policies.value.find(p=>p.status==='ACTIVE')?.slaPolicyId||''
  versionId.value=item?.workflowRef?.workflowVersionId||''
 }
+/**
+ * 校验风险与审批版本要求后提交目录配置。
+ * 新增复用稳定幂等键，编辑携带当前 ETag，成功后重置意图并刷新数据。
+ */
 async function save(){
  const v=versions.value.find(v=>v.workflowVersionId===versionId.value)
  if(form.value.riskLevel==='HIGH'&&!v){actionError.value=new ApiClientError({status:422,code:'WORKFLOW_VERSION_REQUIRED'});return}

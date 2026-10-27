@@ -1,5 +1,7 @@
 package com.flowdesk.workflow.notification;
 
+import com.flowdesk.workflow.model.WorkflowNotificationOutboxModels;
+
 import com.flowdesk.common.notification.NotificationEventContract;
 import com.flowdesk.common.notification.NotificationWireCodec;
 
@@ -11,12 +13,20 @@ import java.time.Instant;
 import java.util.Map;
 import java.util.UUID;
 
-/** Builds the frozen Notification envelope without reserializing persisted bytes. */
+/**
+ * 依据已持久化的原始消息字节构建通知信封，避免重新序列化改变契约内容。
+ */
 final class WorkflowNotificationOutboxEnvelopeFactory {
+    /**
+     * 禁止直接实例化工具容器，当前类型通过静态方法提供共享规则和转换。
+     */
     private WorkflowNotificationOutboxEnvelopeFactory() { }
 
+    /**
+     * 从已领取的持久化消息还原冻结信封，并核验身份、字节和摘要后交给传输层。
+     */
     static WorkflowNotificationOutboxMessage create(
-            WorkflowNotificationOutboxRepository.Claimed row) {
+            WorkflowNotificationOutboxModels.Claimed row) {
         if (!NotificationEventContract.WORKFLOW.contractRef().equals(row.contractRef())
                 || row.contractVersion() != NotificationEventContract.VERSION
                 || !"NOTIFICATION_REQUEST".equals(row.aggregateType())) {
@@ -49,7 +59,13 @@ final class WorkflowNotificationOutboxEnvelopeFactory {
                 NotificationEventContract.WORKFLOW.topic(), row.messageId().toString(), body, properties);
     }
 
+    /**
+     * 持久化消息不满足冻结契约时的异常，阻止不兼容信封继续发送。
+     */
     static final class InvalidContract extends RuntimeException {
+        /**
+         * 创建异常或专用实现并保留传入原因，供调用方分类处理。
+         */
         InvalidContract(String message) { super(message); }
     }
 }

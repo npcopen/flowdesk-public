@@ -1,12 +1,14 @@
 package com.flowdesk.ticket.reverse;
 
+import com.flowdesk.workflow.service.impl.WorkflowOutboxServiceImpl;
+
 import com.flowdesk.workflow.event.WorkflowReverseEventCodec;
 import com.flowdesk.workflow.event.WorkflowReverseEventContract;
 import com.flowdesk.workflow.outbox.RocketMqWorkflowOutboxTransport;
 import com.flowdesk.workflow.outbox.WorkflowOutboxMessage;
 import com.flowdesk.workflow.outbox.WorkflowOutboxPublisher;
 import com.flowdesk.workflow.outbox.WorkflowOutboxPublisherProperties;
-import com.flowdesk.workflow.outbox.WorkflowOutboxRepository;
+import com.flowdesk.workflow.service.WorkflowOutboxService;
 import com.flowdesk.workflow.service.WorkflowIdempotencyCodec;
 import org.apache.rocketmq.acl.common.AclClientRPCHook;
 import org.apache.rocketmq.acl.common.SessionCredentials;
@@ -57,9 +59,7 @@ import java.util.function.BooleanSupplier;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Destructive, opt-in proof of the M6 reverse path against isolated MySQL 8.4 and
- * RocketMQ 5.3.4. Ordinary reactor builds skip this class; the formal M6 gate runs it
- * after provisioning exact ACLs and validates the separate sanitized evidence file.
+ * 里程碑六真实基础设施验收，核验反向事件的发布身份、重试次数与消费死信边界。
  */
 @EnabledIfEnvironmentVariable(named = "FLOWDESK_M6_REAL_INFRA", matches = "true")
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
@@ -82,11 +82,14 @@ class Milestone6RealInfrastructureAcceptanceTest {
     private String runId;
     private String nameServer;
     private JdbcTemplate workflowAdmin;
-    private WorkflowOutboxRepository outboxRepository;
+    private WorkflowOutboxService outboxRepository;
     private JdbcTransactionManager workflowTransactions;
     private RocketMqWorkflowOutboxTransport workflowTransport;
     private DefaultMQAdminExt mqAdmin;
 
+    /**
+     * 检查验收环境并启动隔离数据库及真实消息代理协作组件，准备完整故障场景。
+     */
     @BeforeAll
     void startIsolatedAcceptance() throws Exception {
         requireExactEnvironment("FLOWDESK_M6_ACCEPTANCE_ISOLATED", "true");
@@ -103,8 +106,8 @@ class Milestone6RealInfrastructureAcceptanceTest {
                 requiredEnvironment("FLOWDESK_WORKFLOW_DB_URL"), "fd_workflow_runtime",
                 requiredEnvironment("FLOWDESK_WORKFLOW_DB_PASSWORD"));
         workflowAdmin = new JdbcTemplate(adminDataSource);
-        outboxRepository = new WorkflowOutboxRepository(new JdbcTemplate(runtimeDataSource));
         workflowTransactions = new JdbcTransactionManager(runtimeDataSource);
+        outboxRepository = new WorkflowOutboxServiceImpl(com.flowdesk.workflow.support.WorkflowTestMappers.mapper(runtimeDataSource, com.flowdesk.workflow.outbox.WorkflowOutboxMapper.class), workflowTransactions);
 
         workflowTransport = RocketMqWorkflowOutboxTransport.create(
                 producerProperties(nameServer));
@@ -116,6 +119,9 @@ class Milestone6RealInfrastructureAcceptanceTest {
         workflowTransport.start();
     }
 
+    /**
+     * 关闭验收组件并输出事实证据，即使单个清理失败仍继续释放剩余资源。
+     */
     @AfterAll
     void stopAndWriteEvidence() throws Exception {
         try {
@@ -142,13 +148,16 @@ class Milestone6RealInfrastructureAcceptanceTest {
         }
     }
 
+    /**
+     * 验证工作流 Outbox 使用真实代理并恰好在八次未确认发送后停止，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     @Order(1)
     void workflowOutboxUsesRealBrokerAndStopsAfterExactlyEightUnconfirmedSends()
             throws Exception {
         OutboxFixture published = insertOutbox("published", true);
         WorkflowOutboxPublisher livePublisher = new WorkflowOutboxPublisher(
-                outboxRepository, workflowTransport, workflowTransactions);
+                outboxRepository, workflowTransport);
         assertThat(livePublisher.publishOnce().published()).isEqualTo(1);
         MessageExt stored = awaitMessage(WorkflowReverseEventContract.InstanceEstablished.TOPIC,
                 published.messageId(), Duration.ofSeconds(60));
@@ -164,7 +173,7 @@ class Milestone6RealInfrastructureAcceptanceTest {
                      RocketMqWorkflowOutboxTransport.create(producerProperties("127.0.0.1:1"))) {
             unavailable.start();
             WorkflowOutboxPublisher boundary = new WorkflowOutboxPublisher(
-                    outboxRepository, unavailable, workflowTransactions);
+                    outboxRepository, unavailable);
             List<Duration> backoffs = WorkflowReverseEventContract.FAILURE_BACKOFFS;
             for (int attempt = 1; attempt <= 8; attempt++) {
                 WorkflowOutboxPublisher.PublishResult result = boundary.publishOnce();
@@ -211,6 +220,9 @@ class Milestone6RealInfrastructureAcceptanceTest {
         evidence.add(row);
     }
 
+    /**
+     * 验证真实主队列与死信接纳绑定均遵循一次首投和五次重投边界，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     @Order(2)
     void bothRealBrokerBindingsHaveExactMainAndAcceptorOnePlusFiveBoundaries()
@@ -285,6 +297,9 @@ class Milestone6RealInfrastructureAcceptanceTest {
         }
     }
 
+    /**
+     * 拦截单次代理投递并保存观察到的原始身份，供重试和死信边界断言。
+     */
     private WorkflowReverseConsumeResult observe(
             Probe probe, WorkflowReverseTransportMessage delivery,
             Map<String, AtomicInteger> counts,
@@ -298,6 +313,9 @@ class Milestone6RealInfrastructureAcceptanceTest {
         return WorkflowReverseConsumeResult.retry("M6_ACCEPTANCE_INJECTED_FAILURE");
     }
 
+    /**
+     * 断言当前场景的观察到的投递身份及次数，失败时直接报告对应证据差异。
+     */
     private static void assertObserved(List<WorkflowReverseTransportMessage> deliveries,
                                        Probe probe, int expected, String topic, String group) {
         assertThat(deliveries).hasSize(expected).allSatisfy(delivery -> {
@@ -310,6 +328,9 @@ class Milestone6RealInfrastructureAcceptanceTest {
         });
     }
 
+    /**
+     * 创建真实传输探针，使用稳定消息身份观察冻结绑定的路由及重投行为。
+     */
     private Probe probe(WorkflowReverseContract.Binding binding) {
         UUID messageId = UUID.randomUUID();
         UUID aggregateId = UUID.randomUUID();
@@ -321,6 +342,9 @@ class Milestone6RealInfrastructureAcceptanceTest {
                 new WorkflowOutboxMessage(binding.topic(), messageId.toString(), body, properties));
     }
 
+    /**
+     * 按冻结事件构建完整信封属性，使真实代理投递保持可验证身份。
+     */
     private static Map<String, String> envelopeProperties(
             WorkflowReverseContract.Binding binding, UUID messageId, UUID aggregateId,
             byte[] bodyHash) {
@@ -342,6 +366,9 @@ class Milestone6RealInfrastructureAcceptanceTest {
         return properties;
     }
 
+    /**
+     * 建立当前测试场景的持久化前置事实，保留指定租户、身份和状态供后续业务路径验证。
+     */
     private OutboxFixture insertOutbox(String label, boolean established) {
         UUID outboxId = UUID.randomUUID();
         UUID messageId = UUID.randomUUID();
@@ -381,6 +408,9 @@ class Milestone6RealInfrastructureAcceptanceTest {
         return new OutboxFixture(label, outboxId, messageId, body, hash);
     }
 
+    /**
+     * 直接读取指定 Outbox 行，供测试核对最终状态、次数和租约信息。
+     */
     private Map<String, Object> outboxRow(UUID outboxId) {
         return workflowAdmin.queryForMap("""
                 SELECT status,attempt_count,broker_confirmed_at,
@@ -391,6 +421,9 @@ class Milestone6RealInfrastructureAcceptanceTest {
                 """, bytes(TENANT), bytes(outboxId));
     }
 
+    /**
+     * 在超时前等待指定原身份消息到达代理，超时以场景上下文使测试失败。
+     */
     private MessageExt awaitMessage(String topic, UUID messageId, Duration timeout) {
         MessageExt[] found = new MessageExt[1];
         await(timeout, () -> {
@@ -402,6 +435,9 @@ class Milestone6RealInfrastructureAcceptanceTest {
         return found[0];
     }
 
+    /**
+     * 读取或统计当前场景的持久化及代理事实，为身份、状态和唯一副作用断言提供依据。
+     */
     private List<MessageExt> queryMessages(String topic, UUID messageId) {
         try {
             QueryResult result = mqAdmin.queryMessage(topic, messageId.toString(), 32,
@@ -419,6 +455,9 @@ class Milestone6RealInfrastructureAcceptanceTest {
         }
     }
 
+    /**
+     * 断言当前场景的代理消息身份与原始字节，失败时直接报告对应证据差异。
+     */
     private static void assertBrokerIdentity(MessageExt message, UUID messageId,
                                              byte[] body, byte[] hash) {
         assertThat(message.getKeys()).isEqualTo(messageId.toString());
@@ -428,6 +467,9 @@ class Milestone6RealInfrastructureAcceptanceTest {
         assertThat(message.getProperty("fd_body_sha256")).isEqualTo(HEX.formatHex(hash));
     }
 
+    /**
+     * 构造指定代理端点的生产者配置，供正常和不可用端点故障场景复用。
+     */
     private WorkflowOutboxPublisherProperties producerProperties(String server) {
         WorkflowOutboxPublisherProperties properties = new WorkflowOutboxPublisherProperties();
         properties.setEnabled(true);
@@ -437,21 +479,33 @@ class Milestone6RealInfrastructureAcceptanceTest {
         return properties;
     }
 
+    /**
+     * 构造消息代理管理员测试身份，供查询队列和验收证据读取。
+     */
     private RPCHook adminHook() {
         return hook("FLOWDESK_ROCKETMQ_ADMIN_ACCESS_KEY",
                 "FLOWDESK_ROCKETMQ_ADMIN_SECRET_KEY");
     }
 
+    /**
+     * 构造工单发布测试身份，供 ACL 正常及越权场景验证。
+     */
     private RPCHook ticketHook() {
         return hook("FLOWDESK_TICKET_ROCKETMQ_ACCESS_KEY",
                 "FLOWDESK_TICKET_ROCKETMQ_SECRET_KEY");
     }
 
+    /**
+     * 从指定环境变量构造代理 ACL 钩子，使用场景声明的精确身份。
+     */
     private static RPCHook hook(String accessName, String secretName) {
         return new AclClientRPCHook(new SessionCredentials(
                 requiredEnvironment(accessName), requiredEnvironment(secretName)));
     }
 
+    /**
+     * 根据验收连接信息构造测试数据源，保持每个权限账号的连接独立。
+     */
     private static DriverManagerDataSource dataSource(String url, String username,
                                                       String password) {
         DriverManagerDataSource source = new DriverManagerDataSource();
@@ -462,6 +516,9 @@ class Milestone6RealInfrastructureAcceptanceTest {
         return source;
     }
 
+    /**
+     * 在给定时间内轮询条件，超时抛出带场景信息的断言错误。
+     */
     private static void await(Duration timeout, BooleanSupplier condition, String context) {
         Instant deadline = Instant.now().plus(timeout);
         Throwable last = null;
@@ -484,11 +541,17 @@ class Milestone6RealInfrastructureAcceptanceTest {
         throw new IllegalStateException("Timed out waiting for " + context, last);
     }
 
+    /**
+     * 将 UUID 编码为数据库使用的二进制值，空标识保持为空。
+     */
     private static byte[] bytes(UUID value) {
         return ByteBuffer.allocate(16).putLong(value.getMostSignificantBits())
                 .putLong(value.getLeastSignificantBits()).array();
     }
 
+    /**
+     * 计算输入字节的 SHA-256 摘要，用于内容一致性核对及稳定业务键派生。
+     */
     private static byte[] sha256(byte[] value) {
         try {
             return MessageDigest.getInstance("SHA-256").digest(value);
@@ -498,6 +561,9 @@ class Milestone6RealInfrastructureAcceptanceTest {
         }
     }
 
+    /**
+     * 读取必填验收环境变量，缺失时立即失败以避免误用默认外部资源。
+     */
     private static String requiredEnvironment(String name) {
         String value = System.getenv(name);
         if (value == null || value.isBlank()) {
@@ -506,27 +572,54 @@ class Milestone6RealInfrastructureAcceptanceTest {
         return value.trim();
     }
 
+    /**
+     * 断言验收环境变量与冻结值一致，防止在错误基础设施上执行场景。
+     */
     private static void requireExactEnvironment(String name, String expected) {
         assertThat(requiredEnvironment(name)).isEqualTo(expected);
     }
 
+    /**
+     * 冻结测试样例或传输快照，保留原始身份、字节和摘要供正常及错误变体场景复用。
+     */
     private record OutboxFixture(String label, UUID outboxId, UUID messageId,
                                  byte[] body, byte[] bodyHash) {
+        /**
+         * 构造不可变快照并防御性复制可变内容，防止外部修改原数组或集合改变已接纳事实。
+         */
         private OutboxFixture {
             body = body.clone();
             bodyHash = bodyHash.clone();
         }
+        /**
+         * 返回消息体字节的防御性副本，避免调用方通过数组修改已保存事实。
+         */
         @Override public byte[] body() { return body.clone(); }
+        /**
+         * 返回样例消息体摘要的副本，防止错误变体修改原始测试基线。
+         */
         @Override public byte[] bodyHash() { return bodyHash.clone(); }
     }
 
+    /**
+     * 冻结测试样例或传输快照，保留原始身份、字节和摘要供正常及错误变体场景复用。
+     */
     private record Probe(WorkflowReverseContract.Binding binding, UUID messageId,
                          byte[] body, byte[] bodyHash, WorkflowOutboxMessage message) {
+        /**
+         * 构造不可变快照并防御性复制可变内容，防止外部修改原数组或集合改变已接纳事实。
+         */
         private Probe {
             body = body.clone();
             bodyHash = bodyHash.clone();
         }
+        /**
+         * 返回消息体字节的防御性副本，避免调用方通过数组修改已保存事实。
+         */
         @Override public byte[] body() { return body.clone(); }
+        /**
+         * 返回样例消息体摘要的副本，防止错误变体修改原始测试基线。
+         */
         @Override public byte[] bodyHash() { return bodyHash.clone(); }
     }
 }

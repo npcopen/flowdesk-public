@@ -1,23 +1,23 @@
 package com.flowdesk.notification.event;
 
-import com.flowdesk.notification.service.NotificationRecoveryService;
-import com.flowdesk.notification.service.NotificationService;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.context.properties.EnableConfigurationProperties;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
-/** Opt-in wiring for Notification's strict main/DLQ consumers. */
+/** 按开关装配通知主队列和死信消费者，复用统一的事务消费服务。 */
 @Configuration(proxyBeanMethods = false)
 @EnableConfigurationProperties(NotificationRocketMqProperties.class)
 @ConditionalOnProperty(prefix = "flowdesk.notification.entry", name = "enabled",
         havingValue = "true")
 public class NotificationConsumerConfiguration {
+    /**
+     * 装配消息消费者，将声明的协作依赖与配置绑定到当前服务的统一处理链路。
+     */
     @Bean
     NotificationRocketMqConsumers notificationRocketMqConsumers(
             NotificationRocketMqProperties properties,
-            NotificationService service,
-            NotificationRecoveryService recovery) {
+            NotificationConsumerService service) {
         return new NotificationRocketMqConsumers(properties,
                 (NotificationRocketMqConsumers.NotificationServiceAdapter) service::consume,
                 (NotificationRocketMqConsumers.NotificationDlqAdapter) service::acceptDlq);

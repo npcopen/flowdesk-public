@@ -13,17 +13,25 @@ import java.util.HexFormat;
 import java.util.Map;
 import java.util.UUID;
 
-/** Opaque HMAC cursor tokens bound to tenant, query scope, sort and page size. */
+/**
+ * 签发和验证 HMAC 分页游标，将租户、查询范围、排序方式和页大小绑定在一起。
+ */
 @Component
 public class WorkflowCursorTokenService {
 
     private static final ObjectMapper JSON = new ObjectMapper();
     private final String encodedKey;
 
+    /**
+     * 初始化组件依赖与运行参数，使后续调用使用一致的协作对象。
+     */
     public WorkflowCursorTokenService(CursorProperties properties) {
         this.encodedKey = properties.hmacKey();
     }
 
+    /**
+     * 将租户、查询范围、分页大小及最后记录边界编码为签名游标，阻止客户端扩大范围。
+     */
     public String encode(UUID tenantId, String scope, int pageSize, String sort,
                          String lastValue, UUID lastId) {
         try {
@@ -43,6 +51,9 @@ public class WorkflowCursorTokenService {
         }
     }
 
+    /**
+     * 验证游标签名及绑定条件，再返回分页边界；过期、不匹配或篡改的输入被拒绝。
+     */
     public Cursor decode(String token, UUID tenantId, String scope, int pageSize, String sort) {
         if (token == null) {
             return null;
@@ -79,6 +90,9 @@ public class WorkflowCursorTokenService {
         }
     }
 
+    /**
+     * 使用服务端密钥计算认证码，供分页游标防篡改校验。
+     */
     private String hmac(String body) {
         byte[] key;
         try {
@@ -101,24 +115,39 @@ public class WorkflowCursorTokenService {
         }
     }
 
+    /**
+     * 构造统一的非法游标错误，避免向客户端暴露具体签名或内部编码细节。
+     */
     private static ApiException invalid() {
         return ApiException.badRequest("CURSOR_INVALID",
                 "pageToken 无效、过期或与当前作用域不匹配。");
     }
 
+    /**
+     * 游标签名密钥配置，供编码和验签共用服务端密钥。
+     */
     @ConfigurationProperties(prefix = "flowdesk.security.cursor-token")
     public static class CursorProperties {
         private String hmacKey = "";
 
+        /**
+         * 读取 HMAC 配置密钥，供游标签名与验证共用。
+         */
         public String hmacKey() {
             return hmacKey;
         }
 
+        /**
+         * 设置游标签名密钥，供配置绑定和组件初始化使用。
+         */
         public void setHmacKey(String hmacKey) {
             this.hmacKey = hmacKey;
         }
     }
 
+    /**
+     * 签名游标解码后的分页边界，限定租户、筛选范围、排序及末条记录。
+     */
     public record Cursor(String lastValue, UUID lastId) {
     }
 }

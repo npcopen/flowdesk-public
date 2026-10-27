@@ -1,4 +1,5 @@
 <script setup lang="ts">
+/** 加载审批任务与相关工单，处理审批决定和审批人交接。 */
 import { computed, onMounted, ref } from "vue";
 import { ArrowLeft, Check, RefreshCw, X, XCircle } from "lucide-vue-next";
 import { useRoute, useRouter } from "vue-router";
@@ -40,6 +41,10 @@ const handoffKey = ref("");
 const changes = ref<Awaited<ReturnType<typeof workflowApi.approverChanges>>['data']>([]);
 const changesError = ref<unknown>(null);
 const canHandoff = computed(() => auth.can("APPROVAL_REASSIGN_TENANT") && instance.value?.status === "RUNNING");
+/**
+ * 打开审批人交接表单并初始化一次操作的幂等键。
+ * 读取全部可用审批人，供操作者选择合法候选人。
+ */
 async function beginHandoff(): Promise<void> {
   handoff.value = true;
   handoffError.value = null;
@@ -59,6 +64,10 @@ async function beginHandoff(): Promise<void> {
   } catch (reasonValue) { handoffError.value = reasonValue; }
   finally { handoffCandidatesLoading.value = false; }
 }
+/**
+ * 提交当前流程级别的审批人交接。
+ * 校验权限和实例信息，携带实例 ETag 与同意图幂等键，成功后重新加载详情。
+ */
 async function submitHandoff(): Promise<void> {
   if (!instance.value || !canHandoff.value || handoffSaving.value || handoffCandidatesLoading.value) return;
   handoffSaving.value = true;
@@ -76,6 +85,10 @@ const canDecide = computed(
     && task.value.approverUserId === auth.user?.userId && Boolean(ticket.value) && !ticketError.value && !loading.value,
 );
 
+/**
+ * 读取审批任务、所属实例及当前版本。
+ * 交接历史和审批工单上下文分别加载，避免辅助信息失败掩盖主要任务。
+ */
 async function load(): Promise<void> {
   loading.value = true;
   error.value = null;
@@ -117,14 +130,26 @@ async function load(): Promise<void> {
   }
 }
 onMounted(load);
+/**
+ * 打开同意或拒绝操作表单。
+ * 清空此前原因和错误，为本次决定建立独立输入状态。
+ */
 function begin(kind: "approve" | "reject"): void {
   decision.value = kind;
   reason.value = "";
   actionError.value = null;
 }
+/**
+ * 取消当前审批决定表单。
+ * 提交期间保持表单状态，避免中断操作结果反馈。
+ */
 function cancel(): void {
   if (!saving.value) decision.value = null;
 }
+/**
+ * 提交同意或拒绝决定，拒绝时要求填写原因。
+ * 使用任务当前 ETag 和幂等键，保存异步反馈并重新读取权威状态。
+ */
 async function submit(): Promise<void> {
   if (!task.value || !decision.value || !canDecide.value) return;
   if (decision.value === "reject" && !reason.value.trim()) return;

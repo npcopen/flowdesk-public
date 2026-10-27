@@ -1,7 +1,6 @@
 package com.flowdesk.gateway.web;
 
 import com.flowdesk.common.web.ProbeStatus;
-import com.flowdesk.common.web.ErrorEnvelope;
 import com.flowdesk.common.web.SuccessEnvelope;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
@@ -9,21 +8,25 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 
 import java.net.URLClassLoader;
-import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
-/** Focused unit coverage for the Gateway's dependency-free health endpoints. */
+/**
+ * 验证网关存活与就绪探针的统一响应、关联标识规范化，以及与前端资源解耦的部署职责。
+ */
 class GatewayHealthControllerTest {
 
     private static final UUID CORRELATION =
             UUID.fromString("22222222-2222-2222-2222-222222222222");
 
+    /**
+     * 验证网关存活探针返回 UP 并在响应中保留规范化关联标识。
+     */
     @Test
     void livenessReturnsUpWithTheNormalizedCorrelationId() {
-        GatewayHealthController controller = new GatewayHealthController(true);
+        GatewayHealthController controller = new GatewayHealthController();
 
         ResponseEntity<SuccessEnvelope<ProbeStatus>> response =
                 controller.liveness(CORRELATION.toString());
@@ -38,9 +41,12 @@ class GatewayHealthControllerTest {
         assertThat(response.getBody().meta().correlationId()).isEqualTo(CORRELATION);
     }
 
+    /**
+     * 验证非法关联标识被替换为不透明 UUID，避免未校验内容进入响应和追踪链。
+     */
     @Test
     void malformedCorrelationIsReplacedWithAnOpaqueUuid() {
-        GatewayHealthController controller = new GatewayHealthController(false);
+        GatewayHealthController controller = new GatewayHealthController();
 
         ResponseEntity<SuccessEnvelope<ProbeStatus>> response =
                 controller.liveness("not-a-uuid");
@@ -50,11 +56,12 @@ class GatewayHealthControllerTest {
         assertThat(UUID.fromString(header)).isEqualTo(response.getBody().meta().correlationId());
     }
 
+    /**
+     * 验证网关就绪探针返回约定 API 就绪模式及统一元数据。
+     */
     @Test
-    void readinessVerifiesTheBundledSpaAndReturnsTheReadinessSchema() {
-        // The test resources provide a minimal same-origin index.html with an app
-        // mount; the production artifact verifier independently checks hashed assets.
-        GatewayHealthController controller = new GatewayHealthController(true);
+    void readinessReturnsTheApiReadinessSchema() {
+        GatewayHealthController controller = new GatewayHealthController();
 
         ResponseEntity<?> response = controller.readiness(CORRELATION.toString());
 
@@ -71,44 +78,26 @@ class GatewayHealthControllerTest {
         assertThat(envelope.meta().correlationId()).isEqualTo(CORRELATION);
     }
 
+    /**
+     * 验证网关就绪状态不依赖前端静态资源，符合独立 API 网关部署职责。
+     */
     @Test
-    void readinessFailsClosedWhenIndexHasNoApplicationAsset(@TempDir Path classpath) throws Exception {
-        Path staticDirectory = Files.createDirectories(classpath.resolve("static"));
-        Files.writeString(staticDirectory.resolve("index.html"),
-                "<!doctype html><html><body><div id=\"app\"></div></body></html>");
+    void readinessDoesNotDependOnFrontendResources(@TempDir Path emptyClasspath) throws Exception {
         ClassLoader original = Thread.currentThread().getContextClassLoader();
-
         try (URLClassLoader isolated = new URLClassLoader(
-                new java.net.URL[]{classpath.toUri().toURL()}, null)) {
+                new java.net.URL[]{emptyClasspath.toUri().toURL()}, null)) {
             Thread.currentThread().setContextClassLoader(isolated);
-            GatewayHealthController controller = new GatewayHealthController(true);
 
-            ResponseEntity<?> response = controller.readiness(CORRELATION.toString());
+            ResponseEntity<SuccessEnvelope<ProbeStatus>> response =
+                    new GatewayHealthController().readiness(null);
 
-            assertThat(response.getStatusCode()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
-            assertThat(response.getHeaders().getCacheControl()).isEqualTo("no-store");
-            assertThat(response.getHeaders().getFirst("X-Correlation-Id"))
-                    .isEqualTo(CORRELATION.toString());
-            assertThat(response.getBody()).isInstanceOf(ErrorEnvelope.class);
-            ErrorEnvelope envelope = (ErrorEnvelope) response.getBody();
-            assertThat(envelope.error().code()).isEqualTo("SERVICE_NOT_READY");
-            assertThat(envelope.error().message()).isEqualTo("当前服务尚未准备好接收流量。");
-            assertThat(envelope.toString()).doesNotContain(classpath.toString(), "static/index.html");
+            assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+            assertThat(response.getBody()).isNotNull();
+            assertThat(response.getBody().data().probe()).isEqualTo(ProbeStatus.Probe.READINESS);
+            assertThat(response.getBody().data().status()).isEqualTo(ProbeStatus.Status.UP);
+            assertThat(response.getBody().meta().correlationId()).isNotNull();
         } finally {
             Thread.currentThread().setContextClassLoader(original);
         }
-    }
-
-    @Test
-    void readinessCanBeDisabledForMinimalDiagnosticArtifacts() {
-        GatewayHealthController controller = new GatewayHealthController(false);
-
-        ResponseEntity<?> response = controller.readiness(null);
-
-        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
-        assertThat(response.getBody()).isInstanceOf(SuccessEnvelope.class);
-        SuccessEnvelope<?> envelope = (SuccessEnvelope<?>) response.getBody();
-        assertThat(envelope.data()).isInstanceOf(ProbeStatus.class);
-        assertThat(((ProbeStatus) envelope.data()).status()).isEqualTo(ProbeStatus.Status.UP);
     }
 }

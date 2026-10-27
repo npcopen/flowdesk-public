@@ -1,5 +1,9 @@
 package com.flowdesk.ticket;
 
+import com.flowdesk.ticket.mapper.*;
+import com.flowdesk.ticket.model.*;
+import com.flowdesk.ticket.persistence.Uuids;
+
 import com.flowdesk.common.authz.PermissionCode;
 import com.flowdesk.common.authz.RoleCode;
 import com.flowdesk.common.security.JwtIssuer;
@@ -7,7 +11,7 @@ import com.flowdesk.ticket.incident.IncidentConsumeResult;
 import com.flowdesk.ticket.incident.IncidentMessageContract;
 import com.flowdesk.ticket.incident.IncidentMessageConsumer;
 import com.flowdesk.ticket.incident.IncidentTransportMessage;
-import com.flowdesk.ticket.repository.TicketRepository.Uuids;
+import com.flowdesk.ticket.persistence.Uuids;
 import com.flowdesk.ticket.reverse.WorkflowReverseContract;
 import com.flowdesk.ticket.service.IdempotencyCodec;
 import org.junit.jupiter.api.BeforeEach;
@@ -48,6 +52,9 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+/**
+ * 工单模块回归测试，覆盖该组件的正常流程、边界条件与关键一致性约束。
+ */
 @SpringBootTest
 @AutoConfigureMockMvc
 class TicketRecoveryApiIntegrationTest {
@@ -68,6 +75,9 @@ class TicketRecoveryApiIntegrationTest {
     @Autowired JdbcTemplate jdbc;
     @Autowired IncidentMessageConsumer incidentConsumer;
 
+    /**
+     * 注册隔离测试数据库、密钥和功能开关，使场景在可控环境运行。
+     */
     @DynamicPropertySource
     static void properties(DynamicPropertyRegistry registry) {
         registry.add("flowdesk.security.jwt.public-key-pem", TicketRecoveryApiIntegrationTest::pem);
@@ -87,6 +97,9 @@ class TicketRecoveryApiIntegrationTest {
         registry.add("spring.sql.init.schema-locations", () -> "classpath:schema-test.sql");
     }
 
+    /**
+     * 清理控制字符与多余空白，并限制错误摘要长度。
+     */
     @BeforeEach
     void clean() {
         for (String table : List.of("message_recovery", "inbox_message", "outbox_event",
@@ -96,6 +109,9 @@ class TicketRecoveryApiIntegrationTest {
         }
     }
 
+    /**
+     * 验证告警 Inbox 与结果 Outbox 通过受控入口沿原路径重放。
+     */
     @Test
     void incidentInboxAndAuthoritativeResultOutboxUseControlledSamePathReplay() throws Exception {
         UUID incident = UUID.randomUUID();
@@ -169,6 +185,9 @@ class TicketRecoveryApiIntegrationTest {
         assertThat(count("incident_ticket_mapping")).isEqualTo(1);
     }
 
+    /**
+     * 验证延迟告警投递与人工重放收敛为一次恢复效果。
+     */
     @Test
     void lateIncidentDeliveryAndManualReplayConvergeToOneRecoveryEffect() throws Exception {
         UUID incident = UUID.randomUUID();
@@ -280,6 +299,9 @@ class TicketRecoveryApiIntegrationTest {
                 .isEqualTo("PENDING_ASSIGNMENT");
     }
 
+    /**
+     * 验证 Outbox 重放只排队原事实，保持租户隔离和幂等。
+     */
     @Test
     void ticketOutboxReplayQueuesOnlyTheOriginalFactAndIsTenantScopedAndIdempotent()
             throws Exception {
@@ -353,6 +375,9 @@ class TicketRecoveryApiIntegrationTest {
                 """, Integer.class, Uuids.toBytes(TENANT_A))).isEqualTo(1);
     }
 
+    /**
+     * 验证 Inbox 重放使用持久化原文，经正常消费路径收敛。
+     */
     @Test
     void ticketInboxReplayUsesPersistedBytesAndConvergesThroughTheNormalConsumer()
             throws Exception {
@@ -423,6 +448,9 @@ class TicketRecoveryApiIntegrationTest {
                 });
     }
 
+    /**
+     * 保存本场景前置业务事实，使用参数控制租户、身份、状态及时间边界。
+     */
     private void seedTicket(UUID tenant, UUID ticket) {
         jdbc.update("""
                 INSERT INTO ticket
@@ -437,6 +465,9 @@ class TicketRecoveryApiIntegrationTest {
                 bytes(4), Uuids.toBytes(REQUESTER), Uuids.toBytes(DEFINITION), Uuids.toBytes(VERSION));
     }
 
+    /**
+     * 保存本场景前置业务事实，使用参数控制租户、身份、状态及时间边界。
+     */
     private void seedIncidentPolicy(Instant now) {
         jdbc.update("""
                 INSERT INTO sla_policy
@@ -450,10 +481,16 @@ class TicketRecoveryApiIntegrationTest {
                 Timestamp.from(now), Timestamp.from(now));
     }
 
+    /**
+     * 统计指定表中的测试记录，供断言效果数量和幂等性。
+     */
     private int count(String table) {
         return jdbc.queryForObject("SELECT COUNT(*) FROM " + table, Integer.class);
     }
 
+    /**
+     * 保存本场景前置业务事实，使用参数控制租户、身份、状态及时间边界。
+     */
     private void seedLink(UUID tenant, UUID ticket, byte[] intent, String status, Instant requested) {
         Instant at = requested == null ? Instant.parse("2026-08-24T01:00:00Z") : requested;
         jdbc.update("""
@@ -468,6 +505,9 @@ class TicketRecoveryApiIntegrationTest {
                 "RECOVERY_REQUIRED".equals(status) ? 8 : 0);
     }
 
+    /**
+     * 保存本场景前置业务事实，使用参数控制租户、身份、状态及时间边界。
+     */
     private void seedOutbox(UUID tenant, UUID ticket, UUID outbox, UUID message, byte[] body) {
         jdbc.update("""
                 INSERT INTO outbox_event
@@ -482,6 +522,9 @@ class TicketRecoveryApiIntegrationTest {
                 bytes(6), Uuids.toBytes(ticket), body, sha256(body), Uuids.toBytes(UUID.randomUUID()));
     }
 
+    /**
+     * 保存本场景前置业务事实，使用参数控制租户、身份、状态及时间边界。
+     */
     private void seedRecovery(UUID tenant, UUID recovery, String direction, UUID source,
                               byte[] intent, int attempts, Instant deadLettered) {
         jdbc.update("""
@@ -496,6 +539,9 @@ class TicketRecoveryApiIntegrationTest {
                 deadLettered == null ? null : Timestamp.from(deadLettered));
     }
 
+    /**
+     * 构造告警消息投递输入，使人工恢复与正常消费使用相同原文事实。
+     */
     private IncidentTransportMessage incidentDelivery(
             IncidentMessageContract.Binding binding, UUID incident, UUID message,
             UUID correlation, byte[] intent, byte[] body, Instant occurredAt) {
@@ -517,6 +563,9 @@ class TicketRecoveryApiIntegrationTest {
                 message.toString(), null, body, properties);
     }
 
+    /**
+     * 等待后台恢复进入预期状态，使用有界等待避免异步测试永久阻塞。
+     */
     private void awaitState(UUID recovery, String expected) throws Exception {
         long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(5);
         String state;
@@ -530,33 +579,57 @@ class TicketRecoveryApiIntegrationTest {
         throw new AssertionError("Recovery did not reach " + expected + "; last state=" + state);
     }
 
+    /**
+     * 签发管理员令牌，供管理操作与全租户可见范围测试。
+     */
     private String adminToken() {
         return ISSUER.issueHuman(TENANT_A, ADMIN, Set.of(RoleCode.SERVICE_DESK_ADMIN), Set.of(
                 PermissionCode.RECOVERY_READ_TENANT,
                 PermissionCode.RECOVERY_REPLAY_TENANT)).token();
     }
+    /**
+     * 签发当前租户申请人令牌，供验证申请人可见范围。
+     */
     private String requesterToken() {
         return ISSUER.issueHuman(TENANT_A, REQUESTER, Set.of(RoleCode.REQUESTER),
                 Set.of(PermissionCode.TICKET_READ_OWN)).token();
     }
+    /**
+     * 构造请求使用的 Bearer 认证信息，供 API 权限与租户测试。
+     */
     private static String bearer(String token) { return "Bearer " + token; }
+    /**
+     * 创建填充指定字节的固定长度测试键，供构造意图、摘要或发布身份。
+     */
     private static byte[] bytes(int seed) {
         byte[] value = new byte[32];
         java.util.Arrays.fill(value, (byte) seed);
         return value;
     }
+    /**
+     * 计算输入内容 SHA-256 摘要，供消息完整性和业务意图核验。
+     */
     private static byte[] sha256(byte[] body) {
         try { return MessageDigest.getInstance("SHA-256").digest(body); }
         catch (Exception impossible) { throw new IllegalStateException(impossible); }
     }
+    /**
+     * 生成测试专用签名密钥对，供构造认证令牌。
+     */
     private static KeyPair keyPair() {
         try { return KeyPairGenerator.getInstance("RSA").generateKeyPair(); }
         catch (Exception failure) { throw new IllegalStateException(failure); }
     }
+    /**
+     * 把测试公钥编码为 PEM，使测试签名与服务验证配置一致。
+     */
     private static String pem() {
         String base64 = Base64.getEncoder().encodeToString(KEYS.getPublic().getEncoded());
         return "-----BEGIN PUBLIC KEY-----\n" + base64 + "\n-----END PUBLIC KEY-----";
     }
+    /**
+     * 返回测试恢复分页密钥，隔离生产环境签名配置。
+     */
     private static String cursorKey() {
         return Base64.getEncoder().encodeToString(
                 "0123456789abcdef0123456789abcdef".getBytes(StandardCharsets.UTF_8));

@@ -1,0 +1,189 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+  告警发件箱发布、任务抢占与失败恢复持久化接口。
+  候选扫描采用有界批次，更新以租户、状态、版本和抢占令牌等条件协调并发。
+-->
+<mapper namespace="com.flowdesk.alert.mapper.AlertOutboxMapper">
+  <!-- 将查询列按构造参数映射为 AlertOutboxCandidate，明确字段、Java 类型及构造顺序，供相应查询复用。 -->
+  <resultMap id="candidate" type="com.flowdesk.alert.model.AlertOutboxCandidate">
+    <constructor>
+      <arg name="tenantId" column="tenant_id" javaType="java.util.UUID"/>
+      <arg name="outboxId" column="outbox_id" javaType="java.util.UUID"/>
+      <arg name="status" column="status" javaType="java.lang.String"/>
+      <arg name="attemptCount" column="attempt_count" javaType="_int"/>
+      <arg name="lockedBy" column="locked_by" javaType="java.lang.String"/>
+      <arg name="correlationId" column="correlation_id" javaType="java.util.UUID"/>
+      <arg name="lockVersion" column="lock_version" javaType="_long"/>
+    </constructor>
+  </resultMap>
+  <!-- 将查询列按构造参数映射为 AlertOutboxClaim，明确字段、Java 类型及构造顺序，供相应查询复用。 -->
+  <resultMap id="claimed" type="com.flowdesk.alert.model.AlertOutboxClaim">
+    <constructor>
+      <arg name="tenantId" column="tenant_id" javaType="java.util.UUID"/>
+      <arg name="outboxId" column="outbox_id" javaType="java.util.UUID"/>
+      <arg name="messageId" column="message_id" javaType="java.util.UUID"/>
+      <arg name="publicationKey" column="publication_key" javaType="[B"/>
+      <arg name="intent" column="business_intent_key" javaType="[B"/>
+      <arg name="incidentId" column="aggregate_id" javaType="java.util.UUID"/>
+      <arg name="contractRef" column="contract_ref" javaType="java.lang.String"/>
+      <arg name="body" column="body_bytes" javaType="[B"/>
+      <arg name="hash" column="body_sha256" javaType="[B"/>
+      <arg name="correlationId" column="correlation_id" javaType="java.util.UUID"/>
+      <arg name="causationId" column="causation_id" javaType="java.util.UUID"/>
+      <arg name="attemptCount" column="attempt_count" javaType="_int"/>
+      <arg name="token" column="locked_by" javaType="java.lang.String"/>
+      <arg name="lockedAt" column="locked_at" javaType="java.time.Instant"/>
+      <arg name="lockVersion" column="lock_version" javaType="_long"/>
+      <arg name="createdAt" column="created_at" javaType="java.time.Instant"/>
+    </constructor>
+  </resultMap>
+  <!-- 将查询列按构造参数映射为 AlertOutboxRecovery，明确字段、Java 类型及构造顺序，供相应查询复用。 -->
+  <resultMap id="recovery" type="com.flowdesk.alert.model.AlertOutboxRecovery">
+    <constructor>
+      <arg name="intent" column="business_intent_key" javaType="[B"/>
+      <arg name="state" column="state" javaType="java.lang.String"/>
+    </constructor>
+  </resultMap>
+  <!-- 跨租户扫描指定两类契约、版本 1 的事件发件箱，包含到期 PENDING 与租约过期的 PUBLISHING 消息；按到期时间排序，最多 50 条。 -->
+  <select id="findCandidates" resultMap="candidate">
+    <![CDATA[
+SELECT tenant_id,outbox_id,status,attempt_count,locked_by,correlation_id,lock_version
+FROM outbox_event
+WHERE contract_ref IN (#{contractRef},#{contractRef2}) AND contract_version=1 AND aggregate_type='INCIDENT'
+  AND attempt_count<=#{max_attempts} AND ((status='PENDING' AND next_attempt_at<=#{now})
+    OR (status='PUBLISHING' AND locked_at<=#{cutoff}))
+ORDER BY CASE WHEN status='PENDING' THEN next_attempt_at ELSE locked_at END,
+         tenant_id,outbox_id LIMIT 50
+    ]]>
+  </select>
+  <!-- 以租户、预期次数和版本抢占到期 PENDING 消息，转为 PUBLISHING，增加尝试次数并写入新 token 和锁定时间。 -->
+  <update id="claimPending">
+    <![CDATA[
+UPDATE outbox_event SET status='PUBLISHING',attempt_count=attempt_count+1,
+  locked_by=#{token},locked_at=#{now},lock_version=lock_version+1,updated_at=#{now},updated_by_type='SERVICE'
+WHERE tenant_id=#{tenantId} AND outbox_id=#{outboxId} AND status='PENDING' AND attempt_count=#{attemptCount}
+  AND attempt_count<#{max_attempts} AND lock_version=#{lockVersion} AND next_attempt_at<=#{now}
+    ]]>
+  </update>
+  <!-- 接管锁定时间不晚于 cutoff 的 PUBLISHING 消息，比对旧持有者、版本及次数，成功后更换 token 并增加尝试次数。 -->
+  <update id="claimExpired">
+    <![CDATA[
+UPDATE outbox_event SET attempt_count=attempt_count+1,locked_by=#{token},locked_at=#{now},
+  lock_version=lock_version+1,updated_at=#{now},updated_by_type='SERVICE'
+WHERE tenant_id=#{tenantId} AND outbox_id=#{outboxId} AND status='PUBLISHING' AND attempt_count=#{attemptCount}
+  AND attempt_count<#{max_attempts} AND locked_by=#{lockedBy} AND lock_version=#{lockVersion} AND locked_at<=#{cutoff}
+    ]]>
+  </update>
+  <!-- 抢占到期且尝试次数为 8 的 PENDING 消息，设置发布令牌并增加版本，不再增加尝试次数。 -->
+  <update id="claimRecoveryPending">
+    <![CDATA[
+UPDATE outbox_event SET status='PUBLISHING',locked_by=#{token},locked_at=#{now},lock_version=lock_version+1,
+  updated_at=#{now},updated_by_type='SERVICE' WHERE tenant_id=#{tenantId} AND outbox_id=#{outboxId} AND status='PENDING'
+  AND attempt_count=8 AND lock_version=#{lockVersion} AND next_attempt_at<=#{now}
+    ]]>
+  </update>
+  <!-- 接管尝试次数为 8 且租约过期的 PUBLISHING 消息；匹配旧持有者及版本，更换令牌时保持尝试次数不变。 -->
+  <update id="claimRecoveryExpired">
+    <![CDATA[
+UPDATE outbox_event SET locked_by=#{token},locked_at=#{now},lock_version=lock_version+1,
+  updated_at=#{now},updated_by_type='SERVICE' WHERE tenant_id=#{tenantId} AND outbox_id=#{outboxId} AND status='PUBLISHING'
+  AND attempt_count=8 AND locked_by=#{lockedBy} AND lock_version=#{lockVersion} AND locked_at<=#{cutoff}
+    ]]>
+  </update>
+  <!-- 仅在租户、消息、发布状态、次数、token 及版本均匹配时读取已抢占消息，返回发送原文、摘要与追踪字段。 -->
+  <select id="findClaimed" resultMap="claimed">
+    <![CDATA[
+SELECT tenant_id,outbox_id,message_id,publication_key,business_intent_key,aggregate_id,
+  contract_ref,body_bytes,body_sha256,correlation_id,causation_id,attempt_count,
+  locked_by,locked_at,lock_version,created_at FROM outbox_event
+WHERE tenant_id=#{tenant} AND outbox_id=#{outbox} AND status='PUBLISHING' AND attempt_count=#{attempt}
+  AND locked_by=#{token} AND lock_version=#{version}
+    ]]>
+  </select>
+  <!-- 在发布令牌、次数、版本及有效租约匹配时标记 PUBLISHED，记录代理确认时间并清除锁和错误。 -->
+  <update id="markPublished">
+    <![CDATA[
+UPDATE outbox_event SET status='PUBLISHED',locked_by=NULL,locked_at=NULL,last_error_code=NULL,
+  broker_confirmed_at=#{now},lock_version=lock_version+1,updated_at=#{now},updated_by_type='SERVICE'
+WHERE tenant_id=#{tenantId} AND outbox_id=#{outboxId} AND status='PUBLISHING' AND attempt_count=#{attemptCount}
+  AND locked_by=#{token} AND lock_version=#{lockVersion} AND locked_at>#{cutoff}
+    ]]>
+  </update>
+  <!-- 发布成功后，将同租户该发件箱对应的 REPLAYING 恢复记录收敛为 RESOLVED，清除下次执行时间。 -->
+  <update id="resolvePublishedRecovery">
+    <![CDATA[
+UPDATE message_recovery SET state='RESOLVED',resolved_at=#{now},next_attempt_at=NULL,
+  lock_version=lock_version+1,updated_at=#{now},updated_by_type='SERVICE'
+WHERE tenant_id=#{tenantId} AND direction='OUTBOX' AND source_record_id=#{outboxId} AND state='REPLAYING'
+    ]]>
+  </update>
+  <!-- 在有效发布租约及版本匹配时释放消息回 PENDING，保存错误码和下一次重试时间，并清除发布锁。 -->
+  <update id="releasePending">
+    <![CDATA[
+UPDATE outbox_event SET status='PENDING',next_attempt_at=#{next},locked_by=NULL,locked_at=NULL,
+  last_error_code=#{code},broker_confirmed_at=NULL,lock_version=lock_version+1,updated_at=#{now},updated_by_type='SERVICE'
+WHERE tenant_id=#{tenantId} AND outbox_id=#{outboxId} AND status='PUBLISHING' AND attempt_count=#{attemptCount}
+  AND locked_by=#{token} AND lock_version=#{lockVersion} AND locked_at>#{cutoff}
+    ]]>
+  </update>
+  <!-- 同步仍为 REQUESTED 的事件工单关联，将重试次数更新为实际发布尝试次数，并记录本次尝试时间。 -->
+  <update id="updateLinkRetry">
+    <![CDATA[
+UPDATE incident_ticket_link SET retry_count=#{attemptCount},last_attempt_at=#{now},lock_version=lock_version+1,
+  updated_at=#{now},updated_by_type='SERVICE' WHERE tenant_id=#{tenantId} AND incident_id=#{incidentId} AND status='REQUESTED'
+    ]]>
+  </update>
+  <!-- 在第 8 次发布、有效令牌及版本匹配时转为 RECOVERY_REQUIRED，记录错误并释放发布锁。 -->
+  <update id="markRecoveryRequired">
+    <![CDATA[
+UPDATE outbox_event SET status='RECOVERY_REQUIRED',next_attempt_at=#{now},locked_by=NULL,locked_at=NULL,
+  last_error_code=#{code},broker_confirmed_at=NULL,lock_version=lock_version+1,updated_at=#{now},updated_by_type='SERVICE'
+WHERE tenant_id=#{tenantId} AND outbox_id=#{outboxId} AND status='PUBLISHING' AND attempt_count=8
+  AND locked_by=#{token} AND lock_version=#{lockVersion} AND locked_at>#{cutoff}
+    ]]>
+  </update>
+  <!-- 将仍为 REQUESTED 的工单关联转为 RECOVERY_REQUIRED，保存恢复原因、时间及已用尽的 8 次重试。 -->
+  <update id="markLinkRecoveryRequired">
+    <![CDATA[
+UPDATE incident_ticket_link SET status='RECOVERY_REQUIRED',recovery_required_at=#{now},
+  recovery_reason_code=#{code},retry_count=8,last_attempt_at=#{now},lock_version=lock_version+1,
+  updated_at=#{now},updated_by_type='SERVICE' WHERE tenant_id=#{tenantId} AND incident_id=#{incidentId} AND status='REQUESTED'
+    ]]>
+  </update>
+  <!-- 同一发件箱及业务意图的重放再次用尽时，将 REPLAYING 恢复记录重开为 OPEN，保存错误并清除已解决时间。 -->
+  <update id="reopenRecovery">
+    <![CDATA[
+UPDATE message_recovery SET state='OPEN',attempt_count=8,next_attempt_at=NULL,
+  last_error_code=#{code},last_error_summary='Alert M7 publication exhausted again.',
+  resolved_at=NULL,lock_version=lock_version+1,updated_at=#{now},updated_by_type='SERVICE',updated_by_id=NULL
+WHERE tenant_id=#{tenantId} AND direction='OUTBOX' AND source_record_id=#{outboxId}
+  AND business_intent_key=#{intent} AND state='REPLAYING'
+    ]]>
+  </update>
+  <!-- 为发布用尽的发件箱建立 OUTBOX 方向 OPEN 恢复记录，尝试次数为 8，并记录源消息和业务意图。 -->
+  <insert id="insertRecovery">
+    <![CDATA[
+INSERT INTO message_recovery(tenant_id,recovery_id,direction,source_record_id,
+  business_intent_key,state,attempt_count,next_attempt_at,last_error_code,last_error_summary,
+  dead_lettered_at,recovery_required_at,replay_count,last_replay_correlation_id,resolved_at,
+  lock_version,created_at,updated_at,updated_by_type,updated_by_id)
+VALUES(#{tenantId},#{newId},'OUTBOX',#{outboxId},#{intent},'OPEN',8,NULL,#{code},'Alert M7 publication exhausted.',NULL,#{now},0,NULL,NULL,0,#{now},#{now},'SERVICE',NULL)
+    ]]>
+  </insert>
+  <!-- 按租户和发件箱标识查询 OUTBOX 恢复记录的业务意图及状态，供登记恢复时识别已有记录。 -->
+  <select id="findRecovery" resultMap="recovery">
+    <![CDATA[
+SELECT business_intent_key,state FROM message_recovery
+WHERE tenant_id=#{tenantId} AND direction='OUTBOX' AND source_record_id=#{outboxId}
+    ]]>
+  </select>
+  <!-- 保存告警发件箱需要恢复的失败审计，目标类型为 MESSAGE_RECOVERY，记录源发件箱、错误码及关联标识。 -->
+  <insert id="insertRecoveryAudit">
+    <![CDATA[
+INSERT INTO audit_record(tenant_id,audit_id,action_code,target_type,target_id,outcome,
+  actor_type,actor_id,reason,error_code,correlation_id,causation_id,occurred_at,recorded_at)
+VALUES(#{tenantId},#{newId},'ALERT_OUTBOX_RECOVERY_REQUIRED','MESSAGE_RECOVERY',#{outboxId},'FAILED','SERVICE',NULL,NULL,#{code},#{correlationId},NULL,#{now},#{now})
+    ]]>
+  </insert>
+</mapper>

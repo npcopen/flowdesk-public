@@ -1,4 +1,5 @@
 <script setup lang="ts">
+/** 提交组织与用户凭据，登录后返回允许的应用内目标页面。 */
 import { computed, ref } from "vue";
 import {
   ArrowRight,
@@ -26,6 +27,10 @@ const modeLabel = computed(() =>
   featureFlags.fullMock ? "本地工作空间" : "安全登录",
 );
 
+/**
+ * 提交组织、用户名和密码完成登录。
+ * 成功后跳转有效的站内目标地址，结束时清理密码输入并展示失败反馈。
+ */
 async function submit(): Promise<void> {
   submitting.value = true;
   error.value = null;

@@ -1,10 +1,18 @@
 import { test, expect, type Page } from '@playwright/test'
 
+/**
+ * 打开登录页并调用仅用于端到端测试的演示重置入口。
+ * 使每个业务场景从一致的内存数据开始。
+ */
 async function reset(page: Page): Promise<void> {
   await page.goto('/login')
   await page.evaluate(() => window.__FLOWDESK_E2E_RESET?.())
 }
 
+/**
+ * 通过登录页面以指定演示用户建立会话。
+ * 填写组织和凭证后等待首页，确保后续步骤在已登录状态执行。
+ */
 async function login(page: Page, username: string): Promise<void> {
   if (!page.url().includes('/login')) await page.goto('/login')
   await page.getByLabel('组织代码').fill('acme-tenant')
@@ -14,17 +22,29 @@ async function login(page: Page, username: string): Promise<void> {
   await expect(page).toHaveURL(/\/$/)
 }
 
+/**
+ * 通过界面退出当前会话并等待登录页。
+ * 用于多角色业务演示中的身份切换和退出行为断言。
+ */
 async function logout(page: Page): Promise<void> {
   await page.getByRole('button', { name: '退出登录' }).click()
   await expect(page).toHaveURL(/\/login/)
 }
 
+/**
+ * 在单页应用内部切换到目标路由。
+ * 通过浏览器历史事件保留内存会话，并短暂等待视图响应。
+ */
 async function navigate(page: Page, path: string): Promise<void> {
   // Keep the memory-only session alive: a full reload intentionally clears it.
   await page.evaluate((target) => { history.pushState({}, '', target); window.dispatchEvent(new PopStateEvent('popstate')) }, path)
   await page.waitForTimeout(30)
 }
 
+/**
+ * 按当前视口宽度展开移动导航。
+ * 桌面视口无需操作，便于相同场景覆盖两种布局。
+ */
 async function openMobileNav(page: Page): Promise<void> {
   if (await page.evaluate(() => window.innerWidth < 761)) {
     await page.getByRole('button', { name: '打开导航' }).click()

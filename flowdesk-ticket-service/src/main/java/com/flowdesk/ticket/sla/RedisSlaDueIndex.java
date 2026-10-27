@@ -18,7 +18,7 @@ import java.util.Set;
 import java.util.TreeMap;
 import java.util.UUID;
 
-/** Redis ZSET adapter for candidate ordering only. */
+/** 使用 Redis 有序集合保存 SLA 候选顺序，租约栅栏与原子脚本保护重建索引的替换。 */
 public final class RedisSlaDueIndex implements SlaDueIndex {
     private static final String EMPTY_MARKER = "__empty__";
     private static final DefaultRedisScript<Long> ATOMIC_SWAP = new DefaultRedisScript<>("""
@@ -124,10 +124,16 @@ public final class RedisSlaDueIndex implements SlaDueIndex {
             """, Long.class);
     private final StringRedisTemplate redis;
 
+    /**
+     * 构造SLA组件并保存调用依赖。
+     */
     public RedisSlaDueIndex(StringRedisTemplate redis) {
         this.redis = redis;
     }
 
+    /**
+     * 写入或刷新到期候选，使扫描器按时间定位 SLA 阶段。
+     */
     @Override
     public void upsert(UUID tenantId, UUID slaClockId, String stage, Instant dueAt) {
         if (dueAt == null) {
@@ -139,12 +145,18 @@ public final class RedisSlaDueIndex implements SlaDueIndex {
                 SlaDueIndexCodec.score(dueAt));
     }
 
+    /**
+     * 移除已失效候选，避免已结算或已触发阶段继续被扫描。
+     */
     @Override
     public void remove(UUID tenantId, UUID slaClockId, String stage) {
         redis.opsForZSet().remove(SlaDueIndexCodec.key(tenantId),
                 SlaDueIndexCodec.member(tenantId, slaClockId, stage));
     }
 
+    /**
+     * 按租户、截止时间与数量上限读取到期候选，供后台有界处理。
+     */
     @Override
     public List<Candidate> due(UUID tenantId, Instant now, int limit) {
         if (limit < 1 || limit > 500) {
@@ -169,18 +181,23 @@ public final class RedisSlaDueIndex implements SlaDueIndex {
                 result.add(candidate);
             }
             catch (IllegalArgumentException ignored) {
-                // A malformed technical member is ignored by the candidate reader;
-                // the bounded MySQL safety sweep remains authoritative.
+                // 忽略格式损坏的技术索引成员，仍由有界 MySQL 安全扫描提供权威候选。
             }
         }
         return List.copyOf(result);
     }
 
+    /**
+     * 清理指定租户索引，供后续从数据库事实重新建立。
+     */
     @Override
     public void clear(UUID tenantId) {
         redis.delete(SlaDueIndexCodec.key(tenantId));
     }
 
+    /**
+     * 判断当前索引是否可用，供扫描器选择数据库降级路径。
+     */
     @Override
     public boolean available() {
         try {
@@ -192,20 +209,26 @@ public final class RedisSlaDueIndex implements SlaDueIndex {
         }
     }
 
+    /**
+     * 构造租户索引键，使相关 Redis 键共享租户哈希槽。
+     */
     public String key(UUID tenantId) {
         return SlaDueIndexCodec.key(tenantId);
     }
 
+    /**
+     * 构造含租户和重建身份的临时键，隔离重建与正式索引。
+     */
     public String rebuildKey(UUID runId, UUID tenantId) {
         return SlaDueIndexCodec.rebuildKey(runId, tenantId);
     }
 
-    /** Redis-side fence key used by the final atomic swap. */
+    /** 最终原子替换使用的 Redis 侧栅栏键。 */
     public String fenceKey(UUID tenantId) {
         return "flowdesk:ticket:sla:fence:{" + SlaDueIndexCodec.tenantHex(tenantId) + "}";
     }
 
-    /** Installs a fence only when its epoch is newer than the stored epoch. */
+    /** 只有新 epoch 大于已存 epoch 时才安装栅栏，拒绝旧工作线程覆盖。 */
     public boolean installFence(UUID tenantId, UUID runId, long fencingEpoch, Duration ttl) {
         if (tenantId == null || runId == null || fencingEpoch < 1) {
             throw new IllegalArgumentException("Invalid SLA rebuild fence");
@@ -216,12 +239,12 @@ public final class RedisSlaDueIndex implements SlaDueIndex {
         return Long.valueOf(1L).equals(installed);
     }
 
-    /** Compatibility overload for narrow adapters that have no configured lease. */
+    /** 兼容未配置租约的小范围适配器调用。 */
     public boolean installFence(UUID tenantId, UUID runId, long fencingEpoch) {
         return installFence(tenantId, runId, fencingEpoch, Duration.ofSeconds(30));
     }
 
-    /** Renews only the exact fence owner.  A missing or newer fence is lease loss. */
+    /** 仅为完全匹配的栅栏持有者续期；栅栏丢失或出现更新版本均代表失去租约。 */
     public boolean renewFence(UUID tenantId, UUID runId, long fencingEpoch, Duration ttl) {
         if (tenantId == null || runId == null || fencingEpoch < 1) {
             throw new IllegalArgumentException("Invalid SLA rebuild fence");
@@ -231,12 +254,18 @@ public final class RedisSlaDueIndex implements SlaDueIndex {
         return Long.valueOf(1L).equals(renewed);
     }
 
+    /**
+     * 核对 Redis 围栏仍属本次重建者，阻止旧所有者继续修改。
+     */
     public boolean fenceMatches(UUID tenantId, UUID runId, long fencingEpoch) {
         String expected = fencingEpoch + ":" + runId;
         String actual = redis.opsForValue().get(fenceKey(tenantId));
         return expected.equals(actual);
     }
 
+    /**
+     * 将候选写入临时重建索引，带所有者身份时遵循围栏约束。
+     */
     public void upsertRebuild(UUID runId, UUID tenantId, UUID slaClockId,
                               String stage, Instant dueAt, Duration ttl) {
         if (dueAt == null) return;
@@ -248,7 +277,7 @@ public final class RedisSlaDueIndex implements SlaDueIndex {
         }
     }
 
-    /** Creates a lease-bound marker so an empty rebuild is still observable. */
+    /** 创建受租约约束的标记，使空集合的重建结果也可被验证。 */
     public boolean ensureRebuildKey(UUID runId, UUID tenantId, Duration ttl) {
         if (runId == null || tenantId == null) {
             throw new IllegalArgumentException("SLA rebuild key identity is invalid");
@@ -260,11 +289,17 @@ public final class RedisSlaDueIndex implements SlaDueIndex {
                 || Boolean.TRUE.equals(redis.hasKey(key)));
     }
 
+    /**
+     * 将候选写入临时重建索引，带所有者身份时遵循围栏约束。
+     */
     public void upsertRebuild(UUID runId, UUID tenantId, UUID slaClockId,
                               String stage, Instant dueAt) {
         upsertRebuild(runId, tenantId, slaClockId, stage, dueAt, Duration.ofSeconds(30));
     }
 
+    /**
+     * 从临时索引移除失效候选，避免陈旧阶段进入正式索引。
+     */
     public void removeRebuild(UUID runId, UUID tenantId, UUID slaClockId,
                               String stage, Duration ttl) {
         Long removed = redis.execute(REMOVE_REBUILD, List.of(SlaDueIndexCodec.rebuildKey(runId, tenantId)),
@@ -274,18 +309,21 @@ public final class RedisSlaDueIndex implements SlaDueIndex {
         }
     }
 
+    /**
+     * 从临时索引移除失效候选，避免陈旧阶段进入正式索引。
+     */
     public void removeRebuild(UUID runId, UUID tenantId, UUID slaClockId, String stage) {
         removeRebuild(runId, tenantId, slaClockId, stage, Duration.ofSeconds(30));
     }
 
-    /** Extends a nonempty temporary key after a database/fence lease renewal. */
+    /** 数据库与栅栏租约续期后，延长非空临时索引键的有效期。 */
     public boolean renewRebuildTtl(UUID runId, UUID tenantId, Duration ttl) {
         Long renewed = redis.execute(TOUCH_REBUILD, List.of(SlaDueIndexCodec.rebuildKey(runId, tenantId)),
                 Long.toString(ttlMillis(ttl)));
         return Long.valueOf(1L).equals(renewed);
     }
 
-    /** Applies a formal-index update only while the exact database fence remains installed. */
+    /** 只有 Redis 仍安装当前数据库栅栏时，才允许更新正式索引。 */
     public boolean upsertFenced(UUID tenantId, UUID runId, long fencingEpoch,
                                 UUID slaClockId, String stage, Instant dueAt) {
         if (dueAt == null) return removeFenced(tenantId, runId, fencingEpoch, slaClockId, stage);
@@ -296,7 +334,7 @@ public final class RedisSlaDueIndex implements SlaDueIndex {
         return Long.valueOf(1L).equals(written);
     }
 
-    /** Removes a formal candidate only while the exact database fence remains installed. */
+    /** 只有 Redis 仍安装当前数据库栅栏时，才允许删除正式索引候选。 */
     public boolean removeFenced(UUID tenantId, UUID runId, long fencingEpoch,
                                 UUID slaClockId, String stage) {
         Long removed = redis.execute(FENCED_REMOVE,
@@ -305,19 +343,24 @@ public final class RedisSlaDueIndex implements SlaDueIndex {
         return Long.valueOf(1L).equals(removed);
     }
 
+    /**
+     * 读取当前临时索引数量，供结果完整性与统计核验。
+     */
     public long rebuildSize(UUID runId, UUID tenantId) {
         Long size = redis.opsForZSet().zCard(SlaDueIndexCodec.rebuildKey(runId, tenantId));
         return size == null ? 0L : size;
     }
 
+    /**
+     * 核对围栏后切换重建索引，避免过期或不完整结果覆盖正式数据。
+     */
     public void swapRebuild(UUID runId, UUID tenantId) {
         swapRebuild(runId, tenantId, null, -1L, null);
     }
 
     /**
-     * Atomically replaces the formal key after an optional summary check.  The
-     * Lua operation keeps delete/rename/marker cleanup in one Redis command so
-     * readers can never observe a half-swapped empty marker.
+     * 可选校验集合摘要后原子替换正式索引。
+     * Lua 将删除、重命名及标记清理合为一次 Redis 操作，避免读者看见替换到一半的空标记。
      */
     public void swapRebuild(UUID runId, UUID tenantId, String expectedDigest,
                             long expectedCount) {
@@ -325,9 +368,8 @@ public final class RedisSlaDueIndex implements SlaDueIndex {
     }
 
     /**
-     * Fenced atomic replacement. When an epoch is supplied the Redis Lua
-     * operation rejects a stale worker even if it renewed its database lease
-     * immediately before another worker installed a newer fence.
+     * 带栅栏的原子替换。
+     * 传入 epoch 时，即使旧线程刚续过数据库租约，只要新线程已安装更新栅栏，Lua 也会拒绝旧线程。
      */
     public void swapRebuild(UUID runId, UUID tenantId, String expectedDigest,
                             long expectedCount, Long fencingEpoch) {
@@ -347,16 +389,19 @@ public final class RedisSlaDueIndex implements SlaDueIndex {
         }
     }
 
-    /** Deterministic member/count digest used to fence a stale rebuild. */
+    /** 计算确定性的成员及数量摘要，用于拒绝过期的重建结果。 */
     public RebuildSummary rebuildSummary(UUID runId, UUID tenantId) {
         return summary(SlaDueIndexCodec.rebuildKey(runId, tenantId));
     }
 
-    /** Digest of the formal key after post-swap catch-up. */
+    /** 替换后追平增量变更时，计算正式索引的摘要。 */
     public RebuildSummary formalSummary(UUID tenantId) {
         return summary(SlaDueIndexCodec.key(tenantId));
     }
 
+    /**
+     * 统计当前权限范围内的待处理工单数量，供工作台展示。
+     */
     private RebuildSummary summary(String key) {
         Set<ZSetOperations.TypedTuple<String>> values = redis.opsForZSet().rangeWithScores(key, 0, -1);
         List<ZSetOperations.TypedTuple<String>> ordered = values == null
@@ -372,7 +417,7 @@ public final class RedisSlaDueIndex implements SlaDueIndex {
         return new RebuildSummary(members.size(), digest(members));
     }
 
-    /** Same canonical digest algorithm for the MySQL-derived expected set. */
+    /** 对 MySQL 派生的预期集合使用相同的规范摘要算法。 */
     public static String digest(Map<String, Long> members) {
         try {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
@@ -387,10 +432,16 @@ public final class RedisSlaDueIndex implements SlaDueIndex {
         }
     }
 
+    /**
+     * 清理本次失败重建的临时内容，避免遗留无效索引。
+     */
     public void discardRebuild(UUID runId, UUID tenantId) {
         redis.delete(SlaDueIndexCodec.rebuildKey(runId, tenantId));
     }
 
+    /**
+     * 将租约时长转为合法毫秒 TTL，供 Redis 设置存活时间。
+     */
     private static long ttlMillis(Duration ttl) {
         if (ttl == null || ttl.isNegative() || ttl.isZero()) {
             throw new IllegalArgumentException("SLA rebuild TTL must be positive");
@@ -402,5 +453,8 @@ public final class RedisSlaDueIndex implements SlaDueIndex {
         return millis;
     }
 
+    /**
+     * Redis 临时重建索引摘要，供切换前核对结果规模。
+     */
     public record RebuildSummary(long count, String digest) { }
 }

@@ -13,7 +13,13 @@ import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+/**
+ * 工单模块回归测试，覆盖该组件的正常流程、边界条件与关键一致性约束。
+ */
 class IncidentRocketMqBindingTest {
+    /**
+     * 验证各绑定使用独立主消费和死信接收组，并采用无序单消息处理。
+     */
     @Test
     void bothBindingsUseIndependentUnorderedSingleMessageMainAndAcceptorGroups()
             throws Exception {
@@ -32,6 +38,9 @@ class IncidentRocketMqBindingTest {
         }
     }
 
+    /**
+     * 验证主消费受控重试延迟不影响死信接收延迟。
+     */
     @Test
     void controlledMainRetryDelayDoesNotChangeTheDlqAcceptorDelay() {
         var binding = IncidentMessageContract.RECOVERED;
@@ -60,6 +69,9 @@ class IncidentRocketMqBindingTest {
                 .isEqualTo(IncidentMessageContract.DLQ_ACCEPTOR_RETRY_DELAY_LEVEL);
     }
 
+    /**
+     * 断言消费组、主题及重试参数符合冻结消息契约。
+     */
     private static void assertFrozen(DefaultMQPushConsumer consumer, String group,
                                      int maxReconsumeTimes) {
         assertThat(consumer.getConsumerGroup()).isEqualTo(group);

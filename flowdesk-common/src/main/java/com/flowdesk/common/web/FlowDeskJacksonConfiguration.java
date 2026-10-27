@@ -17,12 +17,8 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 
 /**
- * Shared Jackson 3 policy for FlowDesk MVC services.
- *
- * <p>API-SPEC requires duplicate JSON keys to be rejected and every UTC timestamp in a
- * response to use exactly six fractional digits followed by {@code Z}. The Jackson 3
- * default emits either zero or nine fractional digits, so a fixed formatter is
- * registered here together with strict duplicate-key detection.</p>
+ * MVC 服务共用的 Jackson 3 序列化策略。
+ * 拒绝重复的 JSON 键，并将响应中的 UTC 时间统一为六位小数加 {@code Z}，确保 API 时间格式稳定。
  */
 @Configuration(proxyBeanMethods = false)
 @ConditionalOnClass(JsonMapper.class)
@@ -32,6 +28,9 @@ public class FlowDeskJacksonConfiguration {
             DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSSSSS'Z'")
                     .withZone(ZoneOffset.UTC);
 
+    /**
+     * 定制共享 JSON 映射器的时间和字段策略，使服务接口遵循统一序列化契约。
+     */
     @Bean
     public JsonMapperBuilderCustomizer flowDeskJsonMapperBuilderCustomizer() {
         return builder -> {
@@ -39,6 +38,9 @@ public class FlowDeskJacksonConfiguration {
             builder.enable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
             SimpleModule module = new SimpleModule("flowdesk-instant-format");
             module.addSerializer(Instant.class, new ValueSerializer<Instant>() {
+                /**
+                 * 按共享时间格式向 JSON 生成器写入值，使各服务的时间字段保持相同对外表示。
+                 */
                 @Override
                 public void serialize(Instant value,
                                       JsonGenerator generator,

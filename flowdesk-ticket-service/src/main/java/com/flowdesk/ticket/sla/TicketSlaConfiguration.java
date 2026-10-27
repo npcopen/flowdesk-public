@@ -1,7 +1,5 @@
 package com.flowdesk.ticket.sla;
 
-import com.flowdesk.ticket.repository.TicketRepository;
-import com.flowdesk.ticket.service.TicketService;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnMissingBean;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
@@ -14,35 +12,51 @@ import org.springframework.transaction.PlatformTransactionManager;
 
 import java.time.Clock;
 
-/** M8 SLA scanner/index wiring; all workers are disabled unless explicitly enabled. */
+/** M8 SLA 扫描与索引的组件装配，所有后台工作器均需显式配置启用。 */
 @Configuration(proxyBeanMethods = false)
 @EnableConfigurationProperties(TicketSlaProperties.class)
 public class TicketSlaConfiguration {
 
+    /**
+     * 装配SLA的 redisSlaDueIndex 组件，将配置与依赖交由 Spring 管理。
+     */
     @Bean
     @ConditionalOnProperty(prefix = "flowdesk.ticket.sla", name = "redis-enabled", havingValue = "true")
     RedisSlaDueIndex redisSlaDueIndex(StringRedisTemplate redis) {
         return new RedisSlaDueIndex(redis);
     }
 
+    /**
+     * 装配SLA的 noopSlaDueIndex 组件，将配置与依赖交由 Spring 管理。
+     */
     @Bean
     @ConditionalOnMissingBean(SlaDueIndex.class)
     NoopSlaDueIndex noopSlaDueIndex() {
         return new NoopSlaDueIndex();
     }
 
+    /**
+     * 装配SLA的 slaIndexProjection 组件，将配置与依赖交由 Spring 管理。
+     */
     @Bean
-    SlaIndexProjection slaIndexProjection(TicketRepository repository, SlaDueIndex index,
-                                          Clock clock) {
-        return new SlaIndexProjection(repository, index, clock);
+    SlaIndexProjection slaIndexProjection(SlaPersistenceMapper repository,
+                                          SlaRebuildLeaseService leaseRepository,
+                                          SlaDueIndex index, Clock clock) {
+        return new SlaIndexProjection(repository, leaseRepository, index, clock);
     }
 
+    /**
+     * 装配SLA的 slaTargetConfigurationGate 组件，将配置与依赖交由 Spring 管理。
+     */
     @Bean
     SlaTargetConfigurationGate slaTargetConfigurationGate(
-            TicketRepository repository, SlaTargetQualificationService qualification, Clock clock) {
-        return new SlaTargetConfigurationGate(repository, qualification, clock);
+            SlaTargetPersistenceMapper mapper, SlaTargetQualificationService qualification, Clock clock) {
+        return new SlaTargetConfigurationGate(mapper, qualification, clock);
     }
 
+    /**
+     * 装配SLA的 ticketSlaTaskScheduler 组件，将配置与依赖交由 Spring 管理。
+     */
     @Bean(name = "ticketSlaTaskScheduler")
     ThreadPoolTaskScheduler ticketSlaTaskScheduler() {
         ThreadPoolTaskScheduler scheduler = new ThreadPoolTaskScheduler();
@@ -54,15 +68,23 @@ public class TicketSlaConfiguration {
         return scheduler;
     }
 
+    /**
+     * 装配SLA的 ticketSlaScanner 组件，将配置与依赖交由 Spring 管理。
+     */
     @Bean
     @ConditionalOnProperty(prefix = "flowdesk.ticket.sla", name = "scanner-enabled", havingValue = "true")
-    TicketSlaScanner ticketSlaScanner(TicketRepository repository, TicketService ticketService,
-                                     SlaDueIndex index, TicketSlaProperties properties,
+    TicketSlaScanner ticketSlaScanner(SlaPersistenceMapper repository,
+                                     SlaRebuildLeaseService leaseRepository,
+                                     TicketSlaService slaService, SlaDueIndex index,
+                                     TicketSlaProperties properties,
                                      Clock clock) {
         properties.validate();
-        return new TicketSlaScanner(repository, ticketService, index, properties, clock);
+        return new TicketSlaScanner(repository, leaseRepository, slaService, index, properties, clock);
     }
 
+    /**
+     * 装配SLA的 ticketSlaPollingWorker 组件，将配置与依赖交由 Spring 管理。
+     */
     @Bean
     @ConditionalOnProperty(prefix = "flowdesk.ticket.sla", name = "scanner-enabled", havingValue = "true")
     TicketSlaPollingWorker ticketSlaPollingWorker(
@@ -71,6 +93,9 @@ public class TicketSlaConfiguration {
         return new TicketSlaPollingWorker(scanner, properties, scheduler, clock);
     }
 
+    /**
+     * 装配SLA的 slaQualificationRefreshWorker 组件，将配置与依赖交由 Spring 管理。
+     */
     @Bean
     @ConditionalOnProperty(prefix = "flowdesk.ticket.sla", name = "enabled", havingValue = "true")
     SlaQualificationRefreshWorker slaQualificationRefreshWorker(
@@ -80,15 +105,22 @@ public class TicketSlaConfiguration {
         return new SlaQualificationRefreshWorker(qualification, properties, scheduler, clock);
     }
 
+    /**
+     * 装配SLA的 slaIndexRebuilder 组件，将配置与依赖交由 Spring 管理。
+     */
     @Bean
     @ConditionalOnProperty(prefix = "flowdesk.ticket.sla", name = "rebuilder-enabled", havingValue = "true")
-    SlaIndexRebuilder slaIndexRebuilder(TicketRepository repository, SlaDueIndex index,
-                                        TicketSlaProperties properties,
+    SlaIndexRebuilder slaIndexRebuilder(SlaPersistenceMapper repository,
+                                        SlaRebuildLeaseService leaseRepository,
+                                        SlaDueIndex index, TicketSlaProperties properties,
                                         PlatformTransactionManager transactionManager, Clock clock) {
         properties.validate();
-        return new SlaIndexRebuilder(repository, index, properties, transactionManager, clock);
+        return new SlaIndexRebuilder(repository, leaseRepository, index, properties, transactionManager, clock);
     }
 
+    /**
+     * 装配SLA的 slaRebuildPollingWorker 组件，将配置与依赖交由 Spring 管理。
+     */
     @Bean
     @ConditionalOnProperty(prefix = "flowdesk.ticket.sla", name = "rebuilder-enabled", havingValue = "true")
     SlaRebuildPollingWorker slaRebuildPollingWorker(

@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper
+  PUBLIC '-//mybatis.org//DTD Mapper 3.0//EN'
+  'https://mybatis.org/dtd/mybatis-3-mapper.dtd'>
+<!--
+  工单编号计数器接口，以租户和业务日期划分序列并在事务内分配编号。
+  语句与同名 Java Mapper 方法对应；租户参数、状态条件和并发版本共同限定数据访问。
+-->
+<mapper namespace="com.flowdesk.ticket.mapper.TicketNumberMapper">
+  <!--
+    以租户和业务日期初始化序列为 1；计数器已存在时原子递增。
+  -->
+  <insert id="incrementSequence">INSERT INTO ticket_number_counter (tenant_id,business_date,sequence_value) VALUES (#{tenantId},#{businessDate},1) ON DUPLICATE KEY UPDATE sequence_value=sequence_value+1,updated_at=#{now}</insert>
+  <!--
+    锁定并读取指定租户在业务日期下的当前序列，需与递增操作处于同一事务。
+    查询使用 FOR UPDATE 行锁，应在调用方事务内执行。
+  -->
+  <select id="lockSequence" resultType="long">SELECT sequence_value FROM ticket_number_counter WHERE tenant_id=#{tenantId} AND business_date=#{businessDate} FOR UPDATE</select>
+</mapper>

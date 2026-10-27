@@ -1,4 +1,15 @@
-name: flowdesk
+name: flowdesk-public
+
+# Local dev/test stacks select one Spring environment per Compose project.
+# Production uses the same application profiles with independently managed infrastructure.
+x-nacos-client-environment: &nacos-client-environment
+  SPRING_PROFILES_ACTIVE: ${FLOWDESK_ENVIRONMENT:-dev}
+  FLOWDESK_NACOS_SERVER_ADDR: nacos:8848
+  FLOWDESK_NACOS_GROUP: FLOWDESK_GROUP
+  FLOWDESK_NACOS_USERNAME: ${FLOWDESK_NACOS_USERNAME:?set a non-admin FLOWDESK_NACOS_USERNAME}
+  FLOWDESK_NACOS_PASSWORD: ${FLOWDESK_NACOS_PASSWORD:?set FLOWDESK_NACOS_PASSWORD}
+  FLOWDESK_NACOS_DISCOVERY_ENABLED: "true"
+  FLOWDESK_NACOS_REGISTER_ENABLED: "true"
 
 x-flyway-common: &flyway-common
   image: flyway/flyway:11.14.1@sha256:ba032dc3fc4510694e1d096e2491ef562e42170ed91eec66ee5377b1124913d8
@@ -100,6 +111,7 @@ services:
       retries: 20
 
   redis-verify:
+    profiles: ["acceptance"]
     image: redis:7.4.10-alpine@sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2
     restart: "no"
     entrypoint: ["sh", "/verify/verify.sh"]
@@ -136,6 +148,7 @@ services:
     ports:
       - "127.0.0.1:${FLOWDESK_NACOS_HTTP_PUBLISH_PORT:-8848}:8848"
       - "127.0.0.1:${FLOWDESK_NACOS_GRPC_PUBLISH_PORT:-9848}:9848"
+      - "127.0.0.1:${FLOWDESK_NACOS_CONSOLE_PUBLISH_PORT:-28080}:8080"
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8848/nacos/v3/admin/core/state/readiness | grep -q '\"data\":\"ok\"'"]
       interval: 10s
@@ -162,6 +175,31 @@ services:
         condition: service_healthy
     networks:
       - control
+
+  nacos-config-initialize:
+    profiles: ["m10"]
+    image: python:3.12-alpine@sha256:b658b05ce9c4eb97ec6fc19424818a1f31993659c2b505a532f470e83807815d
+    restart: "no"
+    working_dir: /workspace
+    entrypoint: ["sh", "-ec"]
+    environment:
+      FLOWDESK_ENVIRONMENT: ${FLOWDESK_ENVIRONMENT:-dev}
+      FLOWDESK_NACOS_ADMIN_PASSWORD: ${FLOWDESK_NACOS_ADMIN_PASSWORD:?set FLOWDESK_NACOS_ADMIN_PASSWORD}
+      FLOWDESK_NACOS_USERNAME: ${FLOWDESK_NACOS_USERNAME:?set a non-admin FLOWDESK_NACOS_USERNAME}
+      FLOWDESK_NACOS_PASSWORD: ${FLOWDESK_NACOS_PASSWORD:?set FLOWDESK_NACOS_PASSWORD}
+    command:
+      - |
+        case "$$FLOWDESK_ENVIRONMENT" in
+          dev|test) ;;
+          *) echo 'Local Compose supports dev/test only; deploy prod with isolated production infrastructure.' >&2; exit 1 ;;
+        esac
+        exec python scripts/nacos-config.py publish --environment "$$FLOWDESK_ENVIRONMENT" --server-addr http://nacos:8848 --provision-user
+    volumes:
+      - ./scripts:/workspace/scripts:ro
+      - ./infra/nacos:/workspace/infra/nacos:ro
+    depends_on:
+      nacos-initialize: {condition: service_completed_successfully}
+    networks: [control]
 
   rocketmq-nameserver:
     image: apache/rocketmq:5.3.4@sha256:d57ee4ebbd9d7bb6e185775bde41c128e98f185b25bf0b05c77d4e6c010572b8
@@ -238,6 +276,7 @@ services:
       - messaging
 
   rocketmq-verify:
+    profiles: ["acceptance"]
     image: apache/rocketmq:5.3.4@sha256:d57ee4ebbd9d7bb6e185775bde41c128e98f185b25bf0b05c77d4e6c010572b8
     restart: "no"
     entrypoint: ["sh", "/verify/verify.sh"]
@@ -260,6 +299,26 @@ services:
     # NameServer advertises the loopback Broker address used by host JVMs. Sharing
     # the Broker network namespace lets the container verifier exercise that same
     # address without weakening the host-only publish bindings.
+    network_mode: "service:rocketmq-broker"
+
+  rocketmq-topology-provision:
+    image: apache/rocketmq:5.3.4@sha256:d57ee4ebbd9d7bb6e185775bde41c128e98f185b25bf0b05c77d4e6c010572b8
+    restart: "no"
+    entrypoint: ["sh", "/provision/provision-topology.sh"]
+    environment:
+      FLOWDESK_ROCKETMQ_ACL_ENABLED: ${FLOWDESK_ROCKETMQ_ACL_ENABLED:-false}
+      FLOWDESK_ROCKETMQ_ADMIN_ACCESS_KEY: ${FLOWDESK_ROCKETMQ_ADMIN_ACCESS_KEY:-}
+      FLOWDESK_ROCKETMQ_ADMIN_SECRET_KEY: ${FLOWDESK_ROCKETMQ_ADMIN_SECRET_KEY:-}
+      FLOWDESK_ROCKETMQ_ADMIN_BROKER_ADDRESS: ${FLOWDESK_ROCKETMQ_ADMIN_BROKER_ADDRESS:-}
+      FLOWDESK_ROCKETMQ_ADMIN_BROKER_HOST: ${FLOWDESK_ROCKETMQ_ADMIN_BROKER_HOST:-127.0.0.1}
+      FLOWDESK_ROCKETMQ_BROKER_PUBLISH_PORT: ${FLOWDESK_ROCKETMQ_BROKER_PUBLISH_PORT:-10911}
+      FLOWDESK_ROCKETMQ_M7_ENABLED: ${FLOWDESK_ROCKETMQ_M7_ENABLED:-false}
+      FLOWDESK_ROCKETMQ_M8_ENABLED: ${FLOWDESK_ROCKETMQ_M8_ENABLED:-false}
+    depends_on:
+      rocketmq-broker:
+        condition: service_healthy
+    volumes:
+      - ./infra/rocketmq/provision-topology.sh:/provision/provision-topology.sh:ro
     network_mode: "service:rocketmq-broker"
 
   rocketmq-acl-provision:
@@ -436,6 +495,7 @@ services:
       - ./flowdesk-notification-service/src/main/resources/db/demo-migration:/flyway/demo:ro
 
   demo-seed-verify:
+    profiles: ["acceptance"]
     image: mysql:8.4.10@sha256:8dbcf531a03aade657e181b9cf2f1d1803ce621a1d55610cb44cb531ab7d7db6
     restart: "no"
     environment:
@@ -456,6 +516,7 @@ services:
       - data
 
   milestone7-monitoring-credentials:
+    profiles: ["acceptance"]
     image: mysql:8.4.10@sha256:8dbcf531a03aade657e181b9cf2f1d1803ce621a1d55610cb44cb531ab7d7db6
     restart: "no"
     environment:
@@ -474,6 +535,7 @@ services:
   # M6 formal acceptance only.  The fixture is intentionally absent from
   # product/demo Flyway locations and is loaded with an admin-only one-shot job.
   milestone6-condition-false-fixture:
+    profiles: ["acceptance"]
     image: mysql:8.4.10@sha256:8dbcf531a03aade657e181b9cf2f1d1803ce621a1d55610cb44cb531ab7d7db6
     restart: "no"
     environment:
@@ -491,6 +553,7 @@ services:
       - data
 
   milestone6-takeover-schema-init:
+    profiles: ["acceptance"]
     image: mysql:8.4.10@sha256:8dbcf531a03aade657e181b9cf2f1d1803ce621a1d55610cb44cb531ab7d7db6
     restart: "no"
     environment:
@@ -509,6 +572,7 @@ services:
       - data
 
   milestone6-takeover-migrate:
+    profiles: ["acceptance"]
     image: flyway/flyway:11.14.1@sha256:ba032dc3fc4510694e1d096e2491ef562e42170ed91eec66ee5377b1124913d8
     restart: "no"
     command: ["migrate"]
@@ -527,6 +591,7 @@ services:
       - data
 
   milestone6-takeover-verify:
+    profiles: ["acceptance"]
     image: mysql:8.4.10@sha256:8dbcf531a03aade657e181b9cf2f1d1803ce621a1d55610cb44cb531ab7d7db6
     restart: "no"
     environment:
@@ -568,6 +633,7 @@ services:
   # Focused M5 acceptance grants only the two schemas exercised by the frozen
   # Ticket -> Workflow slice. It deliberately avoids the all-service verifier.
   database-permissions-m5:
+    profiles: ["acceptance"]
     image: mysql:8.4.10@sha256:8dbcf531a03aade657e181b9cf2f1d1803ce621a1d55610cb44cb531ab7d7db6
     restart: "no"
     environment:
@@ -585,6 +651,7 @@ services:
       - data
 
   database-verify:
+    profiles: ["acceptance"]
     image: mysql:8.4.10@sha256:8dbcf531a03aade657e181b9cf2f1d1803ce621a1d55610cb44cb531ab7d7db6
     restart: "no"
     environment:
@@ -604,6 +671,7 @@ services:
       - data
 
   database-permissions-verify:
+    profiles: ["acceptance"]
     image: mysql:8.4.10@sha256:8dbcf531a03aade657e181b9cf2f1d1803ce621a1d55610cb44cb531ab7d7db6
     restart: "no"
     entrypoint: ["bash", "/verify/runtime-permissions.sh"]
@@ -630,6 +698,7 @@ services:
       - data
 
   ticket-number-concurrency-verify:
+    profiles: ["acceptance"]
     image: mysql:8.4.10@sha256:8dbcf531a03aade657e181b9cf2f1d1803ce621a1d55610cb44cb531ab7d7db6
     restart: "no"
     entrypoint: ["bash", "/verify/ticket-number-concurrency.sh"]
@@ -645,6 +714,7 @@ services:
       - data
 
   milestone2-verify:
+    profiles: ["acceptance"]
     image: mysql:8.4.10@sha256:8dbcf531a03aade657e181b9cf2f1d1803ce621a1d55610cb44cb531ab7d7db6
     restart: "no"
     entrypoint: ["sh", "-c", "echo FLOWDESK_MILESTONE_2_OK"]
@@ -666,7 +736,7 @@ services:
   # using host JVMs; this profile is the reproducible single-machine topology
   # used by the final acceptance gate.
   m10-monitoring-credentials:
-    profiles: ["m10"]
+    profiles: ["acceptance"]
     image: mysql:8.4.10@sha256:8dbcf531a03aade657e181b9cf2f1d1803ce621a1d55610cb44cb531ab7d7db6
     restart: "no"
     environment:
@@ -693,25 +763,13 @@ services:
     read_only: true
     tmpfs: ["/tmp"]
     environment:
+      <<: *nacos-client-environment
       FLOWDESK_IAM_PORT: 8081
-      FLOWDESK_IAM_DB_URL: jdbc:mysql://mysql:3306/flowdesk_iam?sslMode=PREFERRED&allowPublicKeyRetrieval=true&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true
       FLOWDESK_IAM_DB_PASSWORD: ${FLOWDESK_IAM_DB_PASSWORD:?set FLOWDESK_IAM_DB_PASSWORD}
       FLOWDESK_CURSOR_TOKEN_HMAC_KEY: ${FLOWDESK_CURSOR_TOKEN_HMAC_KEY:?set FLOWDESK_CURSOR_TOKEN_HMAC_KEY}
       FLOWDESK_IAM_JWT_PRIVATE_KEY_FILE: /run/secrets/flowdesk-jwt-private.pem
-      FLOWDESK_IAM_SERVICE_JWT_ROTATION_ENABLED: "true"
-      FLOWDESK_IAM_SERVICE_JWT_EXIT_AFTER_ISSUE: "false"
       FLOWDESK_IAM_SERVICE_JWT_OUTPUT_DIRECTORY: /run/flowdesk/service-tokens
       FLOWDESK_IAM_SERVICE_JWT_MAPPINGS: ${FLOWDESK_IAM_SERVICE_JWT_MAPPINGS:?set FLOWDESK_IAM_SERVICE_JWT_MAPPINGS}
-      FLOWDESK_SERVICE_JWT_TTL: ${FLOWDESK_SERVICE_JWT_TTL:-PT30S}
-      FLOWDESK_SERVICE_JWT_ROTATION_INTERVAL: ${FLOWDESK_SERVICE_JWT_ROTATION_INTERVAL:-PT10S}
-      FLOWDESK_JWT_CLOCK_SKEW: ${FLOWDESK_JWT_CLOCK_SKEW:-PT2S}
-      FLOWDESK_NACOS_SERVER_ADDR: nacos:8848
-      FLOWDESK_NACOS_USERNAME: ${FLOWDESK_NACOS_USERNAME:-nacos}
-      FLOWDESK_NACOS_PASSWORD: ${FLOWDESK_NACOS_ADMIN_PASSWORD:?set FLOWDESK_NACOS_ADMIN_PASSWORD}
-      FLOWDESK_NACOS_DISCOVERY_ENABLED: "true"
-      FLOWDESK_NACOS_REGISTER_ENABLED: "true"
-      FLOWDESK_HEALTH_DATABASE_REQUIRED: "true"
-      FLOWDESK_HEALTH_MIGRATION_REQUIRED: "true"
     secrets:
       - source: flowdesk-jwt-private
         target: flowdesk-jwt-private.pem
@@ -719,7 +777,7 @@ services:
       - flowdesk-service-tokens:/run/flowdesk/service-tokens
     depends_on:
       seed-iam: {condition: service_completed_successfully}
-      nacos: {condition: service_healthy}
+      nacos-config-initialize: {condition: service_completed_successfully}
     networks: [data, control]
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS -H 'X-Correlation-Id: 00000000-0000-4000-8000-000000000000' http://127.0.0.1:8081/api/v1/internal/health/readiness >/dev/null"]
@@ -740,28 +798,15 @@ services:
     read_only: true
     tmpfs: ["/tmp"]
     environment:
+      <<: *nacos-client-environment
       FLOWDESK_WORKFLOW_PORT: 8083
-      FLOWDESK_WORKFLOW_DB_URL: jdbc:mysql://mysql:3306/flowdesk_workflow?sslMode=PREFERRED&allowPublicKeyRetrieval=true&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true
       FLOWDESK_WORKFLOW_DB_PASSWORD: ${FLOWDESK_WORKFLOW_DB_PASSWORD:?set FLOWDESK_WORKFLOW_DB_PASSWORD}
       FLOWDESK_CURSOR_TOKEN_HMAC_KEY: ${FLOWDESK_CURSOR_TOKEN_HMAC_KEY:?set FLOWDESK_CURSOR_TOKEN_HMAC_KEY}
       FLOWDESK_JWT_PUBLIC_KEY_FILE: /run/secrets/flowdesk-jwt-public.pem
-      FLOWDESK_ROCKETMQ_NAME_SERVER: rocketmq-nameserver:9876
       FLOWDESK_WORKFLOW_ROCKETMQ_ACCESS_KEY: ${FLOWDESK_WORKFLOW_ROCKETMQ_ACCESS_KEY:?set FLOWDESK_WORKFLOW_ROCKETMQ_ACCESS_KEY}
       FLOWDESK_WORKFLOW_ROCKETMQ_SECRET_KEY: ${FLOWDESK_WORKFLOW_ROCKETMQ_SECRET_KEY:?set FLOWDESK_WORKFLOW_ROCKETMQ_SECRET_KEY}
-      FLOWDESK_WORKFLOW_IAM_BASE_URL: http://iam:8081
       FLOWDESK_WORKFLOW_IAM_SERVICE_TOKEN_FILE: /run/flowdesk/service-tokens/{tenantId}-flowdesk-workflow-service.jwt
-      FLOWDESK_WORKFLOW_START_ENTRY_ENABLED: "true"
-      FLOWDESK_WORKFLOW_START_CONSUMER_ENABLED: "true"
-      FLOWDESK_WORKFLOW_OUTBOX_PUBLISHER_ENABLED: "true"
-      FLOWDESK_WORKFLOW_NOTIFICATION_OUTBOX_PUBLISHER_ENABLED: "true"
-      FLOWDESK_NACOS_SERVER_ADDR: nacos:8848
-      FLOWDESK_NACOS_USERNAME: ${FLOWDESK_NACOS_USERNAME:-nacos}
-      FLOWDESK_NACOS_PASSWORD: ${FLOWDESK_NACOS_ADMIN_PASSWORD:?set FLOWDESK_NACOS_ADMIN_PASSWORD}
-      FLOWDESK_NACOS_DISCOVERY_ENABLED: "true"
-      FLOWDESK_NACOS_REGISTER_ENABLED: "true"
       FLOWDESK_ROCKETMQ_M8_ENABLED: "true"
-      FLOWDESK_HEALTH_DATABASE_REQUIRED: "true"
-      FLOWDESK_HEALTH_MIGRATION_REQUIRED: "true"
     secrets:
       - source: flowdesk-jwt-public
         target: flowdesk-jwt-public.pem
@@ -771,7 +816,8 @@ services:
       seed-workflow: {condition: service_completed_successfully}
       iam: {condition: service_healthy}
       rocketmq-broker: {condition: service_healthy}
-      nacos: {condition: service_healthy}
+      rocketmq-topology-provision: {condition: service_completed_successfully}
+      nacos-config-initialize: {condition: service_completed_successfully}
     networks: [data, control, messaging]
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS -H 'X-Correlation-Id: 00000000-0000-4000-8000-000000000000' http://127.0.0.1:8083/api/v1/internal/health/readiness >/dev/null"]
@@ -792,40 +838,17 @@ services:
     read_only: true
     tmpfs: ["/tmp"]
     environment:
+      <<: *nacos-client-environment
       FLOWDESK_TICKET_PORT: 8082
-      FLOWDESK_TICKET_DB_URL: jdbc:mysql://mysql:3306/flowdesk_ticket?sslMode=PREFERRED&allowPublicKeyRetrieval=true&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true
       FLOWDESK_TICKET_DB_PASSWORD: ${FLOWDESK_TICKET_DB_PASSWORD:?set FLOWDESK_TICKET_DB_PASSWORD}
       FLOWDESK_CURSOR_TOKEN_HMAC_KEY: ${FLOWDESK_CURSOR_TOKEN_HMAC_KEY:?set FLOWDESK_CURSOR_TOKEN_HMAC_KEY}
       FLOWDESK_JWT_PUBLIC_KEY_FILE: /run/secrets/flowdesk-jwt-public.pem
-      FLOWDESK_REDIS_HOST: redis
-      FLOWDESK_REDIS_PORT: 6379
       FLOWDESK_REDIS_PASSWORD: ${FLOWDESK_REDIS_PASSWORD:?set FLOWDESK_REDIS_PASSWORD}
-      FLOWDESK_ROCKETMQ_NAME_SERVER: rocketmq-nameserver:9876
       FLOWDESK_TICKET_ROCKETMQ_ACCESS_KEY: ${FLOWDESK_TICKET_ROCKETMQ_ACCESS_KEY:?set FLOWDESK_TICKET_ROCKETMQ_ACCESS_KEY}
       FLOWDESK_TICKET_ROCKETMQ_SECRET_KEY: ${FLOWDESK_TICKET_ROCKETMQ_SECRET_KEY:?set FLOWDESK_TICKET_ROCKETMQ_SECRET_KEY}
-      FLOWDESK_TICKET_IAM_BASE_URL: http://iam:8081
-      FLOWDESK_TICKET_WORKFLOW_BASE_URL: http://workflow:8083
       FLOWDESK_TICKET_IAM_SERVICE_TOKEN_FILE: /run/flowdesk/service-tokens/{tenantId}-flowdesk-ticket-service.jwt
-      FLOWDESK_TICKET_OUTBOX_PUBLISHER_ENABLED: "true"
-      FLOWDESK_TICKET_WORKFLOW_REVERSE_ENTRY_ENABLED: "true"
-      FLOWDESK_TICKET_WORKFLOW_REVERSE_CONSUMER_ENABLED: "true"
-      FLOWDESK_TICKET_INCIDENT_ENTRY_ENABLED: "true"
-      FLOWDESK_TICKET_INCIDENT_CONSUMER_ENABLED: "true"
-      FLOWDESK_TICKET_INCIDENT_RESULT_PUBLISHER_ENABLED: "true"
-      FLOWDESK_TICKET_NOTIFICATION_OUTBOX_PUBLISHER_ENABLED: "true"
-      FLOWDESK_TICKET_SLA_ENABLED: "true"
-      FLOWDESK_TICKET_SLA_SCANNER_ENABLED: "true"
-      FLOWDESK_TICKET_SLA_REBUILDER_ENABLED: "true"
-      FLOWDESK_TICKET_SLA_REDIS_ENABLED: "true"
-      FLOWDESK_NACOS_SERVER_ADDR: nacos:8848
-      FLOWDESK_NACOS_USERNAME: ${FLOWDESK_NACOS_USERNAME:-nacos}
-      FLOWDESK_NACOS_PASSWORD: ${FLOWDESK_NACOS_ADMIN_PASSWORD:?set FLOWDESK_NACOS_ADMIN_PASSWORD}
-      FLOWDESK_NACOS_DISCOVERY_ENABLED: "true"
-      FLOWDESK_NACOS_REGISTER_ENABLED: "true"
       FLOWDESK_ROCKETMQ_M7_ENABLED: "true"
       FLOWDESK_ROCKETMQ_M8_ENABLED: "true"
-      FLOWDESK_HEALTH_DATABASE_REQUIRED: "true"
-      FLOWDESK_HEALTH_MIGRATION_REQUIRED: "true"
     secrets:
       - source: flowdesk-jwt-public
         target: flowdesk-jwt-public.pem
@@ -837,7 +860,8 @@ services:
       workflow: {condition: service_healthy}
       redis: {condition: service_healthy}
       rocketmq-broker: {condition: service_healthy}
-      nacos: {condition: service_healthy}
+      rocketmq-topology-provision: {condition: service_completed_successfully}
+      nacos-config-initialize: {condition: service_completed_successfully}
     networks: [data, control, messaging]
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS -H 'X-Correlation-Id: 00000000-0000-4000-8000-000000000000' http://127.0.0.1:8082/api/v1/internal/health/readiness >/dev/null"]
@@ -858,28 +882,15 @@ services:
     read_only: true
     tmpfs: ["/tmp"]
     environment:
+      <<: *nacos-client-environment
       FLOWDESK_ALERT_PORT: 8084
-      FLOWDESK_ALERT_DB_URL: jdbc:mysql://mysql:3306/flowdesk_alert?sslMode=PREFERRED&allowPublicKeyRetrieval=true&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true
       FLOWDESK_ALERT_DB_PASSWORD: ${FLOWDESK_ALERT_DB_PASSWORD:?set FLOWDESK_ALERT_DB_PASSWORD}
       FLOWDESK_CURSOR_TOKEN_HMAC_KEY: ${FLOWDESK_CURSOR_TOKEN_HMAC_KEY:?set FLOWDESK_CURSOR_TOKEN_HMAC_KEY}
       FLOWDESK_JWT_PUBLIC_KEY_FILE: /run/secrets/flowdesk-jwt-public.pem
-      FLOWDESK_ROCKETMQ_NAME_SERVER: rocketmq-nameserver:9876
       FLOWDESK_ALERT_ROCKETMQ_ACCESS_KEY: ${FLOWDESK_ALERT_ROCKETMQ_ACCESS_KEY:?set FLOWDESK_ALERT_ROCKETMQ_ACCESS_KEY}
       FLOWDESK_ALERT_ROCKETMQ_SECRET_KEY: ${FLOWDESK_ALERT_ROCKETMQ_SECRET_KEY:?set FLOWDESK_ALERT_ROCKETMQ_SECRET_KEY}
-      FLOWDESK_ALERT_WEBHOOK_ENABLED: "true"
-      FLOWDESK_ALERT_WEBHOOK_TIMESTAMP_WINDOW: ${FLOWDESK_ALERT_WEBHOOK_TIMESTAMP_WINDOW:-PT5M}
       FLOWDESK_ALERT_WEBHOOK_SECRETS_FILE: /run/secrets/flowdesk-webhook-secrets
-      FLOWDESK_ALERT_TICKET_RESULT_ENTRY_ENABLED: "true"
-      FLOWDESK_ALERT_TICKET_RESULT_CONSUMER_ENABLED: "true"
-      FLOWDESK_ALERT_OUTBOX_PUBLISHER_ENABLED: "true"
-      FLOWDESK_NACOS_SERVER_ADDR: nacos:8848
-      FLOWDESK_NACOS_USERNAME: ${FLOWDESK_NACOS_USERNAME:-nacos}
-      FLOWDESK_NACOS_PASSWORD: ${FLOWDESK_NACOS_ADMIN_PASSWORD:?set FLOWDESK_NACOS_ADMIN_PASSWORD}
-      FLOWDESK_NACOS_DISCOVERY_ENABLED: "true"
-      FLOWDESK_NACOS_REGISTER_ENABLED: "true"
       FLOWDESK_ROCKETMQ_M7_ENABLED: "true"
-      FLOWDESK_HEALTH_DATABASE_REQUIRED: "true"
-      FLOWDESK_HEALTH_MIGRATION_REQUIRED: "true"
     secrets:
       - source: flowdesk-jwt-public
         target: flowdesk-jwt-public.pem
@@ -892,7 +903,8 @@ services:
       seed-alert: {condition: service_completed_successfully}
       ticket: {condition: service_healthy}
       rocketmq-broker: {condition: service_healthy}
-      nacos: {condition: service_healthy}
+      rocketmq-topology-provision: {condition: service_completed_successfully}
+      nacos-config-initialize: {condition: service_completed_successfully}
     networks: [data, control, messaging]
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS -H 'X-Correlation-Id: 00000000-0000-4000-8000-000000000000' http://127.0.0.1:8084/api/v1/internal/health/readiness >/dev/null"]
@@ -913,34 +925,23 @@ services:
     read_only: true
     tmpfs: ["/tmp"]
     environment:
+      <<: *nacos-client-environment
       FLOWDESK_NOTIFICATION_PORT: 8085
-      FLOWDESK_NOTIFICATION_DB_URL: jdbc:mysql://mysql:3306/flowdesk_notification?sslMode=PREFERRED&allowPublicKeyRetrieval=true&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true
       FLOWDESK_NOTIFICATION_DB_PASSWORD: ${FLOWDESK_NOTIFICATION_DB_PASSWORD:?set FLOWDESK_NOTIFICATION_DB_PASSWORD}
-      FLOWDESK_NOTIFICATION_RECOVERY_DB_URL: jdbc:mysql://mysql:3306/flowdesk_notification?sslMode=PREFERRED&allowPublicKeyRetrieval=true&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true
       FLOWDESK_NOTIFICATION_RECOVERY_DB_PASSWORD: ${FLOWDESK_NOTIFICATION_RECOVERY_DB_PASSWORD:?set FLOWDESK_NOTIFICATION_RECOVERY_DB_PASSWORD}
       FLOWDESK_CURSOR_TOKEN_HMAC_KEY: ${FLOWDESK_CURSOR_TOKEN_HMAC_KEY:?set FLOWDESK_CURSOR_TOKEN_HMAC_KEY}
       FLOWDESK_JWT_PUBLIC_KEY_FILE: /run/secrets/flowdesk-jwt-public.pem
-      FLOWDESK_ROCKETMQ_NAME_SERVER: rocketmq-nameserver:9876
       FLOWDESK_NOTIFICATION_ROCKETMQ_ACCESS_KEY: ${FLOWDESK_NOTIFICATION_ROCKETMQ_ACCESS_KEY:?set FLOWDESK_NOTIFICATION_ROCKETMQ_ACCESS_KEY}
       FLOWDESK_NOTIFICATION_ROCKETMQ_SECRET_KEY: ${FLOWDESK_NOTIFICATION_ROCKETMQ_SECRET_KEY:?set FLOWDESK_NOTIFICATION_ROCKETMQ_SECRET_KEY}
-      FLOWDESK_NOTIFICATION_ENTRY_ENABLED: "true"
-      FLOWDESK_NOTIFICATION_CONSUMER_ENABLED: "true"
-      FLOWDESK_NOTIFICATION_RECOVERY_ENABLED: "true"
-      FLOWDESK_NACOS_SERVER_ADDR: nacos:8848
-      FLOWDESK_NACOS_USERNAME: ${FLOWDESK_NACOS_USERNAME:-nacos}
-      FLOWDESK_NACOS_PASSWORD: ${FLOWDESK_NACOS_ADMIN_PASSWORD:?set FLOWDESK_NACOS_ADMIN_PASSWORD}
-      FLOWDESK_NACOS_DISCOVERY_ENABLED: "true"
-      FLOWDESK_NACOS_REGISTER_ENABLED: "true"
       FLOWDESK_ROCKETMQ_M8_ENABLED: "true"
-      FLOWDESK_HEALTH_DATABASE_REQUIRED: "true"
-      FLOWDESK_HEALTH_MIGRATION_REQUIRED: "true"
     secrets:
       - source: flowdesk-jwt-public
         target: flowdesk-jwt-public.pem
     depends_on:
       seed-notification: {condition: service_completed_successfully}
       rocketmq-broker: {condition: service_healthy}
-      nacos: {condition: service_healthy}
+      rocketmq-topology-provision: {condition: service_completed_successfully}
+      nacos-config-initialize: {condition: service_completed_successfully}
     networks: [data, control, messaging]
     healthcheck:
       test: ["CMD-SHELL", "curl -fsS -H 'X-Correlation-Id: 00000000-0000-4000-8000-000000000000' http://127.0.0.1:8085/api/v1/internal/health/readiness >/dev/null"]
@@ -961,9 +962,9 @@ services:
     read_only: true
     tmpfs: ["/tmp"]
     environment:
+      <<: *nacos-client-environment
       FLOWDESK_GATEWAY_PORT: ${FLOWDESK_GATEWAY_PORT:-8080}
       FLOWDESK_JWT_PUBLIC_KEY_FILE: /run/secrets/flowdesk-jwt-public.pem
-      FLOWDESK_GATEWAY_WEBHOOK_REQUIRE_TLS: ${FLOWDESK_GATEWAY_WEBHOOK_REQUIRE_TLS:-true}
       # M10 is HTTPS-only at the published boundary.  Host-JVM profiles keep
       # their historical HTTP defaults in the generated local environment;
       # this profile must never silently downgrade to plaintext.
@@ -971,29 +972,19 @@ services:
       FLOWDESK_GATEWAY_TLS_KEY_STORE: ${FLOWDESK_GATEWAY_TLS_KEY_STORE:-/run/secrets/flowdesk-gateway-tls.p12}
       FLOWDESK_GATEWAY_TLS_KEY_STORE_PASSWORD: ${FLOWDESK_GATEWAY_TLS_KEY_STORE_PASSWORD:-}
       FLOWDESK_GATEWAY_TLS_KEY_STORE_TYPE: ${FLOWDESK_GATEWAY_TLS_KEY_STORE_TYPE:-PKCS12}
-      FLOWDESK_NACOS_SERVER_ADDR: nacos:8848
-      FLOWDESK_NACOS_USERNAME: ${FLOWDESK_NACOS_USERNAME:-nacos}
-      FLOWDESK_NACOS_PASSWORD: ${FLOWDESK_NACOS_ADMIN_PASSWORD:?set FLOWDESK_NACOS_ADMIN_PASSWORD}
-      FLOWDESK_NACOS_DISCOVERY_ENABLED: "true"
-      FLOWDESK_NACOS_REGISTER_ENABLED: "true"
-      FLOWDESK_GATEWAY_ROUTES_IAM: http://iam:8081
-      FLOWDESK_GATEWAY_ROUTES_TICKET: http://ticket:8082
-      FLOWDESK_GATEWAY_ROUTES_WORKFLOW: http://workflow:8083
-      FLOWDESK_GATEWAY_ROUTES_ALERT: http://alert:8084
-      FLOWDESK_GATEWAY_ROUTES_NOTIFICATION: http://notification:8085
-      FLOWDESK_HEALTH_STATIC_BUNDLE_REQUIRED: "true"
     secrets:
       - source: flowdesk-jwt-public
         target: flowdesk-jwt-public.pem
       - source: flowdesk-gateway-tls
         target: flowdesk-gateway-tls.p12
     depends_on:
+      nacos-config-initialize: {condition: service_completed_successfully}
       iam: {condition: service_healthy}
       ticket: {condition: service_healthy}
       workflow: {condition: service_healthy}
       alert: {condition: service_healthy}
       notification: {condition: service_healthy}
-    networks: [control, data, messaging]
+    networks: [control, data, messaging, edge]
     ports:
       - "127.0.0.1:${FLOWDESK_GATEWAY_PORT:-8080}:${FLOWDESK_GATEWAY_PORT:-8080}"
     healthcheck:
@@ -1003,6 +994,30 @@ services:
       retries: 30
       start_period: 30s
 
+  web:
+    profiles: ["m10"]
+    build:
+      context: ./flowdesk-web
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    init: true
+    security_opt: ["no-new-privileges:true"]
+    read_only: true
+    tmpfs:
+      - /tmp:uid=101,gid=101,mode=1777
+      - /etc/nginx/conf.d:uid=101,gid=101,mode=0755
+    environment:
+      FLOWDESK_GATEWAY_PORT: ${FLOWDESK_GATEWAY_PORT:-8080}
+      FLOWDESK_GATEWAY_TLS_SERVER_NAME: ${FLOWDESK_GATEWAY_TLS_SERVER_NAME:-localhost}
+    secrets:
+      - source: flowdesk-gateway-ca
+        target: flowdesk-gateway-ca.crt
+    depends_on:
+      gateway: {condition: service_healthy}
+    networks: [edge]
+    ports:
+      - "127.0.0.1:${FLOWDESK_WEB_PORT:-8086}:8080"
+
 networks:
   # Docker Desktop does not activate published host ports for `internal: true`
   # networks. The security boundary for local development is still enforced by
@@ -1010,6 +1025,7 @@ networks:
   control:
   data:
   messaging:
+  edge:
 
 volumes:
   mysql-data:
@@ -1029,3 +1045,5 @@ secrets:
     file: ${FLOWDESK_JWT_PUBLIC_KEY_FILE:?set FLOWDESK_JWT_PUBLIC_KEY_FILE}
   flowdesk-gateway-tls:
     file: ${FLOWDESK_GATEWAY_TLS_KEY_STORE_FILE:-./.data/milestone10/gateway-local.p12}
+  flowdesk-gateway-ca:
+    file: ${FLOWDESK_GATEWAY_TLS_CA_FILE:-./.data/keys/gateway.crt}

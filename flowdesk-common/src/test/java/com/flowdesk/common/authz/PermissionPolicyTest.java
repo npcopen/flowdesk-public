@@ -11,11 +11,17 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+/**
+ * 验证人类与服务主体的权限边界，覆盖租户一致性、角色能力上限及任一/全部权限组合判定。
+ */
 class PermissionPolicyTest {
 
     private static final UUID TENANT = UUID.fromString("11111111-1111-1111-1111-111111111111");
     private static final UUID USER = UUID.fromString("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
 
+    /**
+     * 验证权限检查同时要求租户、操作者身份匹配，并受固定角色权限上限约束。
+     */
     @Test
     void permissionRequiresMatchingTenantActorAndCeiling() {
         JwtPrincipal principal = JwtPrincipal.human(TENANT, USER,
@@ -26,6 +32,9 @@ class PermissionPolicyTest {
         PermissionPolicy.require(context, principal, PermissionCode.IAM_USER_MANAGE); // passes
     }
 
+    /**
+     * 验证上下文与认证主体的租户不一致时拒绝授权，不能借用其他租户的有效权限。
+     */
     @Test
     void crossTenantContextAndPrincipalAreRejected() {
         JwtPrincipal principal = JwtPrincipal.human(TENANT, USER,
@@ -39,6 +48,9 @@ class PermissionPolicyTest {
                 .isInstanceOf(PermissionDeniedException.class);
     }
 
+    /**
+     * 验证实际权限取角色能力上限与已授予权限的交集，数据库多余授权不能突破角色边界。
+     */
     @Test
     void roleCeilingIsIntersectedWithGrantedPermissions() {
         // A forged/stale combination where the permission is outside the role ceiling is denied.
@@ -54,6 +66,9 @@ class PermissionPolicyTest {
                 .isInstanceOf(PermissionDeniedException.class);
     }
 
+    /**
+     * 验证服务 JWT 不能调用人类用户权限入口，防止服务主体被解释为管理用户。
+     */
     @Test
     void serviceJwtCannotUseHumanPermissions() {
         JwtPrincipal principal = JwtPrincipal.service(TENANT, "flowdesk-ticket-service",
@@ -66,6 +81,9 @@ class PermissionPolicyTest {
                 .isInstanceOf(PermissionDeniedException.class);
     }
 
+    /**
+     * 验证任一权限检查在当前主体至少具备一个候选权限时通过。
+     */
     @Test
     void requireAnyPassesWhenAtLeastOnePermissionIsHeld() {
         // TenantAdmin holds IAM_USER_READ but not IAM_ELIGIBILITY_CANDIDATE_READ:
@@ -82,6 +100,9 @@ class PermissionPolicyTest {
                 .isInstanceOf(PermissionDeniedException.class);
     }
 
+    /**
+     * 验证未持有候选权限及空权限列表均拒绝访问，避免空条件意外放行。
+     */
     @Test
     void requireAnyFailsWhenNoPermissionIsHeldAndEmptyListIsFailClosed() {
         JwtPrincipal principal = JwtPrincipal.human(TENANT, USER,
@@ -99,6 +120,9 @@ class PermissionPolicyTest {
                 .isInstanceOf(PermissionDeniedException.class);
     }
 
+    /**
+     * 验证全部权限检查只有在主体满足每一项权限时通过。
+     */
     @Test
     void requireAllPassesWhenEveryPermissionIsHeld() {
         JwtPrincipal principal = JwtPrincipal.human(TENANT, USER,
@@ -111,6 +135,9 @@ class PermissionPolicyTest {
                 PermissionCode.IAM_USER_READ, PermissionCode.IAM_USER_MANAGE); // passes
     }
 
+    /**
+     * 验证恢复读取和人工重放权限仅对 ServiceDeskAdmin 开放，其他角色不因数据授权而突破上限。
+     */
     @Test
     void recoveryReadAndReplayAreServiceDeskAdminOnly() {
         Set<PermissionCode> recoveryPermissions = Set.of(

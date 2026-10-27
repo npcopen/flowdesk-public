@@ -6,14 +6,12 @@ interface ImportMetaEnv {
   readonly VITE_NOTIFICATION_MODE?: 'disabled' | 'mock' | 'api'
   readonly VITE_RECOVERY_MODE?: 'disabled' | 'mock' | 'api'
   readonly VITE_SLA_MODE?: 'readonly-api' | 'mock' | 'disabled'
-  readonly VITE_E2E_BACKEND?: 'mock' | 'gateway'
+  readonly VITE_E2E_BACKEND?: 'mock' | 'web' | 'gateway'
 }
 
 interface ImportMeta {
   readonly env: ImportMetaEnv
 }
-
-declare const __FLOWDESK_GATEWAY_MODE__: boolean
 
 interface Window {
   /** Present only in the mock Playwright profile; never used by the product UI. */

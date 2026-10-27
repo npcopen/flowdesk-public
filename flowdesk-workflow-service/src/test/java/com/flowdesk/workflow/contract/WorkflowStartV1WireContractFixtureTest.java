@@ -12,6 +12,9 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+/**
+ * 启动 V1 冻结协议测试，逐项核验信封保留属性、载荷类型、摘要与严格 UTF-8 编码。
+ */
 class WorkflowStartV1WireContractFixtureTest {
 
     private static final WorkflowStartEnvelopeGuard GUARD = new WorkflowStartEnvelopeGuard();
@@ -24,6 +27,9 @@ class WorkflowStartV1WireContractFixtureTest {
                     + ",\"workflowDefinitionId\":\"018f6f2d-9b57-7c31-a69f-4db0d84db103\""
                     + ",\"workflowVersionId\":\"018f6f2d-9b57-7c31-a69f-4db0d84db104\"}";
 
+    /**
+     * 验证严格接纳工单侧生成的冻结消息样例，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void acceptsExactTicketProducedWireFixture() {
         WorkflowStartV1WireFixture.WireMessage fixture = WorkflowStartV1WireFixture.load();
@@ -51,6 +57,9 @@ class WorkflowStartV1WireContractFixtureTest {
         assertThat(accepted.occurredAt()).isEqualTo(Instant.parse("2026-08-22T01:02:03.123456Z"));
     }
 
+    /**
+     * 验证拒绝未知保留信封属性，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void rejectsUnknownReservedEnvelopeProperty() {
         WorkflowStartV1WireFixture.WireMessage changed = WorkflowStartV1WireFixture.load()
@@ -61,6 +70,9 @@ class WorkflowStartV1WireContractFixtureTest {
                 .hasMessage("UNKNOWN_ENVELOPE_PROPERTY:fd_contract_verison");
     }
 
+    /**
+     * 验证允许向前兼容的扩展属性，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void ignoresForwardCompatibleFdxProperty() {
         WorkflowStartV1WireFixture.WireMessage extended = WorkflowStartV1WireFixture.load()
@@ -70,6 +82,9 @@ class WorkflowStartV1WireContractFixtureTest {
                 .isEqualTo(UUID.fromString("018f6f2d-9b57-7c31-a69f-4db0d84db102"));
     }
 
+    /**
+     * 验证接纳并保留非零因果标识，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void acceptsAndRetainsNonZeroCausationId() {
         WorkflowStartV1WireFixture.WireMessage extended = WorkflowStartV1WireFixture.load()
@@ -79,6 +94,9 @@ class WorkflowStartV1WireContractFixtureTest {
                 .isEqualTo(UUID.fromString("018f6f2d-9b57-7c31-a69f-4db0d84db109"));
     }
 
+    /**
+     * 验证拒绝零值因果标识，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void rejectsZeroCausationId() {
         WorkflowStartV1WireFixture.WireMessage changed = WorkflowStartV1WireFixture.load()
@@ -89,6 +107,9 @@ class WorkflowStartV1WireContractFixtureTest {
                 .hasMessage("CAUSATION_ID_ZERO_FORBIDDEN");
     }
 
+    /**
+     * 验证缺少消息键被识别为确定性契约违规，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void rejectsMissingMessageKeyAsDeterministicContractViolation() {
         WorkflowStartV1WireFixture.WireMessage changed = WorkflowStartV1WireFixture.load()
@@ -99,6 +120,9 @@ class WorkflowStartV1WireContractFixtureTest {
                 .hasMessage("MESSAGE_KEY_MISMATCH");
     }
 
+    /**
+     * 验证允许载荷顶层未知可选字段保持向前兼容，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void acceptsUnknownOptionalTopLevelPayloadField() {
         byte[] extendedBody = EXACT_TICKET_BODY.replace(
@@ -111,6 +135,9 @@ class WorkflowStartV1WireContractFixtureTest {
                 .isEqualTo(UUID.fromString("018f6f2d-9b57-7c31-a69f-4db0d84db102"));
     }
 
+    /**
+     * 验证即使摘要匹配且解析器能探测编码仍拒绝 UTF-16 JSON，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void rejectsUtf16JsonEvenWhenJacksonCouldAutoDetectItAndHashMatches() {
         byte[] utf16Body = EXACT_TICKET_BODY.getBytes(StandardCharsets.UTF_16BE);
@@ -122,6 +149,9 @@ class WorkflowStartV1WireContractFixtureTest {
                 .hasMessage("PAYLOAD_INVALID_JSON");
     }
 
+    /**
+     * 验证拒绝缺失必填载荷字段的消息，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void rejectsMissingRequiredPayloadField() {
         byte[] missingRequester = EXACT_TICKET_BODY.replace(
@@ -135,6 +165,9 @@ class WorkflowStartV1WireContractFixtureTest {
                 .hasMessage("PAYLOAD_FIELD_MISSING:requesterUserId");
     }
 
+    /**
+     * 验证即使内容摘要匹配也拒绝载荷字段类型漂移，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void rejectsPayloadTypeDriftEvenWhenBodyHashMatchesChangedBytes() {
         byte[] driftedBody = EXACT_TICKET_BODY
@@ -148,6 +181,9 @@ class WorkflowStartV1WireContractFixtureTest {
                 .hasMessage("PAYLOAD_TYPE_INVALID:versionNo");
     }
 
+    /**
+     * 验证拒绝超出正整数范围的版本号，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void rejectsVersionNumberOutsidePositiveIntRange() {
         byte[] overflowedBody = EXACT_TICKET_BODY
@@ -161,6 +197,9 @@ class WorkflowStartV1WireContractFixtureTest {
                 .hasMessage("PAYLOAD_TYPE_INVALID:versionNo");
     }
 
+    /**
+     * 验证载荷接纳之前拒绝内容摘要不匹配，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void rejectsHashMismatchBeforePayloadAcceptance() {
         WorkflowStartV1WireFixture.WireMessage changed = WorkflowStartV1WireFixture.load()
@@ -171,6 +210,9 @@ class WorkflowStartV1WireContractFixtureTest {
                 .hasMessage("BODY_HASH_MISMATCH");
     }
 
+    /**
+     * 验证建立租户信任前拒绝错误消费方向，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void rejectsWrongConsumerDirectionBeforeTenantAcceptance() {
         WorkflowStartV1WireFixture.WireMessage changed = WorkflowStartV1WireFixture.load()
@@ -181,6 +223,9 @@ class WorkflowStartV1WireContractFixtureTest {
                 .hasMessage("CONSUMER_DIRECTION_MISMATCH");
     }
 
+    /**
+     * 验证冻结 Topic 不支持 Tag 时拒绝携带 Tag 的消息，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void rejectsTagBecauseTheFrozenTopicHasNoTagContract() {
         WorkflowStartV1WireFixture.WireMessage changed = WorkflowStartV1WireFixture.load()
@@ -191,6 +236,9 @@ class WorkflowStartV1WireContractFixtureTest {
                 .hasMessage("TAG_FORBIDDEN");
     }
 
+    /**
+     * 验证拒绝缺失必填信封属性的消息，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void rejectsMissingRequiredEnvelopeProperty() {
         WorkflowStartV1WireFixture.WireMessage changed = WorkflowStartV1WireFixture.load()
@@ -201,6 +249,9 @@ class WorkflowStartV1WireContractFixtureTest {
                 .hasMessage("MISSING_ENVELOPE_PROPERTY:fd_contract_version");
     }
 
+    /**
+     * 验证拒绝具有重复键的 JSON 载荷，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void rejectsDuplicateJsonKeys() {
         byte[] duplicateField = EXACT_TICKET_BODY.replace(

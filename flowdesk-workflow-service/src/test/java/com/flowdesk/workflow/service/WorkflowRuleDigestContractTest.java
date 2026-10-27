@@ -7,6 +7,9 @@ import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+/**
+ * 规则摘要契约测试，保证规范演示数据的摘要与两侧迁移常量一致。
+ */
 class WorkflowRuleDigestContractTest {
     private static final UUID DEFINITION =
             UUID.fromString("0848bf3c-d603-5ece-9529-f9bba79f1498");
@@ -15,6 +18,9 @@ class WorkflowRuleDigestContractTest {
     private static final UUID LEVEL_TWO =
             UUID.fromString("fdecef4b-2a69-538e-9fa5-249048115d3d");
 
+    /**
+     * 验证里程碑六演示摘要与两侧前向迁移常量一致，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void canonicalM6DemoDigestsMatchBothForwardMigrationConstants() {
         assertThat(digest("12d7dca8-380c-5a6c-84ae-953502959486"))
@@ -23,6 +29,9 @@ class WorkflowRuleDigestContractTest {
                 .isEqualTo("b5f88cb00a46437c3340436e92ce37ded28b25bb919650ba7c95d059f2972b0f");
     }
 
+    /**
+     * 按固定字段顺序计算规则摘要，使校验与发布使用一致的内容依据。
+     */
     private static String digest(String tenant) {
         return HexFormat.of().formatHex(WorkflowRuleDigest.digest(UUID.fromString(tenant),
                 DEFINITION, "SERVICE_RISK_LEVEL", "EQUALS", "STRING", "HIGH",

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+/** 按消息归属服务管理恢复列表、详情和人工重放，并携带版本条件防止并发覆盖。 */
 import { computed, onMounted, reactive, ref } from "vue";
 import {
   CheckCircle2,
@@ -36,6 +37,10 @@ interface RecoveryState {
   tokenStack: string[];
 }
 
+/**
+ * 创建单个所属服务的恢复列表初始状态。
+ * 分页、错误及不可用标记各自独立，避免不同服务的查询相互覆盖。
+ */
 function emptyState(): RecoveryState {
   return {
     items: [],
@@ -47,6 +52,7 @@ function emptyState(): RecoveryState {
   };
 }
 
+// 各服务独立维护列表、错误和游标，切换标签时避免混用不同服务的恢复记录。
 const states = reactive<Record<RecoveryOwner, RecoveryState>>({
   TICKET: emptyState(),
   WORKFLOW: emptyState(),
@@ -78,10 +84,18 @@ const replayError = ref<unknown>(null);
 const replayLoading = ref(false);
 const replayNotice = ref<string | null>(null);
 
+/**
+ * 把恢复记录所属服务转换为中文名称。
+ * 统一列表和详情中对负责处理服务的展示。
+ */
 function ownerLabel(owner: RecoveryOwner): string {
   return recoveryOwnerLabel(owner);
 }
 
+/**
+ * 生成恢复状态对应的业务说明。
+ * 帮助操作者区分待处理、处理过程和需要人工介入的结果。
+ */
 function stateDescription(item: MessageRecovery): string {
   if (item.state === "OPEN") return "等待人工处理";
   if (item.state === "REPLAYING") return "正在处理";
@@ -89,10 +103,18 @@ function stateDescription(item: MessageRecovery): string {
   return "状态待确认";
 }
 
+/**
+ * 选择恢复记录当前最相关的展示时间。
+ * 优先展示下一次尝试时间，否则使用进入待恢复状态的时间。
+ */
 function relevantTime(item: MessageRecovery): string | null {
   return item.nextAttemptAt || item.recoveryRequiredAt;
 }
 
+/**
+ * 加载一个所属服务的恢复记录，并可重置该服务游标。
+ * 分别记录查询失败和能力不可用状态，保持其他服务列表可用。
+ */
 async function loadOwner(
   owner: RecoveryOwner,
   token = "",
@@ -132,11 +154,19 @@ async function loadOwner(
   }
 }
 
+/**
+ * 并行刷新所有所属服务的恢复列表。
+ * 各列表重置至第一页，并独立更新加载和错误状态。
+ */
 async function refreshAll(): Promise<void> {
   actionNotice.value = null;
   await Promise.all(owners.map((owner) => loadOwner(owner, "", true)));
 }
 
+/**
+ * 根据目标服务当前的下一页游标继续查询。
+ * 将已访问游标入栈，供返回上一页使用。
+ */
 function nextPage(owner: RecoveryOwner): void {
   const state = states[owner];
   if (!state.nextToken || state.loading) return;
@@ -144,6 +174,10 @@ function nextPage(owner: RecoveryOwner): void {
   void loadOwner(owner, state.nextToken);
 }
 
+/**
+ * 回退目标服务的分页游标栈并重新查询。
+ * 仅影响指定服务，不改变其他恢复列表的页码。
+ */
 function previousPage(owner: RecoveryOwner): void {
   const state = states[owner];
   if (!state.tokenStack.length || state.loading) return;
@@ -152,16 +186,28 @@ function previousPage(owner: RecoveryOwner): void {
   void loadOwner(owner, previous);
 }
 
+/**
+ * 根据目标服务已访问的游标栈生成当前页说明。
+ * 第一页没有历史游标，页码从一开始展示。
+ */
 function pageLabel(owner: RecoveryOwner): string {
   return `第 ${states[owner].tokenStack.length + 1} 页`;
 }
 
+/**
+ * 按恢复记录标识替换列表中的最新记录。
+ * 详情或重放响应返回新版本后同步列表，避免继续显示旧状态。
+ */
 function replaceItem(owner: RecoveryOwner, value: MessageRecovery): void {
   const items = states[owner].items;
   const index = items.findIndex((item) => item.recoveryId === value.recoveryId);
   if (index >= 0) items[index] = value;
 }
 
+/**
+ * 打开恢复记录详情并读取最新数据与 ETag。
+ * 列表快照先用于展示，随后更新为服务端当前版本供重放操作使用。
+ */
 async function openRecovery(
   owner: RecoveryOwner,
   item: MessageRecovery,
@@ -192,6 +238,10 @@ async function openRecovery(
   }
 }
 
+/**
+ * 关闭恢复详情和表单。
+ * 重放正在提交时保持弹窗，避免丢失进行中的操作反馈。
+ */
 function closeRecovery(): void {
   if (replayLoading.value) return;
   target.value = null;
@@ -199,6 +249,10 @@ function closeRecovery(): void {
   replayNotice.value = null;
 }
 
+/**
+ * 校验重放权限和操作原因后提交恢复请求。
+ * 使用详情当前 ETag 和同意图幂等键，接受响应后更新记录并说明异步处理状态。
+ */
 async function submitReplay(): Promise<void> {
   if (!target.value || !target.value.detail || !canReplay.value) return;
   const reason = replayReason.value.trim();
@@ -210,13 +264,14 @@ async function submitReplay(): Promise<void> {
     return;
   }
   const current = target.value;
+  const recoveryId = target.value.detail.recoveryId;
   replayLoading.value = true;
   replayError.value = null;
   replayNotice.value = null;
   try {
     const result = await recoveryApi.replay(
       current.owner,
-      current.detail.recoveryId,
+      recoveryId,
       reason,
       current.etag,
     );
@@ -225,6 +280,7 @@ async function submitReplay(): Promise<void> {
     current.detail = result.data;
     current.etag = result.headers.get("ETag") || `"lv:${result.data.lockVersion}"`;
     current.mode = "detail";
+    // 202 表示已接受人工重放请求，最终处理结果仍需后续刷新确认。
     if (result.status === 202) {
       replayNotice.value = "请求已提交，正在等待处理结果。请稍后刷新查看。";
       actionNotice.value = `${ownerLabel(current.owner)}已提交重新处理请求，结果仍在处理中。`;
@@ -239,6 +295,10 @@ async function submitReplay(): Promise<void> {
   }
 }
 
+/**
+ * 进入当前恢复记录的人工重放表单。
+ * 清理此前原因及反馈，建立本次操作的输入状态。
+ */
 function beginReplay(): void {
   if (!target.value || !target.value.detail || !canReplay.value) return;
   target.value.mode = "replay";

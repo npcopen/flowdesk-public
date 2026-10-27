@@ -3,7 +3,7 @@ package com.flowdesk.ticket.incident;
 import java.time.Duration;
 import java.util.List;
 
-/** Ticket-owned copy of the frozen M7 Incident collaboration bindings. */
+/** Ticket 持有的 M7 Incident 协作契约副本，固定消息主题、消费组和身份派生规则。 */
 public final class IncidentMessageContract {
     public static final String ENVELOPE_VERSION = "1";
     public static final int VERSION = 1;
@@ -23,13 +23,28 @@ public final class IncidentMessageContract {
             Duration.ofMinutes(2), Duration.ofMinutes(10), Duration.ofMinutes(30),
             Duration.ofHours(2));
 
+    /**
+     * 私有构造方法，阻止工具类实例化，调用方应使用静态入口。
+     */
     private IncidentMessageContract() { }
 
+    /**
+     * 消息绑定支持的业务种类，决定载荷校验及处理分支。
+     */
     public enum Kind { CREATE_REQUESTED, RECOVERED }
+    /**
+     * 冻结消息路由与消费绑定，集中声明主题、消费组、类型和版本。
+     */
     public record Binding(Kind kind, String eventType, String contractRef, String topic,
                           String consumerGroup, String dlqAcceptorGroup,
                           String intentNamespace) {
+        /**
+         * 返回冻结死信主题，供主消费重试耗尽后的恢复接收使用。
+         */
         public String dlqTopic() { return "%DLQ%" + consumerGroup; }
+        /**
+         * 返回死信接收器专用重试主题，隔离主消费与接收器重试节奏。
+         */
         public String acceptorRetryTopic() { return "%RETRY%" + dlqAcceptorGroup; }
     }
 

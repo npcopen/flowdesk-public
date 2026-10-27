@@ -9,11 +9,13 @@ vip_port="${FLOWDESK_ROCKETMQ_BROKER_VIP_PUBLISH_PORT:-10909}"
 listen_port="${FLOWDESK_ROCKETMQ_BROKER_PUBLISH_PORT:-10911}"
 ha_port="${FLOWDESK_ROCKETMQ_BROKER_HA_PUBLISH_PORT:-10912}"
 
+# 输出当前脚本的稳定失败标记及诊断并退出，阻止后续初始化或验证继续执行。
 fail() {
   printf '%s\n' "FLOWDESK_ROCKETMQ_BROKER_CONFIG_FAILED: $*" >&2
   exit 1
 }
 
+# 要求配置值仅含 ASCII 字母和数字，拒绝空值及可能破坏配置格式的字符。
 validate_alphanumeric() {
   label="$1"
   value="$2"
@@ -26,6 +28,7 @@ case "$advertised_host" in
   ''|*[!A-Za-z0-9._-]*) fail "broker advertised host contains unsupported characters" ;;
 esac
 
+# 要求端口为 1 至 65535 的纯数字，避免生成 Broker 无法监听或解析的配置。
 validate_port() {
   label="$1"
   value="$2"
@@ -44,6 +47,7 @@ expected_vip_port=$((listen_port - 2))
   fail "Broker VIP port must equal listen port minus 2"
 [ "$ha_port" -ne "$listen_port" ] || fail "Broker HA port must differ from listen port"
 
+# 在模板中替换对外主机及监听端口，输出运行时配置，供后续追加 ACL 设置。
 render_config() {
   sed -e "s/^brokerIP1=.*/brokerIP1=$advertised_host/" \
       -e "s/^brokerIP2=.*/brokerIP2=$advertised_host/" \

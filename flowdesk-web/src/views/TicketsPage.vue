@@ -1,4 +1,5 @@
 <script setup lang="ts">
+/** 展示权限范围内的工单列表，并管理筛选游标、创建工单和目录配置。 */
 import { computed, onMounted, ref, watch } from "vue";
 import {
   ArrowUpRight,
@@ -11,7 +12,7 @@ import {
 import { useRoute, useRouter, RouterLink } from "vue-router";
 import { catalogApi, ticketApi } from "@/api/endpoints";
 import { useAuthStore } from "@/stores/auth";
-import type { ServiceCatalogItem, Ticket } from "@/types/api";
+import type { AsyncProgress as AsyncProgressItem, ServiceCatalogItem, Ticket } from "@/types/api";
 import StatusBadge from "@/components/StatusBadge.vue";
 import ResourceState from "@/components/ResourceState.vue";
 import ErrorNotice from "@/components/ErrorNotice.vue";
@@ -37,7 +38,7 @@ const catalogLoading = ref(false);
 const modalOpen = ref(false);
 const submitting = ref(false);
 const actionError = ref<unknown>(null);
-const asyncEffects = ref<AsyncProgress[]>([]);
+const asyncEffects = ref<AsyncProgressItem[]>([]);
 const createIntent = mutationIntent();
 const form = ref({ catalogItemId: "", subject: "", description: "" });
 
@@ -61,6 +62,10 @@ const activeCatalogs = computed(() =>
   catalogs.value.filter((item) => item.status === "ACTIVE"),
 );
 
+/**
+ * 按范围、状态及游标加载工单列表。
+ * 维护加载和错误状态，供筛选及翻页操作复用。
+ */
 async function load(token = ""): Promise<void> {
   loading.value = true;
   error.value = null;
@@ -80,6 +85,10 @@ async function load(token = ""): Promise<void> {
     loading.value = false;
   }
 }
+/**
+ * 在具备权限时读取所有可申请服务目录。
+ * 选择首个启用目录作为默认项，避免分页遗漏可申请服务。
+ */
 async function loadCatalogs(): Promise<void> {
   if (!canCreate.value && !canReadCatalog.value) return;
   catalogLoading.value = true;
@@ -94,15 +103,27 @@ async function loadCatalogs(): Promise<void> {
     catalogLoading.value = false;
   }
 }
+/**
+ * 重置工单列表游标与历史页栈。
+ * 筛选变化后从第一页重新查询，防止复用旧查询条件的游标。
+ */
 function resetPaging(): void {
   tokenStack.value = [];
   void load();
 }
+/**
+ * 保存当前页游标并查询下一页工单。
+ * 没有下一页时保持原列表和分页位置。
+ */
 function nextPage(): void {
   if (!nextToken.value) return;
   tokenStack.value.push(nextToken.value);
   void load(nextToken.value);
 }
+/**
+ * 恢复游标栈中的上一页并重新加载工单。
+ * 继续保留当前范围和状态筛选。
+ */
 function previousPage(): void {
   if (tokenStack.value.length < 2) {
     tokenStack.value = [];
@@ -113,15 +134,27 @@ function previousPage(): void {
   const token = tokenStack.value[tokenStack.value.length - 1] || "";
   void load(token);
 }
+/**
+ * 打开工单申请表单并初始化反馈状态。
+ * 可用目录由已加载的服务目录集合提供。
+ */
 function openCreate(): void {
   actionError.value = null;
   asyncEffects.value = [];
   modalOpen.value = true;
   if (!catalogs.value.length) void loadCatalogs();
 }
+/**
+ * 关闭工单申请表单。
+ * 创建请求尚未结束时阻止关闭，以保留输入和操作反馈。
+ */
 function closeCreate(): void {
   if (!submitting.value) modalOpen.value = false;
 }
+/**
+ * 提交目录、主题和描述创建工单。
+ * 相同载荷重试复用幂等键，仅在成功后清理表单并跳转新工单。
+ */
 async function createTicket(): Promise<void> {
   submitting.value = true;
   actionError.value = null;
@@ -150,6 +183,10 @@ async function createTicket(): Promise<void> {
 const catalogEdits = ref<
   Record<string, { itemName: string; description: string; status: string }>
 >({});
+/**
+ * 将选中目录的可编辑字段复制到表单。
+ * 保存原值快照，后续只提交实际变更字段。
+ */
 function editCatalog(item: ServiceCatalogItem): void {
   catalogEdits.value[item.catalogItemId] = {
     itemName: item.itemName,
@@ -157,6 +194,10 @@ function editCatalog(item: ServiceCatalogItem): void {
     status: item.status,
   };
 }
+/**
+ * 比较目录表单和原始快照并提交最小更新。
+ * 使用当前 ETag 保护并发编辑，成功后刷新目录与页面数据。
+ */
 async function saveCatalog(item: ServiceCatalogItem): Promise<void> {
   if (!canEditCatalog.value) return;
   const edit = catalogEdits.value[item.catalogItemId];
@@ -206,7 +247,7 @@ onMounted(() => {
         class="button button--secondary"
         type="button"
         :disabled="loading"
-        @click="load"
+        @click="load()"
       >
         <RefreshCw :size="16" />刷新
       </button>

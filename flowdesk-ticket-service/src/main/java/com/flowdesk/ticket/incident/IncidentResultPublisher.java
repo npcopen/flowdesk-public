@@ -13,21 +13,31 @@ import java.time.Instant;
 import java.util.Objects;
 import java.util.UUID;
 
+/** 分批发布 Incident 建单结果：短事务领取、事务外发送，再以租约结算成功、退避或人工恢复。 */
 final class IncidentResultPublisher {
-    private final IncidentResultOutboxRepository repository;
+    private final IncidentResultDispatchService repository;
     private final IncidentResultRocketMqTransport transport;
     private final TransactionTemplate transactions;
     private final Clock clock;
-    IncidentResultPublisher(IncidentResultOutboxRepository repository,
+    /**
+     * 构造告警建单组件并保存调用依赖。
+     */
+    IncidentResultPublisher(IncidentResultDispatchService repository,
                             IncidentResultRocketMqTransport transport,
                             PlatformTransactionManager tx) {
         this(repository, transport, tx, Clock.systemUTC());
     }
-    IncidentResultPublisher(IncidentResultOutboxRepository repository,
+    /**
+     * 构造告警建单组件并保存调用依赖；支持注入时钟以控制时间边界。
+     */
+    IncidentResultPublisher(IncidentResultDispatchService repository,
                             IncidentResultRocketMqTransport transport,
                             PlatformTransactionManager tx, Clock clock) {
         this.repository=repository; this.transport=transport; this.transactions=new TransactionTemplate(tx); this.clock=clock;
     }
+    /**
+     * 扫描有界待发批次，依次领取、发送并按确认结果结算重试或恢复。
+     */
     Run publishOnce() {
         if (TransactionSynchronizationManager.isActualTransactionActive() || TenantContextHolder.currentOrNull()!=null)
             throw new IllegalStateException("Incident result publisher requires a clean worker context");
@@ -52,7 +62,7 @@ final class IncidentResultPublisher {
                 try { ok=transport.send(IncidentResultEnvelopeFactory.create(row)); code=ok?null:"BROKER_SEND_NOT_CONFIRMED"; }
                 catch(IllegalArgumentException invalid){code="OUTBOX_CONTRACT_INVALID";}
                 catch(InterruptedException interrupted){Thread.currentThread().interrupt();}
-                catch(Exception ignoredFailure){/* never persist or log credential-bearing exception text */}
+                catch(Exception ignoredFailure){/** 不持久化或记录可能包含凭据的异常文本。 */}
                 Instant done=clock.instant(); Instant cutoff=done.minus(IncidentMessageContract.OUTBOX_CLAIM_LEASE);
                 String failureCode = code;
                 if(ok) { if(Boolean.TRUE.equals(transactions.execute(s->repository.published(row,done,cutoff)))) sent++; }
@@ -64,5 +74,8 @@ final class IncidentResultPublisher {
         }
         return new Run(scanned,sent,recovered);
     }
+    /**
+     * 一次结果消息发布统计，供调度及测试观察处理进度。
+     */
     record Run(int scanned,int published,int recovered) { }
 }

@@ -9,21 +9,22 @@ import org.springframework.context.annotation.Configuration;
 import org.springframework.http.HttpMethod;
 
 /**
- * P0 single-target routing table (ARCH-DEC-003/ARCHITECTURE §7.4).
- *
- * <p>Each API path family matches exactly one backend; there is no fallback fan-out or
- * aggregation route. Internal service-to-service paths are intentionally not exposed.</p>
+ * 按 API 路径族将请求路由到唯一后端服务。
+ * 不提供扇出或聚合兜底路由，也不对外暴露服务之间的内部调用路径。
  */
 @Configuration(proxyBeanMethods = false)
 @EnableConfigurationProperties(FlowDeskGatewayProperties.class)
 public class GatewayRouteConfig {
 
-    /** Caffeine-backed cache for spring-cloud-loadbalancer (avoids the development-only default). */
+    /** 为 Spring 负载均衡器提供 Caffeine 缓存，替代仅适合开发的默认实现。 */
     @Bean
     public CaffeineCacheManager flowDeskLoadBalancerCacheManager() {
         return new CaffeineCacheManager();
     }
 
+    /**
+     * 按 API 路径族配置唯一业务归属，登录限定 POST，工单、流程、告警与通知分别路由至所属服务。
+     */
     @Bean
     public RouteLocator flowDeskRouteLocator(RouteLocatorBuilder builder,
                                              FlowDeskGatewayProperties properties) {

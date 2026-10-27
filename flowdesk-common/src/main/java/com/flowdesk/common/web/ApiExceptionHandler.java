@@ -27,8 +27,8 @@ import java.util.Map;
 import java.util.UUID;
 
 /**
- * Shared SCHEMA-002 error rendering. Messages are intentionally coarse and stable;
- * no stack, SQL, secret or internal topology is exposed.
+ * 统一处理 MVC 异常并生成 SCHEMA-002 错误响应。
+ * 对外消息保持简洁、稳定，不暴露堆栈、SQL、密钥或内部服务拓扑。
  */
 @RestControllerAdvice
 @ConditionalOnWebApplication(type = ConditionalOnWebApplication.Type.SERVLET)
@@ -37,17 +37,26 @@ public class ApiExceptionHandler {
     private static final java.util.regex.Pattern UNRECOGNIZED_PROPERTY =
             java.util.regex.Pattern.compile("property \"([^\"]+)\"");
 
+    /**
+     * 保留业务异常的状态、错误码、重试标记、字段明细及响应头，转换为统一错误响应。
+     */
     @ExceptionHandler(ApiException.class)
     public ResponseEntity<ErrorEnvelope> handleApiException(ApiException e, HttpServletRequest request) {
         return render(request, e.statusValue(), e.code(), e.getMessage(), e.retryable(), e.details(), e.headers());
     }
 
+    /**
+     * 将授权拒绝统一映射为 403 ACCESS_DENIED，不暴露内部权限判断细节。
+     */
     @ExceptionHandler(PermissionDeniedException.class)
     public ResponseEntity<ErrorEnvelope> handlePermissionDenied(PermissionDeniedException e,
                                                                 HttpServletRequest request) {
         return render(request, 403, "ACCESS_DENIED", "当前角色或权限不足。", false, List.of(), Map.of());
     }
 
+    /**
+     * 将请求体读取超限统一映射为 413 REQUEST_TOO_LARGE。
+     */
     @ExceptionHandler(RequestBodyTooLargeException.class)
     public ResponseEntity<ErrorEnvelope> handleBodyTooLarge(RequestBodyTooLargeException e,
                                                             HttpServletRequest request) {
@@ -55,6 +64,9 @@ public class ApiExceptionHandler {
                 false, List.of(), Map.of());
     }
 
+    /**
+     * 将请求体字段校验错误转换为 /body/ 明细并返回 422 VALIDATION_FAILED。
+     */
     @ExceptionHandler(MethodArgumentNotValidException.class)
     public ResponseEntity<ErrorEnvelope> handleValidation(MethodArgumentNotValidException e,
                                                           HttpServletRequest request) {
@@ -67,6 +79,9 @@ public class ApiExceptionHandler {
         return render(request, 422, "VALIDATION_FAILED", "请求字段校验失败。", false, details, Map.of());
     }
 
+    /**
+     * 收集控制器方法参数约束错误，转换为 /param/ 明细并返回 422。
+     */
     @ExceptionHandler(HandlerMethodValidationException.class)
     public ResponseEntity<ErrorEnvelope> handleMethodValidation(HandlerMethodValidationException e,
                                                                 HttpServletRequest request) {
@@ -79,6 +94,9 @@ public class ApiExceptionHandler {
                 false, details.isEmpty() ? List.of() : details, Map.of());
     }
 
+    /**
+     * 转换约束违反结果，保留参数路径及可读提示并返回统一 422 响应。
+     */
     @ExceptionHandler(ConstraintViolationException.class)
     public ResponseEntity<ErrorEnvelope> handleConstraintViolation(ConstraintViolationException e,
                                                                    HttpServletRequest request) {
@@ -92,6 +110,9 @@ public class ApiExceptionHandler {
                 false, details.isEmpty() ? List.of() : details, Map.of());
     }
 
+    /**
+     * 区分请求体超限、字段类型错误、未知字段和 JSON 语法错误，按契约生成对应状态和字段明细。
+     */
     @ExceptionHandler(HttpMessageNotReadableException.class)
     public ResponseEntity<ErrorEnvelope> handleUnreadable(HttpMessageNotReadableException e,
                                                           HttpServletRequest request) {
@@ -119,6 +140,9 @@ public class ApiExceptionHandler {
                 false, details, Map.of());
     }
 
+    /**
+     * 将不支持的 Content-Type 转为 415 MEDIA_TYPE_UNSUPPORTED。
+     */
     @ExceptionHandler(HttpMediaTypeNotSupportedException.class)
     public ResponseEntity<ErrorEnvelope> handleMediaType(HttpMediaTypeNotSupportedException e,
                                                          HttpServletRequest request) {
@@ -126,6 +150,9 @@ public class ApiExceptionHandler {
                 List.of(), Map.of());
     }
 
+    /**
+     * 返回 405，并将已支持方法排序后写入 Allow 响应头。
+     */
     @ExceptionHandler(HttpRequestMethodNotSupportedException.class)
     public ResponseEntity<ErrorEnvelope> handleMethodNotSupported(HttpRequestMethodNotSupportedException e,
                                                                   HttpServletRequest request) {
@@ -136,12 +163,18 @@ public class ApiExceptionHandler {
                 allow.isBlank() ? Map.of() : Map.of(HttpHeaders.ALLOW, allow));
     }
 
+    /**
+     * 将未知路径或资源缺失转换为 JSON 404，保持统一接口错误结构。
+     */
     @ExceptionHandler(NoResourceFoundException.class)
     public ResponseEntity<ErrorEnvelope> handleNotFound(NoResourceFoundException e,
                                                         HttpServletRequest request) {
         return render(request, 404, "RESOURCE_NOT_FOUND", "路径或资源不存在。", false, List.of(), Map.of());
     }
 
+    /**
+     * 将路径参数转换失败映射为 422，并用 /path/ 明细定位参数。
+     */
     @ExceptionHandler(MethodArgumentTypeMismatchException.class)
     public ResponseEntity<ErrorEnvelope> handleTypeMismatch(MethodArgumentTypeMismatchException e,
                                                             HttpServletRequest request) {
@@ -150,6 +183,9 @@ public class ApiExceptionHandler {
                 Map.of());
     }
 
+    /**
+     * 对缺少的必需查询参数返回 400，并提供参数名。
+     */
     @ExceptionHandler(MissingServletRequestParameterException.class)
     public ResponseEntity<ErrorEnvelope> handleMissingParameter(MissingServletRequestParameterException e,
                                                                 HttpServletRequest request) {
@@ -157,6 +193,9 @@ public class ApiExceptionHandler {
                 false, List.of(), Map.of());
     }
 
+    /**
+     * 对缺少的必需请求头返回 422，保持字段校验契约一致。
+     */
     @ExceptionHandler(MissingRequestHeaderException.class)
     public ResponseEntity<ErrorEnvelope> handleMissingHeader(MissingRequestHeaderException e,
                                                              HttpServletRequest request) {
@@ -164,6 +203,9 @@ public class ApiExceptionHandler {
                 false, List.of(), Map.of());
     }
 
+    /**
+     * 沿原因链定位未知字段异常并提取字段名，无法提取时使用稳定占位名称。
+     */
     private static String findUnrecognizedProperty(HttpMessageNotReadableException e) {
         Throwable cause = findCauseBySimpleName(e, "UnrecognizedPropertyException");
         if (cause == null) {
@@ -174,6 +216,9 @@ public class ApiExceptionHandler {
         return matcher.find() ? matcher.group(1) : "unknown";
     }
 
+    /**
+     * 按异常简单类名遍历原因链，以兼容不同 JSON 实现的异常类型。
+     */
     private static Throwable findCauseBySimpleName(Throwable throwable, String simpleName) {
         for (Throwable cause = throwable; cause != null; cause = cause.getCause()) {
             if (simpleName.equals(cause.getClass().getSimpleName())) {
@@ -183,6 +228,9 @@ public class ApiExceptionHandler {
         return null;
     }
 
+    /**
+     * 沿异常原因链查找指定类型，保留请求体超限等底层错误语义。
+     */
     private static Throwable findCause(Throwable throwable, Class<? extends Throwable> type) {
         for (Throwable cause = throwable; cause != null; cause = cause.getCause()) {
             if (type.isInstance(cause)) {
@@ -192,6 +240,9 @@ public class ApiExceptionHandler {
         return null;
     }
 
+    /**
+     * 补齐关联 UUID、JSON 类型和附加响应头，构造错误信封；没有字段明细时省略 details 内容。
+     */
     private ResponseEntity<ErrorEnvelope> render(HttpServletRequest request,
                                                  int status,
                                                  String code,

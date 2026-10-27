@@ -1,11 +1,19 @@
 import { test, expect, type Page } from '@playwright/test'
 
+/**
+ * 在管理端到端场景中重置演示状态并登录指定用户。
+ * 通过可见登录表单操作并等待进入首页，确保后续断言具有明确身份。
+ */
 async function login(page:Page,user:string){
  await page.goto('/login');await page.evaluate(()=>window.__FLOWDESK_E2E_RESET?.())
  await page.getByLabel('组织代码').fill('acme-tenant');await page.getByLabel('用户名').fill(user)
  await page.getByTestId('password').fill('local-password');await page.getByRole('button',{name:'进入工作台'}).click()
  await expect(page).toHaveURL(/\/$/)
 }
+/**
+ * 进入指定管理页面。
+ * 窄屏先展开移动导航，再按精确链接名称点击，兼容桌面和移动布局。
+ */
 async function settings(page:Page,name:string){
  if(await page.evaluate(()=>innerWidth<761))await page.getByRole('button',{name:'打开导航'}).click()
  await page.getByRole('link',{name,exact:true}).click()

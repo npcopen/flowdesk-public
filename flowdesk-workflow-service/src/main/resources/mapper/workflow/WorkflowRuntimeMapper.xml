@@ -1,0 +1,310 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+  工作流实例、审批任务与审批人变更的运行态持久化接口。
+  按租户查询运行事实，以任务状态、审批人和锁版本约束状态迁移，并提供事务内加锁及游标分页。
+-->
+<mapper namespace="com.flowdesk.workflow.mapper.WorkflowRuntimeMapper">
+<!--
+  实例结果映射：包含版本引用、输入快照、审批进度、启动消息和最后操作者。
+-->
+<resultMap id="InstanceRow" type="com.flowdesk.workflow.model.persistence.InstanceRow">
+<constructor>
+    <arg column="workflow_instance_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+    <arg column="ticket_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+    <arg column="start_intent_key" javaType="[B"/>
+    <arg column="definition_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+    <arg column="workflow_version_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+    <arg column="workflow_version_no" javaType="_int"/>
+    <arg column="input_snapshot_json" javaType="java.lang.String"/>
+    <arg column="input_snapshot_sha256" javaType="[B"/>
+    <arg column="condition_result" javaType="_boolean"/>
+    <arg column="status" javaType="java.lang.String"/>
+    <arg column="current_level" javaType="java.lang.Integer"/>
+    <arg column="started_at" javaType="java.time.Instant"/>
+    <arg column="completed_at" javaType="java.time.Instant"/>
+    <arg column="lock_version" javaType="_long"/>
+    <arg column="created_at" javaType="java.time.Instant"/>
+    <arg column="updated_at" javaType="java.time.Instant"/>
+    <arg column="start_message_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+    <arg column="last_actor_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+</constructor>
+</resultMap>
+
+<!--
+  任务结果映射：保留审批人、决定内容、决定意图键及锁版本。
+-->
+<resultMap id="TaskRow" type="com.flowdesk.workflow.model.persistence.TaskRow">
+<constructor>
+    <arg column="approval_task_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+    <arg column="workflow_instance_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+    <arg column="level_no" javaType="_int"/>
+    <arg column="approver_user_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+    <arg column="status" javaType="java.lang.String"/>
+    <arg column="decision_type" javaType="java.lang.String"/>
+    <arg column="decision_reason" javaType="java.lang.String"/>
+    <arg column="decision_intent_key" javaType="[B"/>
+    <arg column="decided_at" javaType="java.time.Instant"/>
+    <arg column="decided_by_user_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+    <arg column="lock_version" javaType="_long"/>
+    <arg column="created_at" javaType="java.time.Instant"/>
+    <arg column="updated_at" javaType="java.time.Instant"/>
+</constructor>
+</resultMap>
+
+<!--
+  审批人变更映射：包含变更前后审批人、操作者、原因及请求摘要。
+-->
+<resultMap id="ApproverChangeRow" type="com.flowdesk.workflow.model.persistence.ApproverChangeRow">
+<constructor>
+    <arg column="change_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+    <arg column="workflow_instance_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+    <arg column="level_no" javaType="_int"/>
+    <arg column="previous_approver_user_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+    <arg column="approver_user_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+    <arg column="changed_by_user_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+    <arg column="reason" javaType="java.lang.String"/>
+    <arg column="request_digest" javaType="java.lang.String"/>
+    <arg column="changed_at" javaType="java.time.Instant"/>
+</constructor>
+</resultMap>
+
+<!--
+  为当前审批人的待办任务写入审批决定。
+  同时匹配租户、PENDING、actorId 和 expectedVersion，保存决定类型、原因及 decisionIntentKey，并递增锁版本。
+-->
+<update id="decideTask">
+<![CDATA[
+UPDATE approval_task
+SET status = #{status}, decision_type = #{decisionType}, decision_reason = #{reason},
+    decision_intent_key = #{decisionIntentKey}, decided_at = #{now}, decided_by_user_id = #{actorId},
+    lock_version = lock_version + 1, updated_at = #{now},
+    updated_by_type = 'USER', updated_by_id = #{actorId}
+WHERE tenant_id = #{tenantId} AND approval_task_id = #{taskId} AND status = 'PENDING'
+  AND approver_user_id = #{actorId} AND lock_version = #{expectedVersion}
+]]>
+</update>
+
+<!--
+  保存一次审批人变更的事实记录。
+  记录租户、实例、级别、变更前后审批人、操作者和原因；digest 保存请求摘要以供后续幂等核对。
+-->
+<insert id="insertApproverChange">
+<![CDATA[
+INSERT INTO workflow_approver_change
+  (tenant_id,change_id,workflow_instance_id,level_no,previous_approver_user_id,
+   approver_user_id,changed_by_user_id,reason,request_digest,changed_at)
+VALUES (#{tenantId},#{changeId},#{instanceId},#{levelNo},#{previous},#{next},#{actorId},#{reason},#{digest},#{now})
+]]>
+</insert>
+
+<!--
+  将尚未决策的审批任务改派给指定审批人。
+  仅更新租户内 task 标识对应且仍为 PENDING、锁版本与快照一致的任务，并递增锁版本。
+-->
+<update id="reassignPendingTask">
+<![CDATA[
+UPDATE approval_task SET approver_user_id=#{next},lock_version=lock_version+1,
+  updated_at=#{now},updated_by_type='USER',updated_by_id=#{actorId}
+WHERE tenant_id=#{tenantId} AND approval_task_id=#{task.approvalTaskId} AND status='PENDING' AND lock_version=#{task.lockVersion}
+]]>
+</update>
+
+<!--
+  变更审批人时更新运行中实例的并发版本。
+  仅在 RUNNING 和 expectedVersion 匹配时递增锁版本，记录人工操作者与时间。
+-->
+<update id="touchInstanceForApproverChange">
+<![CDATA[
+UPDATE workflow_instance SET lock_version=lock_version+1,updated_at=#{now},updated_by_type='USER',updated_by_id=#{actorId}
+WHERE tenant_id=#{tenantId} AND workflow_instance_id=#{instanceId} AND status='RUNNING' AND lock_version=#{expectedVersion}
+]]>
+</update>
+
+<!--
+  将运行中的工作流从一级审批推进至二级。
+  限定 current_level 为 1 且锁版本匹配，推进后递增版本；二级任务由独立写入操作创建。
+-->
+<update id="advanceInstanceToLevel2">
+<![CDATA[
+UPDATE workflow_instance
+SET current_level = 2, lock_version = lock_version + 1,
+    updated_at = #{now}, updated_by_type = 'USER', updated_by_id = #{actorId}
+WHERE tenant_id = #{tenantId} AND workflow_instance_id = #{workflowInstanceId} AND status = 'RUNNING'
+  AND current_level = 1 AND lock_version = #{expectedVersion}
+]]>
+</update>
+
+<!--
+  为指定实例创建二级待审批任务。
+  写入 level_no=2、PENDING 和初始锁版本 0，以服务身份记录创建、更新时间。
+-->
+<insert id="insertSecondLevelTask">
+<![CDATA[
+INSERT INTO approval_task
+  (tenant_id, approval_task_id, workflow_instance_id, level_no,
+   approver_user_id, status, lock_version, created_at,
+   created_by_type, updated_at, updated_by_type)
+VALUES (#{tenantId}, #{taskId}, #{workflowInstanceId}, 2, #{approverUserId}, 'PENDING', 0, #{now}, 'SERVICE', #{now}, 'SERVICE')
+]]>
+</insert>
+
+<!--
+  将运行中实例更新为调用方给定的终结状态。
+  通过 expectedVersion 控制并发，清空当前级别，保存完成时间并递增锁版本。
+-->
+<update id="completeInstance">
+<![CDATA[
+UPDATE workflow_instance
+SET status = #{status}, current_level = NULL, completed_at = #{now},
+    lock_version = lock_version + 1, updated_at = #{now},
+    updated_by_type = 'USER', updated_by_id = #{actorId}
+WHERE tenant_id = #{tenantId} AND workflow_instance_id = #{workflowInstanceId} AND status = 'RUNNING'
+  AND lock_version = #{expectedVersion}
+]]>
+</update>
+
+<!--
+  复用实例查询，按同租户及实例结果关联启动收件箱，带出启动消息与最后操作者。
+-->
+<sql id="InstanceSelect"><![CDATA[SELECT i.workflow_instance_id, i.ticket_id, i.start_intent_key,
+       i.definition_id, i.workflow_version_id, i.workflow_version_no,
+       i.input_snapshot_json, i.input_snapshot_sha256, i.condition_result,
+       i.status, i.current_level, i.started_at, i.completed_at,
+       i.lock_version, i.created_at, i.updated_at,
+       start_inbox.message_id AS start_message_id,
+       i.updated_by_id AS last_actor_id
+FROM workflow_instance i
+LEFT JOIN inbox_message start_inbox
+  ON start_inbox.tenant_id = i.tenant_id
+ AND start_inbox.result_type = 'WORKFLOW_INSTANCE'
+ AND start_inbox.result_id = i.workflow_instance_id]]></sql>
+
+<!--
+  复用任务基础查询列，包含决定意图、审批结论、执行时间及锁版本。
+-->
+<sql id="TaskSelect"><![CDATA[SELECT approval_task_id, workflow_instance_id, level_no,
+       approver_user_id, status, decision_type, decision_reason,
+       decision_intent_key, decided_at, decided_by_user_id,
+       lock_version, created_at, updated_at
+FROM approval_task]]></sql>
+
+<!--
+  按 sort 选择决定时间或创建时间；未决定任务使用创建时间参与决定时间排序。
+-->
+<sql id="TaskColumn"><choose><when test="sort.endsWith('decidedAt')">COALESCE(decided_at,created_at)</when><otherwise>created_at</otherwise></choose></sql>
+
+<!--
+  根据 ascending 输出受控的 ASC 或 DESC，保持主排序与标识排序方向一致。
+-->
+<sql id="Direction"><choose><when test="ascending">ASC</when><otherwise>DESC</otherwise></choose></sql>
+
+<!--
+  根据排序方向选择游标比较符，升序取游标之后的大值，降序取小值。
+-->
+<sql id="Comparison"><choose><when test="ascending">&gt;</when><otherwise>&lt;</otherwise></choose></sql>
+
+<!--
+  按租户、状态、工单或版本分页查询实例。
+  可按曾分配到任务的审批人限定范围，按开始时间和实例标识稳定排序，最多返回 pageSize + 1 条。
+-->
+<select id="findInstances" resultMap="InstanceRow">
+<bind name="limit" value="pageSize + 1"/><include refid="InstanceSelect"/> WHERE i.tenant_id=#{tenantId}
+<if test="status != null">AND i.status=#{status}</if><if test="ticketId != null">AND i.ticket_id=#{ticketId}</if><if test="workflowVersionId != null">AND i.workflow_version_id=#{workflowVersionId}</if>
+<if test="approverUserId != null">AND EXISTS (SELECT 1 FROM approval_task scope_task WHERE scope_task.tenant_id=i.tenant_id AND scope_task.workflow_instance_id=i.workflow_instance_id AND scope_task.approver_user_id=#{approverUserId})</if><if test="cursorStartedAt != null and cursorId != null">AND (i.started_at <include refid="Comparison"/> #{cursorStartedAt} OR (i.started_at=#{cursorStartedAt} AND i.workflow_instance_id <include refid="Comparison"/> #{cursorId}))</if>
+ORDER BY i.started_at <include refid="Direction"/>, i.workflow_instance_id <include refid="Direction"/> LIMIT #{limit}
+</select>
+
+<!--
+  读取租户内指定实例及其启动消息信息。
+  approverUserId 非空时要求存在该审批人的关联任务；lock 为 true 时追加 FOR UPDATE。
+-->
+<select id="findInstance" resultMap="InstanceRow">
+<include refid="InstanceSelect"/> WHERE i.tenant_id=#{tenantId} AND i.workflow_instance_id=#{workflowInstanceId} <if test="approverUserId != null">AND EXISTS (SELECT 1 FROM approval_task scope_task WHERE scope_task.tenant_id=i.tenant_id AND scope_task.workflow_instance_id=i.workflow_instance_id AND scope_task.approver_user_id=#{approverUserId})</if><if test="lock"> FOR UPDATE</if>
+</select>
+
+<!--
+  按租户和可选状态、级别、实例、审批人分页查询任务。
+  按创建时间或决定时间与任务标识进行游标排序；决定时间为空时使用创建时间，最多返回 pageSize + 1 条。
+-->
+<select id="findTasks" resultMap="TaskRow">
+<bind name="ascending" value="!sort.startsWith('-')"/><bind name="limit" value="pageSize + 1"/><include refid="TaskSelect"/> WHERE tenant_id=#{tenantId}
+<if test="status != null">AND status=#{status}</if><if test="levelNo != null">AND level_no=#{levelNo}</if><if test="workflowInstanceId != null">AND workflow_instance_id=#{workflowInstanceId}</if><if test="approverUserId != null">AND approver_user_id=#{approverUserId}</if>
+<if test="cursorValue != null and cursorId != null"><bind name="cursor" value="@java.time.Instant@parse(cursorValue)"/>AND (<include refid="TaskColumn"/> <include refid="Comparison"/> #{cursor} OR (<include refid="TaskColumn"/> = #{cursor} AND approval_task_id <include refid="Comparison"/> #{cursorId}))</if>
+ORDER BY <include refid="TaskColumn"/> <include refid="Direction"/>, approval_task_id <include refid="Direction"/> LIMIT #{limit}
+</select>
+
+<!--
+  统计租户内处于 PENDING 状态的审批任务。
+  approverUserId 非空时仅统计该审批人的任务；为空时统计整个租户。
+-->
+<select id="countPendingTasks" resultType="long">
+SELECT COUNT(*) FROM approval_task WHERE tenant_id=#{tenantId} AND status='PENDING' <if test="approverUserId != null">AND approver_user_id=#{approverUserId}</if>
+</select>
+
+<!--
+  按租户与任务标识读取审批任务。
+  lock 为 true 时通过 FOR UPDATE 锁定记录；不存在时返回空 Optional。
+-->
+<select id="findTask" resultMap="TaskRow">
+<include refid="TaskSelect"/> WHERE tenant_id=#{tenantId} AND approval_task_id=#{taskId}<if test="lock"> FOR UPDATE</if>
+</select>
+
+<!--
+  查询指定实例当前的待审批任务。
+  按租户、实例和 PENDING 状态定位，不读取已完成的历史决定。
+-->
+<select id="findPendingTask" resultMap="TaskRow">
+<include refid="TaskSelect"/> WHERE tenant_id=#{tenantId} AND workflow_instance_id=#{instanceId} AND status='PENDING'
+</select>
+
+<!--
+  查询实例二级审批的当前有效审批人。
+  优先采用实例级覆盖值，否则使用实例所引用定义版本中的二级审批人。
+-->
+<select id="findLevel2Approver" resultType="java.util.UUID">
+SELECT COALESCE(o.approver_user_id,v.level2_approver_user_id) AS approver_user_id FROM workflow_instance i JOIN workflow_version v ON v.tenant_id=i.tenant_id AND v.workflow_version_id=i.workflow_version_id AND v.definition_id=i.definition_id AND v.version_no=i.workflow_version_no LEFT JOIN workflow_approver_override o ON o.tenant_id=i.tenant_id AND o.workflow_instance_id=i.workflow_instance_id AND o.level_no=2 WHERE i.tenant_id=#{tenantId} AND i.workflow_instance_id=#{workflowInstanceId}
+</select>
+
+<!--
+  从已创建的一级任务读取实例的一级审批人。
+  按租户、实例和 level_no=1 定位，可反映一级任务改派后的审批人。
+-->
+<select id="findLevel1Approver" resultType="java.util.UUID">
+SELECT approver_user_id FROM approval_task WHERE tenant_id=#{tenantId} AND workflow_instance_id=#{instanceId} AND level_no=1
+</select>
+
+<!--
+  按租户和变更标识读取审批人变更事实。
+  包含原审批人、新审批人、请求摘要及原因；不存在时返回空 Optional。
+-->
+<select id="findApproverChange" resultMap="ApproverChangeRow">
+SELECT * FROM workflow_approver_change WHERE tenant_id=#{tenantId} AND change_id=#{changeId}
+</select>
+
+<!--
+  读取指定实例最近的审批人变更记录。
+  按变更时间、变更标识倒序排列，最多返回 100 条。
+-->
+<select id="findApproverChanges" resultMap="ApproverChangeRow">
+SELECT * FROM workflow_approver_change WHERE tenant_id=#{tenantId} AND workflow_instance_id=#{instanceId} ORDER BY changed_at DESC,change_id DESC LIMIT 100
+</select>
+
+<!--
+  更新实例指定级别已存在的审批人覆盖记录。
+  按租户、实例和级别定位；无记录时返回 0，供调用方决定是否补充插入。
+-->
+<update id="updateApproverOverride">
+<![CDATA[UPDATE workflow_approver_override SET approver_user_id=#{next},updated_at=#{now} WHERE tenant_id=#{tenantId} AND workflow_instance_id=#{instanceId} AND level_no=#{levelNo}]]>
+</update>
+
+<!--
+  新增实例指定级别的审批人覆盖记录。
+  保存租户、实例、级别、新审批人及更新时间，供后续有效审批人查询优先使用。
+-->
+<insert id="insertApproverOverride">
+<![CDATA[INSERT INTO workflow_approver_override (tenant_id,workflow_instance_id,level_no,approver_user_id,updated_at) VALUES (#{tenantId},#{instanceId},#{levelNo},#{next},#{now})]]>
+</insert>
+
+
+</mapper>

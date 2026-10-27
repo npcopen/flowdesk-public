@@ -1,5 +1,7 @@
 package com.flowdesk.workflow.outbox;
 
+import com.flowdesk.workflow.model.WorkflowOutboxModels;
+
 import com.flowdesk.workflow.event.WorkflowReverseEventContract;
 
 import java.nio.ByteBuffer;
@@ -14,15 +16,23 @@ import java.util.LinkedHashMap;
 import java.util.Locale;
 import java.util.Map;
 
-/** Creates either frozen reverse envelope directly from the persisted first bytes. */
+/**
+ * 直接从首次持久化的字节恢复反向事件信封，保持两个契约的固定消息格式。
+ */
 final class WorkflowOutboxEnvelopeFactory {
     private static final DateTimeFormatter MICROS = new DateTimeFormatterBuilder()
             .appendInstant(6).toFormatter(Locale.ROOT);
 
+    /**
+     * 初始化组件依赖与运行参数，使后续调用使用一致的协作对象。
+     */
     private WorkflowOutboxEnvelopeFactory() {
     }
 
-    static WorkflowOutboxMessage create(WorkflowOutboxRepository.Claimed row) {
+    /**
+     * 从已领取的持久化消息还原冻结信封，并核验身份、字节和摘要后交给传输层。
+     */
+    static WorkflowOutboxMessage create(WorkflowOutboxModels.Claimed row) {
         Binding binding = Binding.of(row.contractRef());
         if (row.contractVersion() != WorkflowReverseEventContract.CONTRACT_VERSION
                 || !WorkflowReverseEventContract.AGGREGATE_TYPE.equals(row.aggregateType())) {
@@ -69,6 +79,9 @@ final class WorkflowOutboxEnvelopeFactory {
                 binding.topic(), row.messageId().toString(), body, properties);
     }
 
+    /**
+     * 计算输入字节的 SHA-256 摘要，用于内容一致性核对及稳定业务键派生。
+     */
     private static byte[] sha256(byte[] value) {
         try {
             return MessageDigest.getInstance("SHA-256").digest(value);
@@ -78,7 +91,13 @@ final class WorkflowOutboxEnvelopeFactory {
         }
     }
 
+    /**
+     * 工作流不可变数据快照，组合声明字段供当前业务处理阶段传递完整事实。
+     */
     private record Binding(String contractRef, String eventType, String topic) {
+        /**
+         * 根据持久化反向事件的契约标识选择冻结绑定，未知类型拒绝发送。
+         */
         static Binding of(String contractRef) {
             if (WorkflowReverseEventContract.InstanceEstablished.CONTRACT_REF.equals(contractRef)) {
                 return new Binding(contractRef,
@@ -94,7 +113,13 @@ final class WorkflowOutboxEnvelopeFactory {
         }
     }
 
+    /**
+     * 持久化消息不满足冻结契约时的异常，阻止不兼容信封继续发送。
+     */
     static final class InvalidContract extends RuntimeException {
+        /**
+         * 创建异常或专用实现并保留传入原因，供调用方分类处理。
+         */
         InvalidContract(String message) {
             super(message);
         }

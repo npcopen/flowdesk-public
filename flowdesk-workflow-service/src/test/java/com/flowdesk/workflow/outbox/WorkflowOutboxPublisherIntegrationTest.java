@@ -1,5 +1,8 @@
 package com.flowdesk.workflow.outbox;
 
+import com.flowdesk.workflow.service.WorkflowOutboxService;
+import com.flowdesk.workflow.service.impl.WorkflowOutboxServiceImpl;
+
 import com.flowdesk.workflow.event.WorkflowReverseEventCodec;
 import com.flowdesk.workflow.event.WorkflowReverseEventContract;
 import com.flowdesk.workflow.service.WorkflowIdempotencyCodec;
@@ -23,6 +26,9 @@ import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+/**
+ * 反向 Outbox 发布集成测试，验证持久化原信封发送及八次未确认后的唯一恢复记录。
+ */
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.NONE, properties = {
         "spring.cloud.service-registry.auto-registration.enabled=false",
         "spring.datasource.url=jdbc:h2:mem:workflow-outbox;MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE",
@@ -45,15 +51,21 @@ class WorkflowOutboxPublisherIntegrationTest {
 
     @Autowired JdbcTemplate jdbc;
     @Autowired PlatformTransactionManager transactionManager;
-    private WorkflowOutboxRepository repository;
+    private WorkflowOutboxService repository;
 
+    /**
+     * 清空本测试涉及的持久化表，隔离用例之间的 Inbox、恢复、审计及业务状态。
+     */
     @BeforeEach void clean() {
         jdbc.update("DELETE FROM message_recovery");
         jdbc.update("DELETE FROM audit_record");
         jdbc.update("DELETE FROM outbox_event");
-        repository = new WorkflowOutboxRepository(jdbc);
+        repository = new WorkflowOutboxServiceImpl(com.flowdesk.workflow.support.WorkflowTestMappers.mapper(jdbc.getDataSource(), WorkflowOutboxMapper.class), transactionManager);
     }
 
+    /**
+     * 验证两种冻结信封发送时保留原消息体而不重新序列化，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void sendsBothFrozenEnvelopesWithoutReserializingBody() {
         byte[] establishedBody = WorkflowReverseEventCodec.instanceEstablished(
@@ -64,7 +76,7 @@ class WorkflowOutboxPublisherIntegrationTest {
         MutableClock clock = new MutableClock(OCCURRED.plusSeconds(1));
         WorkflowOutboxPublisher publisher = new WorkflowOutboxPublisher(repository, message -> {
             sent.add(message); return WorkflowOutboxSendResult.sendOk();
-        }, transactionManager, clock);
+        }, clock);
 
         assertThat(publisher.publishOnce().published()).isEqualTo(1);
         assertThat(sent).singleElement().satisfies(message -> {
@@ -103,6 +115,9 @@ class WorkflowOutboxPublisherIntegrationTest {
         assertThat(status(finalId)).isEqualTo("PUBLISHED");
     }
 
+    /**
+     * 验证恰好八次发送失败后只创建一条工作流恢复记录，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void exactlyEightFailuresCreateOneWorkflowOutboxRecovery() {
         byte[] body = WorkflowReverseEventCodec.instanceEstablished(
@@ -114,7 +129,7 @@ class WorkflowOutboxPublisherIntegrationTest {
         WorkflowOutboxPublisher publisher = new WorkflowOutboxPublisher(repository, message -> {
             sent.add(message);
             return WorkflowOutboxSendResult.notConfirmed("BROKER_UNAVAILABLE", " broker\r\n unavailable ");
-        }, transactionManager, clock);
+        }, clock);
         for (var backoff : WorkflowReverseEventContract.FAILURE_BACKOFFS) {
             assertThat(publisher.publishOnce().rescheduled()).isEqualTo(1);
             clock.set(clock.instant().plus(backoff));
@@ -136,6 +151,9 @@ class WorkflowOutboxPublisherIntegrationTest {
         assertThat(publisher.publishOnce().scanned()).isZero();
     }
 
+    /**
+     * 建立当前测试场景的持久化前置事实，保留指定租户、身份和状态供后续业务路径验证。
+     */
     private UUID insert(String contract, byte[] body, byte[] intent) {
         UUID outboxId = UUID.randomUUID(); UUID messageId = UUID.randomUUID();
         jdbc.update("""
@@ -152,24 +170,51 @@ class WorkflowOutboxPublisherIntegrationTest {
                 Timestamp.from(OCCURRED), Timestamp.from(OCCURRED), Timestamp.from(OCCURRED));
         return outboxId;
     }
+    /**
+     * 读取指定 Outbox 的当前持久化状态，供发送成功或耗尽边界断言。
+     */
     private String status(UUID outboxId) {
         return jdbc.queryForObject("SELECT status FROM outbox_event WHERE tenant_id=? AND outbox_id=?",
                 String.class, bytes(TENANT), bytes(outboxId));
     }
+    /**
+     * 将 UUID 编码为数据库使用的二进制值，空标识保持为空。
+     */
     private static byte[] bytes(UUID id) {
         return ByteBuffer.allocate(16).putLong(id.getMostSignificantBits())
                 .putLong(id.getLeastSignificantBits()).array();
     }
+    /**
+     * 计算输入字节的 SHA-256 摘要，用于内容一致性核对及稳定业务键派生。
+     */
     private static byte[] sha256(byte[] value) {
         try { return MessageDigest.getInstance("SHA-256").digest(value); }
         catch (Exception impossible) { throw new IllegalStateException(impossible); }
     }
+    /**
+     * 可由测试推进的时钟，供重试、租约过期和恢复续跑场景使用确定性时间。
+     */
     private static final class MutableClock extends Clock {
         private Instant value;
+        /**
+         * 初始化组件依赖与运行参数，使后续调用使用一致的协作对象。
+         */
         private MutableClock(Instant value) { this.value = value; }
+        /**
+         * 将发布器测试时钟设置为指定时间点，供重试和租约到期路径使用确定性时间。
+         */
         void set(Instant value) { this.value = value; }
+        /**
+         * 返回测试时钟的固定 UTC 时区，避免本地时区影响时间边界。
+         */
         @Override public ZoneId getZone() { return ZoneOffset.UTC; }
+        /**
+         * 按测试时钟支持的时区契约返回时钟，保持可控时间点不变。
+         */
         @Override public Clock withZone(ZoneId zone) { return this; }
+        /**
+         * 返回测试时钟当前时间，供租约及重试场景确定性推进。
+         */
         @Override public Instant instant() { return value; }
     }
 }

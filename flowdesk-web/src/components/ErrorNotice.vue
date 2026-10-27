@@ -1,4 +1,5 @@
 <script setup lang="ts">
+/** 统一展示错误、追踪关联标识及重试入口，便于用户反馈和定位。 */
 import { computed } from "vue";
 import { AlertCircle, RefreshCw } from "lucide-vue-next";
 import { errorLabel, isApiClientError } from "@/api/errors";

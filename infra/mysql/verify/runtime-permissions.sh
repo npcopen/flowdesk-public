@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+# 使用指定账号通过 TCP 执行 SQL，以环境变量传递密码并返回无表头的批量结果。
 mysql_exec() {
   local user="$1"
   local password="$2"
@@ -8,6 +9,7 @@ mysql_exec() {
   MYSQL_PWD="$password" mysql --protocol=tcp --host=mysql --user="$user" --batch --skip-column-names --execute="$statement"
 }
 
+# 执行预期无权限的 SQL，只有明确的 MySQL 授权错误才算通过，普通连接或语法错误不能替代权限验证。
 expect_denied() {
   local user="$1"
   local password="$2"
@@ -28,6 +30,7 @@ expect_denied() {
   esac
 }
 
+# 清理权限验证生成的探针审计行及固定测试租户，清理失败不覆盖原始检查结果。
 cleanup_probe_rows() {
   local schema
   for schema in flowdesk_iam flowdesk_ticket flowdesk_workflow flowdesk_alert flowdesk_notification; do
@@ -50,6 +53,7 @@ cleanup_probe_rows() {
   " >/dev/null 2>&1 || true
 }
 
+# 构造已撤销角色及用户绑定，以运行账号重新授权并核验审计列和版本，确认具备所需最小列权限。
 verify_iam_regrant_columns() {
   local t="UUID_TO_BIN('5e12e2c2-0000-0000-0000-000000000001')"
   local r="UUID_TO_BIN('5e12e2c2-0000-0000-0000-000000000002')"

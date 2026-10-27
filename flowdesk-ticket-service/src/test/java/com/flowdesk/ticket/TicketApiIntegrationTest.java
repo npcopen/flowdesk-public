@@ -1,5 +1,9 @@
 package com.flowdesk.ticket;
 
+import com.flowdesk.ticket.mapper.*;
+import com.flowdesk.ticket.model.*;
+import com.flowdesk.ticket.persistence.Uuids;
+
 import com.flowdesk.common.authz.PermissionCode;
 import com.flowdesk.common.authz.RoleCode;
 import com.flowdesk.common.security.IssuedJwt;
@@ -7,7 +11,7 @@ import com.flowdesk.common.security.JwtIssuer;
 import com.flowdesk.ticket.iam.AssigneeEligibilityChecker;
 import com.flowdesk.ticket.event.TicketEventContract;
 import com.flowdesk.ticket.event.WorkflowStartV1PayloadCodec;
-import com.flowdesk.ticket.repository.TicketRepository.Uuids;
+import com.flowdesk.ticket.persistence.Uuids;
 import com.jayway.jsonpath.JsonPath;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.RepeatedTest;
@@ -49,6 +53,9 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+/**
+ * 工单模块回归测试，覆盖该组件的正常流程、边界条件与关键一致性约束。
+ */
 @SpringBootTest
 @AutoConfigureMockMvc
 class TicketApiIntegrationTest {
@@ -81,8 +88,11 @@ class TicketApiIntegrationTest {
     @org.springframework.test.context.bean.override.mockito.MockitoBean
     private com.flowdesk.ticket.approval.ApprovalAccessChecker approvalAccessChecker;
     @org.springframework.test.context.bean.override.mockito.MockitoBean
-    private com.flowdesk.ticket.service.CatalogVersionClient catalogVersionClient;
+    private com.flowdesk.ticket.catalog.CatalogVersionClient catalogVersionClient;
 
+    /**
+     * 验证混合角色能读本人和分派范围，不遗漏本人申请。
+     */
     @Test
     void mixedRoleReadsOwnAndAssignedScopesWithoutLosingOwnRequests() throws Exception {
         UUID id=createTicket(CATALOG_NORMAL,"mixed-role-own-ticket");
@@ -99,6 +109,9 @@ class TicketApiIntegrationTest {
                 .andExpect(status().isOk()).andExpect(jsonPath("$.data.length()").value(0));
     }
 
+    /**
+     * 验证管理员可新建目录并绑定规则，新规则仅影响未来工单。
+     */
     @Test
     void administratorsCreateCatalogTypesAndBindNewRulesOnlyForFutureTickets() throws Exception {
         String normal="""
@@ -130,6 +143,9 @@ class TicketApiIntegrationTest {
         org.mockito.Mockito.verify(catalogVersionClient).validate(org.mockito.ArgumentMatchers.argThat(w->w.workflowVersionId().equals(newVersion)),org.mockito.ArgumentMatchers.anyString());
     }
 
+    /**
+     * 验证工作台统计覆盖所有可见工单，不限第一页。
+     */
     @Test
     void dashboardCountsAllVisibleTicketsBeyondTheFirstPage() throws Exception {
         for (int i = 0; i < 11; i++) createTicket(CATALOG_NORMAL, "summary-ticket-" + i);
@@ -143,6 +159,9 @@ class TicketApiIntegrationTest {
                 .andExpect(status().isOk()).andExpect(jsonPath("$.data.pendingCount").value(0));
     }
 
+    /**
+     * 验证审批摘要要求分派任务，且不授予通用工单读取权限。
+     */
     @Test
     void approvalSummaryRequiresAnAssignedTaskWithoutGrantingGeneralTicketAccess() throws Exception {
         UUID ticketId = createTicket(CATALOG_HIGH, "approval-context-create");
@@ -162,6 +181,9 @@ class TicketApiIntegrationTest {
                 .andExpect(status().isNotFound());
     }
 
+    /**
+     * 注册隔离测试数据库、密钥和功能开关，使场景在可控环境运行。
+     */
     @DynamicPropertySource
     static void testProperties(DynamicPropertyRegistry registry) {
         registry.add("flowdesk.security.jwt.public-key-pem", () -> publicKeyPem());
@@ -177,6 +199,9 @@ class TicketApiIntegrationTest {
         registry.add("spring.sql.init.schema-locations", () -> "classpath:schema-test.sql");
     }
 
+    /**
+     * 清理上次场景的持久化与替身状态，再建立本场景所需基础数据。
+     */
     @BeforeEach
     void cleanAndSeed() {
         for (String table : List.of("sla_trigger", "sla_clock", "ticket_timeline_entry",
@@ -202,6 +227,9 @@ class TicketApiIntegrationTest {
 
     // ----- read-only vertical slice -------------------------------------------------
 
+    /**
+     * 验证申请人只见启用目录，管理员可筛选停用项。
+     */
     @Test
     void requesterSeesOnlyActiveCatalogAndAdminCanFilterInactive() throws Exception {
         mockMvc.perform(get("/api/v1/service-catalog-items")
@@ -240,6 +268,9 @@ class TicketApiIntegrationTest {
                 .andExpect(status().isForbidden());
     }
 
+    /**
+     * 验证目录更新使用 ETag，拒绝陈旧版本。
+     */
     @Test
     void adminPatchesCatalogWithEtagAndRejectsStaleVersion() throws Exception {
         MvcResult result = mockMvc.perform(get("/api/v1/service-catalog-items/" + CATALOG_NORMAL)
@@ -283,6 +314,9 @@ class TicketApiIntegrationTest {
 
     // ----- create / lifecycle ---------------------------------------------------------
 
+    /**
+     * 验证人工工单从创建到分派、受理、解决和关闭的完整生命周期。
+     */
     @Test
     void manualTicketLifecycleFromCreateToClose() throws Exception {
         MvcResult created = mockMvc.perform(post("/api/v1/tickets")
@@ -434,6 +468,9 @@ class TicketApiIntegrationTest {
                 .andExpect(jsonPath("$.data.commentId").isNotEmpty());
     }
 
+    /**
+     * 验证并发建单分配一百个唯一且格式正确的工单号。
+     */
     @Test
     void concurrentTicketCreationAllocatesOneHundredUniqueFormattedNumbers() throws Exception {
         int requestCount = 100;
@@ -480,6 +517,9 @@ class TicketApiIntegrationTest {
         }
     }
 
+    /**
+     * 验证相同幂等键并发请求最终只产生一次完整业务效果。
+     */
     @RepeatedTest(10)
     void concurrentSameIdempotencyKeyProducesOneCompletedBusinessEffect() throws Exception {
         int requestCount = 20;
@@ -545,6 +585,9 @@ class TicketApiIntegrationTest {
         }
     }
 
+    /**
+     * 验证相同文本幂等键按调用用户隔离。
+     */
     @Test
     void sameTextualIdempotencyKeyIsScopedToTheCallingUser() throws Exception {
         String key = "same-key-different-requesters-0001";
@@ -578,6 +621,9 @@ class TicketApiIntegrationTest {
                 "SELECT COUNT(DISTINCT requester_user_id) FROM ticket", Integer.class))
                 .isEqualTo(2);
     }
+    /**
+     * 验证高风险建单进入待审批，并写入启动发件箱。
+     */
     @Test
     void highRiskTicketEntersAwaitingApprovalWithOutbox() throws Exception {
         MvcResult initialCreated = mockMvc.perform(post("/api/v1/tickets")
@@ -638,6 +684,9 @@ class TicketApiIntegrationTest {
                 .andExpect(header().string("ETag", "\"lv:0\""));
     }
 
+    /**
+     * 验证启用目录绑定停用策略时仍按约定保存策略快照。
+     */
     @Test
     void activeCatalogBoundToInactiveSlaPolicyStillSnapshotsPolicy() throws Exception {
         mockMvc.perform(post("/api/v1/tickets")
@@ -653,6 +702,9 @@ class TicketApiIntegrationTest {
                 Integer.class, Uuids.toBytes(SLA_INACTIVE))).isEqualTo(2);
     }
 
+    /**
+     * 验证前次申请只能引用本人被拒绝的高风险工单。
+     */
     @Test
     void previousAttemptMustBeOwnRejectedHighRiskTicket() throws Exception {
         UUID rejected = createTicket(CATALOG_HIGH, "create-high-risk-02");
@@ -686,6 +738,9 @@ class TicketApiIntegrationTest {
 
     // ----- authorization and conflicts ---------------------------------------------------
 
+    /**
+     * 验证权限范围与跨租户隔离，阻止读取或操作他方数据。
+     */
     @Test
     void authorizationScopeAndCrossTenantIsolation() throws Exception {
         UUID ticketId = createTicket(CATALOG_NORMAL, "create-scope-0001");
@@ -719,6 +774,9 @@ class TicketApiIntegrationTest {
                 .andExpect(jsonPath("$.error.code").value("TICKET_NOT_ASSIGNED_TO_ACTOR"));
     }
 
+    /**
+     * 验证陈旧版本和非法状态被拒绝，且不产生副作用。
+     */
     @Test
     void staleEtagAndIllegalStateAreRejectedWithoutSideEffects() throws Exception {
         UUID ticketId = createTicket(CATALOG_NORMAL, "create-conflict-01");
@@ -750,6 +808,9 @@ class TicketApiIntegrationTest {
                 Integer.class, Uuids.toBytes(ticketId))).isEqualTo(2);
     }
 
+    /**
+     * 验证受理失败不写成功幂等事实，分派后仍可成功。
+     */
     @Test
     void failedAcceptDoesNotCreateReplayAndCanSucceedAfterAssignment() throws Exception {
         UUID ticketId = createTicket(CATALOG_NORMAL, "create-accept-after-failure-0001");
@@ -816,6 +877,9 @@ class TicketApiIntegrationTest {
                   AND outcome = 'SUCCEEDED'
                 """, Integer.class, Uuids.toBytes(ticketId))).isEqualTo(1);
     }
+    /**
+     * 验证无处理资格的用户不能被分派工单。
+     */
     @Test
     void ineligibleAgentIsRejected() throws Exception {
         UUID ticketId = createTicket(CATALOG_NORMAL, "create-ineligible-01");
@@ -829,6 +893,9 @@ class TicketApiIntegrationTest {
                 .andExpect(jsonPath("$.error.code").value("ASSIGNEE_NOT_ELIGIBLE"));
     }
 
+    /**
+     * 验证转派回到已分派状态，重开保留处理人。
+     */
     @Test
     void transferMovesToAssignedAndReopenKeepsAssignee() throws Exception {
         UUID ticketId = createTicket(CATALOG_NORMAL, "create-transfer-01");
@@ -915,6 +982,9 @@ class TicketApiIntegrationTest {
                 .isEqualTo("SATISFIED_ON_TIME");
     }
 
+    /**
+     * 验证后续状态和处理人变化不影响既有成功重放。
+     */
     @Test
     void successfulReplaysSurviveLaterStateAndAssigneeChanges() throws Exception {
         UUID ticketId = createTicket(CATALOG_NORMAL, "create-replay-chain-0001");
@@ -1012,6 +1082,9 @@ class TicketApiIntegrationTest {
                 """, Integer.class, Uuids.toBytes(ticketId))).isEqualTo(1);
     }
 
+    /**
+     * 验证再次解决后重开仍可重放，且不重复增加周期次数。
+     */
     @Test
     void reopenReplaySurvivesSecondResolveWithoutIncrementingAgain() throws Exception {
         UUID ticketId = createTicket(CATALOG_NORMAL, "create-reopen-replay-0001");
@@ -1061,6 +1134,9 @@ class TicketApiIntegrationTest {
                 """, Integer.class, Uuids.toBytes(ticketId))).isEqualTo(1);
     }
 
+    /**
+     * 验证缺失时间线或审计锚点时拒绝成功重放。
+     */
     @Test
     void incompleteTimelineOrAuditAnchorFailsClosed() throws Exception {
         UUID missingAuditTicket = createTicket(CATALOG_NORMAL, "create-missing-audit-0001");
@@ -1094,6 +1170,9 @@ class TicketApiIntegrationTest {
                 .andExpect(jsonPath("$.error.code").value("IDEMPOTENCY_KEY_REUSED"));
     }
 
+    /**
+     * 验证一致性重读后创建锚点仍缺失时继续拒绝重放。
+     */
     @Test
     void incompleteCreateAnchorStillFailsClosedAfterConsistencyRefresh() throws Exception {
         String key = "create-incomplete-anchor-0001";
@@ -1119,6 +1198,9 @@ class TicketApiIntegrationTest {
                 """, Integer.class)).isEqualTo(1);
     }
 
+    /**
+     * 验证工单号冲突不被误识别为幂等重放。
+     */
     @Test
     void ticketNumberConflictCannotMasqueradeAsReplay() throws Exception {
         UUID ticketId = createTicket(CATALOG_NORMAL, "create-number-anchor-0001");
@@ -1146,6 +1228,9 @@ class TicketApiIntegrationTest {
                 Long.class, Uuids.toBytes(TENANT_A))).isEqualTo(1L);
     }
 
+    /**
+     * 验证无关唯一约束冲突不冒充重放，回滚后可重试。
+     */
     @Test
     void unrelatedUniqueConstraintCannotMasqueradeAsReplayAndRollbackCanRetry() throws Exception {
         String retryKey = "create-unrelated-conflict-0001";
@@ -1198,8 +1283,197 @@ class TicketApiIntegrationTest {
                 SELECT COUNT(*) FROM audit_record WHERE action_code = 'TICKET_CREATE'
                 """, Integer.class)).isEqualTo(2);
     }
+    /**
+     * 验证双向分页保留同时间记录与用户可见范围。
+     */
+    @Test
+    void filteredTicketPagesKeepTimestampTiesAndVisibilityScopesInBothDirections() throws Exception {
+        Instant sameTime = Instant.parse("2026-10-20T10:00:00.123456Z");
+        List<UUID> expected = java.util.stream.IntStream.rangeClosed(1, 4)
+                .mapToObj(i -> UUID.fromString("71000000-0000-0000-0000-%012d".formatted(i)))
+                .toList();
+        for (UUID id : expected) {
+            insertQueryTicket(TENANT_A, id, "ASSIGNED", "MANUAL", CATALOG_NORMAL,
+                    REQUESTER_A, AGENT_A, sameTime);
+        }
+        // Each decoy differs from one filter, so dropping any predicate changes a page.
+        insertQueryTicket(TENANT_A, UUID.randomUUID(), "RESOLVED", "MANUAL", CATALOG_NORMAL,
+                REQUESTER_A, AGENT_A, sameTime);
+        insertQueryTicket(TENANT_A, UUID.randomUUID(), "ASSIGNED", "INCIDENT", CATALOG_NORMAL,
+                REQUESTER_A, AGENT_A, sameTime);
+        insertQueryTicket(TENANT_A, UUID.randomUUID(), "ASSIGNED", "MANUAL", CATALOG_HIGH,
+                REQUESTER_A, AGENT_A, sameTime);
+        insertQueryTicket(TENANT_A, UUID.randomUUID(), "ASSIGNED", "MANUAL", CATALOG_NORMAL,
+                REQUESTER_A, AGENT_A, sameTime.minusSeconds(1));
+        insertQueryTicket(TENANT_A, UUID.randomUUID(), "ASSIGNED", "MANUAL", CATALOG_NORMAL,
+                REQUESTER_A, AGENT_A, sameTime.plusSeconds(1));
+        UUID otherVisible = UUID.fromString("71000000-0000-0000-0000-000000000005");
+        insertQueryTicket(TENANT_A, otherVisible, "ASSIGNED", "MANUAL", CATALOG_NORMAL,
+                REQUESTER_B, AGENT_A2, sameTime);
+        UUID assignedOnly = UUID.fromString("71000000-0000-0000-0000-000000000006");
+        insertQueryTicket(TENANT_A, assignedOnly, "ASSIGNED", "MANUAL", CATALOG_NORMAL,
+                REQUESTER_B, REQUESTER_A, sameTime);
+        insertQueryTicket(TENANT_B, UUID.randomUUID(), "ASSIGNED", "MANUAL", CATALOG_NORMAL,
+                REQUESTER_A, AGENT_A, sameTime);
+        var filters = new org.springframework.util.LinkedMultiValueMap<String, String>();
+        filters.add("status", "ASSIGNED");
+        filters.add("originType", "MANUAL");
+        filters.add("catalogItemId", CATALOG_NORMAL.toString());
+        // Equal endpoints exercise both inclusive timestamp predicates.
+        filters.add("createdFrom", sameTime.toString());
+        filters.add("createdTo", sameTime.toString());
+        String mixed = ISSUER.issueHuman(TENANT_A, REQUESTER_A, Set.of(RoleCode.REQUESTER, RoleCode.AGENT),
+                Set.of(PermissionCode.TICKET_READ_OWN, PermissionCode.TICKET_READ_ASSIGNED)).token();
+        for (String sort : List.of("createdAt", "-createdAt", "updatedAt", "-updatedAt")) {
+            List<UUID> order = new java.util.ArrayList<>(expected);
+            if (sort.startsWith("-")) java.util.Collections.reverse(order);
+            filters.set("scope", "mine");
+            assertThat(readQueryPages("/api/v1/tickets", requesterToken(), filters, sort, "ticketId"))
+                    .containsExactlyElementsOf(order.stream().map(UUID::toString).toList());
+            filters.set("scope", "assigned");
+            assertThat(readQueryPages("/api/v1/tickets", agentToken(), filters, sort, "ticketId"))
+                    .containsExactlyElementsOf(order.stream().map(UUID::toString).toList());
+            filters.set("scope", "visible");
+            List<UUID> visibleOrder = new java.util.ArrayList<>(expected);
+            visibleOrder.add(assignedOnly);
+            if (sort.startsWith("-")) java.util.Collections.reverse(visibleOrder);
+            assertThat(readQueryPages("/api/v1/tickets", mixed, filters, sort, "ticketId"))
+                    .containsExactlyElementsOf(visibleOrder.stream().map(UUID::toString).toList());
+        }
+        filters.set("scope", "tenant");
+        List<UUID> tenantRows = new java.util.ArrayList<>(expected);
+        tenantRows.add(otherVisible);
+        tenantRows.add(assignedOnly);
+        assertThat(readQueryPages("/api/v1/tickets", adminToken(), filters, "createdAt", "ticketId"))
+                .containsExactlyElementsOf(tenantRows.stream().map(UUID::toString).toList());
+        // Switching from timestamps to ticket numbers exercises the String cursor type.
+        filters.set("scope", "mine");
+        assertThat(readQueryPages("/api/v1/tickets", requesterToken(), filters, "ticketNo", "ticketId"))
+                .containsExactlyElementsOf(expected.stream().map(UUID::toString).toList());
+    }
+
+    /**
+     * 验证评论按时间与 UUID 分页，不越过工单或租户边界。
+     */
+    @Test
+    void commentPagesUseTimestampAndUuidWithoutCrossingTicketOrTenantBoundaries() throws Exception {
+        UUID ticketId = createTicket(CATALOG_NORMAL, "comment-query-pagination-ticket");
+        Instant sameTime = Instant.parse("2026-10-20T11:00:00.123456Z");
+        List<UUID> ids = java.util.stream.IntStream.rangeClosed(1, 4)
+                .mapToObj(i -> UUID.fromString("72000000-0000-0000-0000-%012d".formatted(i)))
+                .toList();
+        for (UUID id : ids) insertQueryComment(TENANT_A, ticketId, id, sameTime);
+        insertQueryComment(TENANT_B, ticketId, UUID.randomUUID(), sameTime);
+        insertQueryComment(TENANT_A, UUID.randomUUID(), UUID.randomUUID(), sameTime);
+        for (String sort : List.of("createdAt", "-createdAt")) {
+            List<UUID> order = new java.util.ArrayList<>(ids);
+            if (sort.startsWith("-")) java.util.Collections.reverse(order);
+            assertThat(readQueryPages("/api/v1/tickets/" + ticketId + "/comments", requesterToken(),
+                    new org.springframework.util.LinkedMultiValueMap<>(), sort, "commentId"))
+                    .containsExactlyElementsOf(order.stream().map(UUID::toString).toList());
+        }
+    }
+
+    /**
+     * 验证时间线双向分页保持时间筛选和同时间 UUID 边界。
+     */
+    @Test
+    void timelinePagesKeepEventTimeFiltersAndUuidTiesInBothDirections() throws Exception {
+        UUID ticketId = createTicket(CATALOG_NORMAL, "timeline-query-pagination-ticket");
+        Instant sameTime = Instant.parse("2026-10-20T12:00:00.123456Z");
+        List<UUID> ids = java.util.stream.IntStream.rangeClosed(1, 4)
+                .mapToObj(i -> UUID.fromString("73000000-0000-0000-0000-%012d".formatted(i)))
+                .toList();
+        for (UUID id : ids) insertQueryTimeline(TENANT_A, ticketId, id, "COMMENT_ADDED", sameTime);
+        insertQueryTimeline(TENANT_A, ticketId, UUID.randomUUID(), "CREATED", sameTime);
+        insertQueryTimeline(TENANT_A, ticketId, UUID.randomUUID(), "COMMENT_ADDED", sameTime.minusSeconds(1));
+        insertQueryTimeline(TENANT_A, ticketId, UUID.randomUUID(), "COMMENT_ADDED", sameTime.plusSeconds(1));
+        insertQueryTimeline(TENANT_B, ticketId, UUID.randomUUID(), "COMMENT_ADDED", sameTime);
+        insertQueryTimeline(TENANT_A, UUID.randomUUID(), UUID.randomUUID(), "COMMENT_ADDED", sameTime);
+        var filters = new org.springframework.util.LinkedMultiValueMap<String, String>();
+        filters.add("eventType", "COMMENT_ADDED");
+        filters.add("occurredFrom", sameTime.toString());
+        filters.add("occurredTo", sameTime.toString());
+        for (String sort : List.of("occurredAt", "-occurredAt")) {
+            List<UUID> order = new java.util.ArrayList<>(ids);
+            if (sort.startsWith("-")) java.util.Collections.reverse(order);
+            assertThat(readQueryPages("/api/v1/tickets/" + ticketId + "/timeline", requesterToken(),
+                    filters, sort, "timelineId"))
+                    .containsExactlyElementsOf(order.stream().map(UUID::toString).toList());
+        }
+    }
+
+    /**
+     * 沿响应游标连续读取全部测试页，核验顺序、筛选及同时间边界。
+     */
+    private List<String> readQueryPages(String path, String token,
+            org.springframework.util.MultiValueMap<String, String> filters, String sort, String idField)
+            throws Exception {
+        List<String> ids = new java.util.ArrayList<>();
+        String next = null;
+        for (int page = 0; page < 10; page++) {
+            var params = new org.springframework.util.LinkedMultiValueMap<String, String>(filters);
+            params.set("sort", sort);
+            params.set("pageSize", "2");
+            if (next != null) params.set("pageToken", next);
+            String json = mockMvc.perform(get(path).header("Authorization", "Bearer " + token).params(params))
+                    .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
+            List<String> pageIds = JsonPath.read(json, "$.data[*]." + idField);
+            assertThat(pageIds).hasSizeLessThanOrEqualTo(2);
+            ids.addAll(pageIds);
+            java.util.Map<String, Object> pageMeta = JsonPath.read(json, "$.meta.page");
+            next = (String) pageMeta.get("nextPageToken");
+            if (next == null) return ids;
+            assertThat(next).isNotBlank();
+        }
+        throw new AssertionError("Query pagination failed to terminate within ten pages");
+    }
+
+    /**
+     * 保存本场景前置业务事实，使用参数控制租户、身份、状态及时间边界。
+     */
+    private void insertQueryTicket(UUID tenant, UUID id, String state, String origin, UUID catalog,
+                                   UUID requester, UUID assignee, Instant time) {
+        jdbc.update("""
+                INSERT INTO ticket (tenant_id, ticket_id, ticket_no, creation_intent_key, origin_type,
+                    catalog_item_id, requester_user_id, subject, description, status, assignee_user_id,
+                    created_at, updated_at, created_by_type, updated_by_type)
+                VALUES (?, ?, ?, ?, ?, ?, ?, 'query fixture', 'query fixture', ?, ?, ?, ?, 'SERVICE', 'SERVICE')
+                """, Uuids.toBytes(tenant), Uuids.toBytes(id), id.toString().replace("-", ""),
+                java.nio.ByteBuffer.allocate(32).putLong(id.getMostSignificantBits()).putLong(id.getLeastSignificantBits()).array(), origin, Uuids.toBytes(catalog),
+                Uuids.toBytes(requester), state, Uuids.toBytes(assignee), Timestamp.from(time), Timestamp.from(time));
+    }
+
+    /**
+     * 保存本场景前置业务事实，使用参数控制租户、身份、状态及时间边界。
+     */
+    private void insertQueryComment(UUID tenant, UUID ticketId, UUID id, Instant time) {
+        jdbc.update("""
+                INSERT INTO ticket_comment (tenant_id, comment_id, ticket_id, body, correlation_id,
+                    created_at, created_by_type, created_by_id)
+                VALUES (?, ?, ?, 'query comment', ?, ?, 'USER', ?)
+                """, Uuids.toBytes(tenant), Uuids.toBytes(id), Uuids.toBytes(ticketId),
+                Uuids.toBytes(UUID.randomUUID()), Timestamp.from(time), Uuids.toBytes(REQUESTER_A));
+    }
+
+    /**
+     * 保存本场景前置业务事实，使用参数控制租户、身份、状态及时间边界。
+     */
+    private void insertQueryTimeline(UUID tenant, UUID ticketId, UUID id, String event, Instant time) {
+        jdbc.update("""
+                INSERT INTO ticket_timeline_entry (tenant_id, timeline_id, ticket_id, effect_key,
+                    event_type, summary, actor_type, actor_id, occurred_at, correlation_id)
+                VALUES (?, ?, ?, ?, ?, 'query timeline', 'SERVICE', NULL, ?, ?)
+                """, Uuids.toBytes(tenant), Uuids.toBytes(id), Uuids.toBytes(ticketId),
+                java.nio.ByteBuffer.allocate(32).putLong(id.getMostSignificantBits()).putLong(id.getLeastSignificantBits()).array(), event,
+                Timestamp.from(time), Uuids.toBytes(UUID.randomUUID()));
+    }
+
     // ----- helpers -------------------------------------------------------------------------
 
+    /**
+     * 通过真实 HTTP 接口创建测试工单并返回其标识，供后续生命周期场景使用。
+     */
     private UUID createTicket(UUID catalogItemId, String idempotencyKey) throws Exception {
         MvcResult result = mockMvc.perform(post("/api/v1/tickets")
                         .header("Authorization", "Bearer " + requesterToken())
@@ -1213,6 +1487,9 @@ class TicketApiIntegrationTest {
         return UUID.fromString(JsonPath.read(result.getResponse().getContentAsString(), "$.data.ticketId"));
     }
 
+    /**
+     * 通过 HTTP 分派测试工单，断言接口接受目标处理人及当前版本。
+     */
     private void assignTicket(UUID ticketId, UUID assignee, String idempotencyKey) throws Exception {
         mockMvc.perform(post("/api/v1/tickets/" + ticketId + "/assign")
                         .header("Authorization", "Bearer " + adminToken())
@@ -1224,6 +1501,9 @@ class TicketApiIntegrationTest {
                 .andExpect(jsonPath("$.data.lockVersion").value(1));
     }
 
+    /**
+     * 通过 HTTP 受理工单，校验认证身份、幂等键与预期锁版本。
+     */
     private void acceptTicket(UUID ticketId, String token, String idempotencyKey,
                               long expectedLockVersion) throws Exception {
         mockMvc.perform(post("/api/v1/tickets/" + ticketId + "/accept")
@@ -1235,6 +1515,9 @@ class TicketApiIntegrationTest {
                 .andExpect(jsonPath("$.data.lockVersion").value(expectedLockVersion + 1));
     }
 
+    /**
+     * 通过 HTTP 解决测试工单并断言成功，供关闭和重开场景使用。
+     */
     private void resolveTicket(UUID ticketId, String token, String idempotencyKey,
                                long expectedLockVersion, String summary) throws Exception {
         mockMvc.perform(post("/api/v1/tickets/" + ticketId + "/resolve")
@@ -1248,6 +1531,9 @@ class TicketApiIntegrationTest {
                 .andExpect(jsonPath("$.data.lockVersion").value(expectedLockVersion + 1));
     }
 
+    /**
+     * 签发当前租户申请人令牌，供验证申请人可见范围。
+     */
     private String requesterToken() {
         return token(REQUESTER_A, RoleCode.REQUESTER, PermissionCode.CATALOG_READ_ACTIVE,
                 PermissionCode.TICKET_CREATE, PermissionCode.TICKET_READ_OWN,
@@ -1255,6 +1541,9 @@ class TicketApiIntegrationTest {
                 PermissionCode.TICKET_REOPEN_OWN);
     }
 
+    /**
+     * 签发另一申请人令牌，供验证同租户不同用户隔离。
+     */
     private String requesterBToken() {
         return token(REQUESTER_B, RoleCode.REQUESTER, PermissionCode.CATALOG_READ_ACTIVE,
                 PermissionCode.TICKET_CREATE, PermissionCode.TICKET_READ_OWN,
@@ -1262,28 +1551,43 @@ class TicketApiIntegrationTest {
                 PermissionCode.TICKET_REOPEN_OWN);
     }
 
+    /**
+     * 签发处理人令牌，供分派、受理及处理范围测试。
+     */
     private String agentToken() {
         return token(AGENT_A, RoleCode.AGENT, PermissionCode.TICKET_READ_ASSIGNED,
                 PermissionCode.TICKET_ACCEPT_ASSIGNED, PermissionCode.TICKET_TRANSFER_ASSIGNED,
                 PermissionCode.TICKET_COMMENT_ASSIGNED, PermissionCode.TICKET_RESOLVE_ASSIGNED);
     }
 
+    /**
+     * 签发第二处理人令牌，供转派与处理人变更场景。
+     */
     private String agent2Token() {
         return token(AGENT_A2, RoleCode.AGENT, PermissionCode.TICKET_READ_ASSIGNED,
                 PermissionCode.TICKET_ACCEPT_ASSIGNED, PermissionCode.TICKET_TRANSFER_ASSIGNED,
                 PermissionCode.TICKET_COMMENT_ASSIGNED, PermissionCode.TICKET_RESOLVE_ASSIGNED);
     }
 
+    /**
+     * 签发管理员令牌，供管理操作与全租户可见范围测试。
+     */
     private String adminToken() {
         return token(ADMIN_A, RoleCode.SERVICE_DESK_ADMIN, PermissionCode.CATALOG_READ_TENANT,
                 PermissionCode.CATALOG_UPDATE_MINIMAL, PermissionCode.TICKET_READ_TENANT,
                 PermissionCode.TICKET_ASSIGN_TENANT, PermissionCode.TICKET_TRANSFER_TENANT);
     }
 
+    /**
+     * 按指定主体、租户与权限签发测试 JWT，走服务真实认证路径。
+     */
     private String token(UUID user, RoleCode role, PermissionCode... permissions) {
         return ISSUER.issueHuman(TENANT_A, user, Set.of(role), Set.of(permissions)).token();
     }
 
+    /**
+     * 保存本场景前置业务事实，使用参数控制租户、身份、状态及时间边界。
+     */
     private void insertSlaPolicy(UUID tenant, UUID id, String code, long firstResponse,
                                  long resolution) {
         jdbc.update("""
@@ -1295,6 +1599,9 @@ class TicketApiIntegrationTest {
                 """, Uuids.toBytes(tenant), Uuids.toBytes(id), code, code, firstResponse, resolution);
     }
 
+    /**
+     * 保存本场景前置业务事实，使用参数控制租户、身份、状态及时间边界。
+     */
     private void insertCatalog(UUID tenant, UUID id, String code, String risk, boolean approval,
                                UUID workflowDef, UUID workflowVersion, Integer versionNo) {
         jdbc.update("""
@@ -1308,6 +1615,9 @@ class TicketApiIntegrationTest {
                 Uuids.toBytes(SLA_A));
     }
 
+    /**
+     * 生成测试专用非对称密钥对，隔离令牌签名与真实环境密钥。
+     */
     private static KeyPair newKeyPair() {
         try {
             return KeyPairGenerator.getInstance("RSA").generateKeyPair();
@@ -1316,20 +1626,32 @@ class TicketApiIntegrationTest {
         }
     }
 
+    /**
+     * 把测试公钥编码为 PEM，供应用配置中的 JWT 验证使用。
+     */
     private static String publicKeyPem() {
         String nl = System.lineSeparator();
         String base64 = Base64.getEncoder().encodeToString(KEY_PAIR.getPublic().getEncoded());
         return "-----BEGIN PUBLIC KEY-----" + nl + base64 + nl + "-----END PUBLIC KEY-----";
     }
 
+    /**
+     * 返回测试游标签名密钥，确保分页令牌可按真实协议生成和验证。
+     */
     private static String cursorHmacKey() {
         return Base64.getEncoder().encodeToString(
                 "0123456789abcdef0123456789abcdef".getBytes(StandardCharsets.UTF_8));
     }
 
+    /**
+     * 用于该测试的内部替身，提供可控制的时钟、调度或依赖行为。
+     */
     @TestConfiguration
     static class EligibilityStubConfiguration {
 
+        /**
+         * 装配工单的 stubEligibilityChecker 组件，将配置与依赖交由 Spring 管理。
+         */
         @Bean
         @Primary
         AssigneeEligibilityChecker stubEligibilityChecker() {

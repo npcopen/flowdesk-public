@@ -1,3 +1,4 @@
+/** 创建 Vue 应用并连接 Pinia、路由和 API 身份钩子，统一处理会话失效。 */
 import { createApp } from 'vue'
 import { createPinia } from 'pinia'
 import App from './App.vue'
@@ -22,8 +23,8 @@ configureAuthFailureHandler(() => {
 app.use(router)
 app.mount('#app')
 
-if (featureFlags.fullMock && typeof window !== 'undefined') {
-  // Playwright uses this bridge to represent the external fixed monitoring script.
+if (!import.meta.env.PROD && featureFlags.fullMock && typeof window !== 'undefined') {
+  // 仅在完整模拟模式中向 Playwright 暴露告警触发与数据重置入口。
   window.__FLOWDESK_E2E_TRIGGER_ALERT = (eventType = 'FIRING') => mockApi.triggerAlert(eventType)
   window.__FLOWDESK_E2E_RESET = () => mockApi.reset()
 }

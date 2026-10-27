@@ -1,0 +1,88 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+  租户 SLA 索引重建租约的持久化接口，保存运行标识、高水位、阶段和过期时间。
+  通过运行标识与递增 fencingEpoch 隔离新旧执行者，防止过期任务继续推进重建。
+-->
+<mapper namespace="com.flowdesk.ticket.sla.SlaRebuildLeasePersistenceMapper">
+  <!-- 将查询列映射为 SlaRebuildLeaseRow 的构造参数，明确 UUID 转换、字段类型及参数顺序。 -->
+  <resultMap id="SlaRebuildLeaseRow" type="com.flowdesk.ticket.model.sla.SlaRebuildLeaseRow">
+    <constructor>
+      <arg name="tenantId" column="tenant_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="fencingEpoch" column="fencing_epoch" javaType="_long"/>
+      <arg name="runId" column="run_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="highWaterUpdatedAt" column="high_water_updated_at" javaType="java.time.Instant"/>
+      <arg name="highWaterSlaClockId" column="high_water_sla_clock_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="expiresAt" column="expires_at" javaType="java.time.Instant"/>
+      <arg name="state" column="state" javaType="java.lang.String"/>
+      <arg name="lastErrorCode" column="last_error_code" javaType="java.lang.String"/>
+      <arg name="lockVersion" column="lock_version" javaType="_long"/>
+      <arg name="createdAt" column="created_at" javaType="java.time.Instant"/>
+      <arg name="updatedAt" column="updated_at" javaType="java.time.Instant"/>
+    </constructor>
+  </resultMap>
+  <!-- 按租户读取重建租约、高水位、运行阶段及版本，并追加 FOR UPDATE，供同一事务串行领取或决策。 -->
+  <select id="findSlaRebuildLeaseForUpdateSelect" resultMap="SlaRebuildLeaseRow">
+    SELECT tenant_id,fencing_epoch,run_id,high_water_updated_at,
+       high_water_sla_clock_id,expires_at,state,last_error_code,
+       lock_version,created_at,updated_at
+FROM sla_index_rebuild_lease WHERE tenant_id=#{tenantId} FOR UPDATE
+  </select>
+  <!-- 按租户读取当前重建租约和进度，不加行锁，供查询当前执行状态。 -->
+  <select id="findSlaRebuildLeaseSelect" resultMap="SlaRebuildLeaseRow">
+    SELECT tenant_id,fencing_epoch,run_id,high_water_updated_at,
+       high_water_sla_clock_id,expires_at,state,last_error_code,
+       lock_version,created_at,updated_at
+FROM sla_index_rebuild_lease WHERE tenant_id=#{tenantId}
+  </select>
+  <!-- 不存在时初始化租户的 IDLE 租约和 0 代 fencingEpoch；重复键时保留既有数据，不覆盖运行状态。 -->
+  <insert id="ensureSlaRebuildLeaseUpdate" >
+    INSERT INTO sla_index_rebuild_lease
+  (tenant_id,fencing_epoch,state,created_at,updated_at,updated_by_type)
+VALUES (#{tenantId},0,'IDLE',#{now},#{now2},'SCHEDULER')
+ON DUPLICATE KEY UPDATE updated_at=updated_at
+  </insert>
+  <!-- 领取 IDLE、无运行标识的 DEGRADED 或已过期的执行租约，递增 fencingEpoch，写入 runId、高水位及有效期并转为 RUNNING。 -->
+  <update id="claimSlaRebuildLeaseUpdate" >
+    UPDATE sla_index_rebuild_lease
+SET fencing_epoch=fencing_epoch+1,run_id=#{runId},high_water_updated_at=#{highWaterAt},
+    high_water_sla_clock_id=#{highWaterClockId},expires_at=#{expiresAt},state='RUNNING',last_error_code=NULL,
+    lock_version=lock_version+1,updated_at=#{now},updated_by_type='SCHEDULER'
+WHERE tenant_id=#{tenantId}
+  AND (
+      state='IDLE'
+      OR (state='DEGRADED' AND run_id IS NULL)
+      OR (state IN ('RUNNING','CATCHING_UP','SWAPPING','DEGRADED')
+          AND run_id IS NOT NULL AND expires_at IS NOT NULL AND expires_at &lt; #{now2})
+  )
+  </update>
+  <!-- 仅在租户、runId、fencingEpoch 匹配，阶段为 RUNNING/CATCHING_UP/SWAPPING 且租约仍有效时续期，并增加版本。 -->
+  <update id="renewSlaRebuildLeaseUpdate" >
+    UPDATE sla_index_rebuild_lease
+SET expires_at=#{expiresAt},updated_at=#{now},updated_by_type='SCHEDULER',
+    lock_version=lock_version+1
+WHERE tenant_id=#{tenantId} AND run_id=#{runId} AND fencing_epoch=#{fencingEpoch}
+  AND state IN ('RUNNING','CATCHING_UP','SWAPPING')
+  AND expires_at IS NOT NULL AND expires_at > #{now2}
+  </update>
+  <!-- 检查租户是否存在有效 runId、未过期且处于 RUNNING/CATCHING_UP/SWAPPING 的租约；存在时返回含 true 的列表，无记录时为空。 -->
+  <select id="isSlaRebuildActiveSelect" resultType="java.lang.Boolean">
+    SELECT 1 FROM sla_index_rebuild_lease
+WHERE tenant_id=#{tenantId} AND state IN ('RUNNING','CATCHING_UP','SWAPPING')
+  AND run_id IS NOT NULL AND expires_at IS NOT NULL AND expires_at > #{now}
+LIMIT 1
+  </select>
+  <!-- 仅在运行标识、隔离代次匹配且租约未过期、阶段非 IDLE 时更新阶段、有效期和错误码，阻止旧执行者推进状态。 -->
+  <update id="advanceSlaRebuildLeaseUpdate" >
+    UPDATE sla_index_rebuild_lease SET state=#{state},expires_at=#{expiresAt},last_error_code=#{errorCode},
+    updated_at=#{now},updated_by_type='SCHEDULER',lock_version=lock_version+1
+WHERE tenant_id=#{tenantId} AND run_id=#{runId} AND fencing_epoch=#{fencingEpoch} AND state &lt;> 'IDLE'
+  AND expires_at IS NOT NULL AND expires_at > #{now2}
+  </update>
+  <!-- 匹配租户、runId 和 fencingEpoch 后写入结束状态及错误码，清空运行标识与有效期，避免释放其他执行者的租约。 -->
+  <update id="releaseSlaRebuildLeaseUpdate" >
+    UPDATE sla_index_rebuild_lease SET state=#{state},run_id=NULL,expires_at=NULL,
+    last_error_code=#{errorCode},lock_version=lock_version+1,updated_at=#{now},updated_by_type='SCHEDULER'
+WHERE tenant_id=#{tenantId} AND run_id=#{runId} AND fencing_epoch=#{fencingEpoch}
+  </update>
+</mapper>

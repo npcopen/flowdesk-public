@@ -10,6 +10,12 @@ spring:
     password: ${FLOWDESK_NOTIFICATION_DB_PASSWORD}
   cloud:
     nacos:
+      # No-profile local development and unit tests do not require remote config.
+      # Managed dev/test/prod profiles explicitly enable required Nacos imports.
+      config:
+        enabled: false
+        import-check:
+          enabled: false
       discovery:
         server-addr: ${FLOWDESK_NACOS_SERVER_ADDR:127.0.0.1:8848}
         namespace: ${FLOWDESK_NACOS_NAMESPACE:}

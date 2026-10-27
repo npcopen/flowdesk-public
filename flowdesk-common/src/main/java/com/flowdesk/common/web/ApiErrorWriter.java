@@ -8,14 +8,22 @@ import java.io.IOException;
 import java.util.List;
 import java.util.UUID;
 
-/** Renders the fixed SCHEMA-002 error envelope without leaking stack/secret details. */
+/**
+ * 输出固定结构的错误响应，避免泄露异常堆栈、密钥或其他内部信息。
+ */
 public final class ApiErrorWriter {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
+    /**
+     * 禁止直接实例化该工具类型，统一通过静态方法或工厂入口使用。
+     */
     private ApiErrorWriter() {
     }
 
+    /**
+     * 向 Servlet 响应写入统一 JSON 错误信封，并设置 HTTP 状态与关联头；简化重载复用完整写入入口。
+     */
     public static void write(HttpServletResponse response,
                              int status,
                              String code,
@@ -25,6 +33,9 @@ public final class ApiErrorWriter {
         write(response, status, code, message, retryable, correlationId, List.of());
     }
 
+    /**
+     * 向 Servlet 响应写入统一 JSON 错误信封，并设置 HTTP 状态与关联头；简化重载复用完整写入入口。
+     */
     public static void write(HttpServletResponse response,
                              int status,
                              String code,
@@ -36,9 +47,8 @@ public final class ApiErrorWriter {
     }
 
     /**
-     * Renders the envelope with the caller-supplied (normally Spring-configured)
-     * {@link ObjectMapper} so error responses and MVC responses share the same JSON
-     * configuration.
+     * 使用调用方提供的 {@link ObjectMapper} 输出错误响应，通常由 Spring 配置，
+     * 确保过滤器的错误响应与 MVC 响应使用相同的 JSON 规则。
      */
     public static void write(HttpServletResponse response,
                              int status,

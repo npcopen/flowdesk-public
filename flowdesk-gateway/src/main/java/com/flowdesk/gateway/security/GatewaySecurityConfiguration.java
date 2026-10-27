@@ -12,12 +12,15 @@ import reactor.core.scheduler.Scheduler;
 import reactor.core.scheduler.Schedulers;
 
 /**
- * Gateway only holds public JWT verification material; it can never sign tokens.
+ * 网关 JWT 验签配置：仅持有公钥，因此无法签发令牌。
  */
 @Configuration(proxyBeanMethods = false)
 @EnableConfigurationProperties(FlowDeskJwtProperties.class)
 public class GatewaySecurityConfiguration {
 
+    /**
+     * 加载网关 RSA 公钥并创建校验器，未配置公钥时阻止启动，确保受保护请求经过验签。
+     */
     @Bean
     public JwtVerifier gatewayJwtVerifier(FlowDeskJwtProperties properties,
                                            ResourceLoader resourceLoader) {
@@ -35,7 +38,7 @@ public class GatewaySecurityConfiguration {
                 properties.getClockSkew().toSeconds());
     }
 
-    /** Dedicated bounded scheduler so RSA verification never starves Netty event loops. */
+    /** 使用独立的有界调度器执行 RSA 验签，避免耗尽 Netty 事件循环的处理时间。 */
     @Bean(destroyMethod = "dispose")
     public Scheduler gatewayJwtVerificationScheduler() {
         return Schedulers.newBoundedElastic(2, 256, "flowdesk-gateway-jwt-verify");

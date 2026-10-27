@@ -12,12 +12,14 @@ import org.springframework.web.method.HandlerMethod;
 import org.springframework.web.servlet.HandlerInterceptor;
 
 /**
- * Enforces {@link RequiresPermission} against the locally re-verified JWT and trusted
- * TenantContext. Without the annotation this interceptor does nothing; business endpoints
- * must opt in, and may use {@link PermissionPolicy} directly for alternative roles.
+ * 基于本地复验的 JWT 和可信租户上下文执行 {@link RequiresPermission} 校验。
+ * 未声明该注解时不拦截；具有多种可选权限的接口可直接调用 {@link PermissionPolicy}。
  */
 public class PermissionInterceptor implements HandlerInterceptor {
 
+    /**
+     * 优先读取方法再读取类的权限声明，对已验证人类主体检查授权；无声明或非控制器处理器直接放行。
+     */
     @Override
     public boolean preHandle(HttpServletRequest request,
                              HttpServletResponse response,

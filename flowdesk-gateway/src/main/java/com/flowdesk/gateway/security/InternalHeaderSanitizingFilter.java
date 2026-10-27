@@ -13,11 +13,8 @@ import java.util.Locale;
 import java.util.Set;
 
 /**
- * Deletes client-forged tenant/actor/internal headers before routing.
- *
- * <p>The rule is deny-by-default: every {@code x-flowdesk-*} header is stripped unless
- * it is a documented webhook security header and the request targets the fixed webhook
- * path. This prevents a future internal header from silently becoming forgeable.</p>
+ * 路由前删除客户端伪造的租户、操作者和内部请求头。
+ * 默认移除全部 x-flowdesk-* 请求头，仅在固定 Webhook 路径保留契约允许的安全头，防止新增内部头被伪造。
  */
 @Component
 public class InternalHeaderSanitizingFilter implements GlobalFilter, Ordered {
@@ -28,6 +25,9 @@ public class InternalHeaderSanitizingFilter implements GlobalFilter, Ordered {
             "x-flowdesk-api-key", "x-flowdesk-signature-version", "x-flowdesk-timestamp",
             "x-flowdesk-nonce", "x-flowdesk-signature");
 
+    /**
+     * 移除客户端伪造的内部身份及 FlowDesk 头，Webhook 只保留安全协议白名单中的头，再转发下游。
+     */
     @Override
     public Mono<Void> filter(ServerWebExchange exchange, GatewayFilterChain chain) {
         String path = exchange.getRequest().getPath().value();
@@ -47,6 +47,9 @@ public class InternalHeaderSanitizingFilter implements GlobalFilter, Ordered {
         return chain.filter(exchange.mutate().request(mutated).build());
     }
 
+    /**
+     * 设置内部头清理顺序，保证伪造身份信息在路由到后端前移除。
+     */
     @Override
     public int getOrder() {
         return Ordered.HIGHEST_PRECEDENCE + 20;

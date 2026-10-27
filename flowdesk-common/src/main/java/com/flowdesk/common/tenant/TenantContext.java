@@ -23,6 +23,9 @@ public final class TenantContext {
     private final TenantContextSource source;
     private final UUID correlationId;
 
+    /**
+     * 要求租户、操作者、来源和关联 UUID 完整，建立仅能通过受控工厂创建的上下文。
+     */
     private TenantContext(UUID tenantId, ActorRef actor, TenantContextSource source, UUID correlationId) {
         this.tenantId = Objects.requireNonNull(tenantId, "tenantId");
         this.actor = Objects.requireNonNull(actor, "actor");
@@ -128,6 +131,9 @@ public final class TenantContext {
         TenantContexts.requireSameTenant(this, tenantId);
     }
 
+    /**
+     * 输出租户、来源、操作者与关联标识供诊断，不包含令牌原文或密钥。
+     */
     @Override
     public String toString() {
         return "TenantContext{tenantId=" + tenantId

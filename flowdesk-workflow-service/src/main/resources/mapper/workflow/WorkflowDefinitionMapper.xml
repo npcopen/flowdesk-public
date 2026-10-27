@@ -1,0 +1,299 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+  工作流定义、可编辑草稿和已发布版本的持久化接口。
+  查询按租户隔离，草稿迁移通过锁版本控制并发，并提供发布事务所需的行锁及版本号查询。
+-->
+<mapper namespace="com.flowdesk.workflow.mapper.WorkflowDefinitionMapper">
+<!--
+  定义结果映射：按构造参数顺序组装编码、名称、状态、锁版本与时间字段。
+-->
+<resultMap id="DefinitionRow" type="com.flowdesk.workflow.model.persistence.DefinitionRow">
+<constructor>
+    <arg column="definition_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+    <arg column="definition_code" javaType="java.lang.String"/>
+    <arg column="definition_name" javaType="java.lang.String"/>
+    <arg column="status" javaType="java.lang.String"/>
+    <arg column="lock_version" javaType="_long"/>
+    <arg column="created_at" javaType="java.time.Instant"/>
+    <arg column="updated_at" javaType="java.time.Instant"/>
+</constructor>
+</resultMap>
+
+<!--
+  草稿结果映射：保留条件表达式、两级审批人、校验摘要及并发锁版本。
+-->
+<resultMap id="DraftRow" type="com.flowdesk.workflow.model.persistence.DraftRow">
+<constructor>
+    <arg column="draft_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+    <arg column="definition_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+    <arg column="status" javaType="java.lang.String"/>
+    <arg column="condition_field_code" javaType="java.lang.String"/>
+    <arg column="condition_operator" javaType="java.lang.String"/>
+    <arg column="condition_value_type" javaType="java.lang.String"/>
+    <arg column="condition_value_text" javaType="java.lang.String"/>
+    <arg column="approval_level_count" javaType="_int"/>
+    <arg column="level1_approver_user_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+    <arg column="level2_approver_user_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+    <arg column="validation_state" javaType="java.lang.String"/>
+    <arg column="validation_digest" javaType="[B"/>
+    <arg column="validated_at" javaType="java.time.Instant"/>
+    <arg column="consumed_at" javaType="java.time.Instant"/>
+    <arg column="lock_version" javaType="_long"/>
+    <arg column="created_at" javaType="java.time.Instant"/>
+    <arg column="updated_at" javaType="java.time.Instant"/>
+</constructor>
+</resultMap>
+
+<!--
+  版本快照映射：保留来源草稿、发布条件、审批人、快照摘要及发布者。
+-->
+<resultMap id="VersionRow" type="com.flowdesk.workflow.model.persistence.VersionRow">
+<constructor>
+    <arg column="workflow_version_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+    <arg column="definition_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+    <arg column="version_no" javaType="_int"/>
+    <arg column="source_draft_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+    <arg column="status" javaType="java.lang.String"/>
+    <arg column="condition_field_code" javaType="java.lang.String"/>
+    <arg column="condition_operator" javaType="java.lang.String"/>
+    <arg column="condition_value_type" javaType="java.lang.String"/>
+    <arg column="condition_value_text" javaType="java.lang.String"/>
+    <arg column="approval_level_count" javaType="_int"/>
+    <arg column="level1_approver_user_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+    <arg column="level2_approver_user_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+    <arg column="snapshot_sha256" javaType="[B"/>
+    <arg column="published_at" javaType="java.time.Instant"/>
+    <arg column="published_by_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+</constructor>
+</resultMap>
+
+<!--
+  创建处于 EDITABLE、UNVALIDATED 状态的双级审批草稿。
+  保存条件表达式及两级审批人，初始化锁版本为 0，并记录人工操作者和时间。
+-->
+<insert id="insertDraft">
+<![CDATA[
+INSERT INTO workflow_draft
+  (tenant_id, draft_id, definition_id, status,
+   condition_field_code, condition_operator, condition_value_type,
+   condition_value_text, approval_level_count,
+   level1_approver_user_id, level2_approver_user_id,
+   validation_state, lock_version, created_at, created_by_type,
+   created_by_id, updated_at, updated_by_type, updated_by_id)
+VALUES (#{tenantId}, #{draftId}, #{definitionId}, 'EDITABLE', #{fieldCode}, #{operator}, #{valueType}, #{value}, 2, #{level1ApproverUserId}, #{level2ApproverUserId}, 'UNVALIDATED', 0,
+        #{now}, 'USER', #{actorId}, #{now}, 'USER', #{actorId})
+]]>
+</insert>
+
+<!--
+  修改可编辑草稿的条件和两级审批人。
+  仅在 expectedVersion 匹配时更新，并清除校验摘要、校验时间，使草稿重新进入 UNVALIDATED 状态。
+-->
+<update id="updateDraft">
+<![CDATA[
+UPDATE workflow_draft
+SET condition_field_code = #{fieldCode}, condition_operator = #{operator},
+    condition_value_type = #{valueType}, condition_value_text = #{value},
+    level1_approver_user_id = #{level1ApproverUserId}, level2_approver_user_id = #{level2ApproverUserId},
+    validation_state = 'UNVALIDATED', validation_digest = NULL,
+    validated_at = NULL, lock_version = lock_version + 1,
+    updated_at = #{now}, updated_by_type = 'USER', updated_by_id = #{actorId}
+WHERE tenant_id = #{tenantId} AND draft_id = #{draftId} AND status = 'EDITABLE'
+  AND lock_version = #{expectedVersion}
+]]>
+</update>
+
+<!--
+  将可编辑草稿标记为校验通过并保存摘要。
+  通过 expectedVersion 校验并发修改，以 digest 和校验时间固化本次校验对应的内容。
+-->
+<update id="markDraftValidated">
+<![CDATA[
+UPDATE workflow_draft
+SET validation_state = 'VALID', validation_digest = #{digest}, validated_at = #{now},
+    lock_version = lock_version + 1, updated_at = #{now},
+    updated_by_type = 'USER', updated_by_id = #{actorId}
+WHERE tenant_id = #{tenantId} AND draft_id = #{draftId} AND status = 'EDITABLE'
+  AND lock_version = #{expectedVersion}
+]]>
+</update>
+
+<!--
+  清除草稿校验结果并保留未校验状态。
+  仅更新租户内 EDITABLE 且锁版本匹配的草稿，清空校验摘要和时间，同时递增锁版本。
+-->
+<update id="keepDraftUnvalidated">
+<![CDATA[
+UPDATE workflow_draft
+SET validation_state = 'UNVALIDATED', validation_digest = NULL,
+    validated_at = NULL, lock_version = lock_version + 1,
+    updated_at = #{now}, updated_by_type = 'USER', updated_by_id = #{actorId}
+WHERE tenant_id = #{tenantId} AND draft_id = #{draftId} AND status = 'EDITABLE'
+  AND lock_version = #{expectedVersion}
+]]>
+</update>
+
+<!--
+  将已校验通过的可编辑草稿标记为已消费。
+  仅允许 EDITABLE、VALID 且 expectedVersion 匹配的记录转为 CONSUMED，供版本发布事务使用。
+-->
+<update id="consumeDraft">
+<![CDATA[
+UPDATE workflow_draft
+SET status = 'CONSUMED', consumed_at = #{now}, lock_version = lock_version + 1,
+    updated_at = #{now}, updated_by_type = 'USER', updated_by_id = #{actorId}
+WHERE tenant_id = #{tenantId} AND draft_id = #{draftId} AND status = 'EDITABLE'
+  AND validation_state = 'VALID' AND lock_version = #{expectedVersion}
+]]>
+</update>
+
+<!--
+  将草稿内容保存为已发布的工作流版本快照。
+  从 draft 复制条件、两级审批人及校验摘要，使用指定版本标识与 versionNo，并保留来源草稿。
+-->
+<insert id="insertVersion">
+<![CDATA[
+INSERT INTO workflow_version
+  (tenant_id, workflow_version_id, definition_id, version_no,
+   source_draft_id, status, condition_field_code, condition_operator,
+   condition_value_type, condition_value_text, approval_level_count,
+   level1_approver_user_id, level2_approver_user_id, snapshot_sha256,
+   published_at, published_by_type, published_by_id, created_at)
+VALUES (#{tenantId}, #{workflowVersionId}, #{draft.definitionId}, #{versionNo}, #{draft.draftId}, 'PUBLISHED', #{draft.conditionFieldCode}, #{draft.conditionOperator}, #{draft.conditionValueType}, #{draft.conditionValueText}, 2, #{draft.level1ApproverUserId}, #{draft.level2ApproverUserId}, #{draft.validationDigest}, #{now},
+        'USER', #{actorId}, #{now})
+]]>
+</insert>
+
+<!--
+  复用工作流定义基础查询列；调用语句负责追加租户、条件和锁定策略。
+-->
+<sql id="DefinitionSelect"><![CDATA[SELECT definition_id,definition_code,definition_name,status,lock_version,created_at,updated_at FROM workflow_definition]]></sql>
+
+<!--
+  复用草稿完整快照查询列，包含校验状态、审批人及锁版本。
+-->
+<sql id="DraftSelect"><![CDATA[SELECT draft_id, definition_id, status, condition_field_code,
+       condition_operator, condition_value_type, condition_value_text,
+       approval_level_count, level1_approver_user_id,
+       level2_approver_user_id, validation_state, validation_digest,
+       validated_at, consumed_at, lock_version, created_at, updated_at
+FROM workflow_draft]]></sql>
+
+<!--
+  复用已发布版本查询列，包含来源草稿与发布时的配置快照。
+-->
+<sql id="VersionSelect"><![CDATA[SELECT workflow_version_id, definition_id, version_no, source_draft_id,
+       status, condition_field_code, condition_operator,
+       condition_value_type, condition_value_text, approval_level_count,
+       level1_approver_user_id, level2_approver_user_id, snapshot_sha256,
+       published_at, published_by_id
+FROM workflow_version]]></sql>
+
+<!--
+  以受控分支选择定义编码或定义名称排序列，未知值回退到定义编码。
+-->
+<sql id="DefinitionColumn"><choose><when test="sortColumn == 'definitionCode'">definition_code</when><when test="sortColumn == 'definitionName'">definition_name</when><otherwise>definition_code</otherwise></choose></sql>
+
+<!--
+  按 sort 选择发布时间或版本号，使排序与游标边界使用同一列。
+-->
+<sql id="VersionColumn"><choose><when test="sort.endsWith('publishedAt')">published_at</when><otherwise>version_no</otherwise></choose></sql>
+
+<!--
+  根据 ascending 输出受控的 ASC 或 DESC，保持主排序与标识排序方向一致。
+-->
+<sql id="Direction"><choose><when test="ascending">ASC</when><otherwise>DESC</otherwise></choose></sql>
+
+<!--
+  根据排序方向选择游标比较符，升序取游标之后的大值，降序取小值。
+-->
+<sql id="Comparison"><choose><when test="ascending">&gt;</when><otherwise>&lt;</otherwise></choose></sql>
+
+<!--
+  按租户以游标分页查询工作流定义。
+  按定义编码或名称与定义标识稳定排序，ascending 控制方向；最多返回 pageSize + 1 条以判断下一页。
+-->
+<select id="findDefinitions" resultMap="DefinitionRow">
+<bind name="limit" value="pageSize + 1"/><include refid="DefinitionSelect"/> WHERE tenant_id=#{tenantId}
+<if test="cursorValue != null and cursorId != null">AND (<include refid="DefinitionColumn"/> <include refid="Comparison"/> #{cursorValue} OR (<include refid="DefinitionColumn"/> = #{cursorValue} AND definition_id <include refid="Comparison"/> #{cursorId}))</if>
+ORDER BY <include refid="DefinitionColumn"/> <include refid="Direction"/>, definition_id <include refid="Direction"/> LIMIT #{limit}
+</select>
+
+<!--
+  按租户和定义标识查询工作流定义。
+  返回定义编码、名称、状态和锁版本；不存在时返回空 Optional。
+-->
+<select id="findDefinition" resultMap="DefinitionRow">
+<include refid="DefinitionSelect"/> WHERE tenant_id=#{tenantId} AND definition_id=#{definitionId}
+</select>
+
+<!--
+  读取指定工作流定义并申请数据库行锁。
+  使用租户和 definitionId 定位并执行 FOR UPDATE，应在调用方事务中使用以串行化后续定义级操作。
+-->
+<select id="findDefinitionForUpdate" resultMap="DefinitionRow">
+<include refid="DefinitionSelect"/> WHERE tenant_id=#{tenantId} AND definition_id=#{definitionId} FOR UPDATE
+</select>
+
+<!--
+  按租户和草稿标识读取草稿快照。
+  包含条件、审批人、校验状态及锁版本；不存在时返回空 Optional。
+-->
+<select id="findDraft" resultMap="DraftRow">
+<include refid="DraftSelect"/> WHERE tenant_id=#{tenantId} AND draft_id=#{draftId}
+</select>
+
+<!--
+  读取租户内指定草稿并申请数据库行锁。
+  FOR UPDATE 保护事务中的草稿状态判断和后续修改；不存在时返回空 Optional。
+-->
+<select id="findDraftForUpdate" resultMap="DraftRow">
+<include refid="DraftSelect"/> WHERE tenant_id=#{tenantId} AND draft_id=#{draftId} FOR UPDATE
+</select>
+
+<!--
+  读取指定工作流定义当前可编辑的草稿。
+  按租户、definitionId 及 EDITABLE 状态筛选，不包含已消费的历史草稿。
+-->
+<select id="findCurrentDraft" resultMap="DraftRow">
+<include refid="DraftSelect"/> WHERE tenant_id=#{tenantId} AND definition_id=#{definitionId} AND status='EDITABLE'
+</select>
+
+<!--
+  计算指定定义的下一个发布版本号。
+  返回现有最大版本号加一，无历史版本时返回 1；查询本身不锁行，并发发布需由调用方事务协调。
+-->
+<select id="nextVersionNo" resultType="int">
+SELECT COALESCE(MAX(version_no),0)+1 FROM workflow_version WHERE tenant_id=#{tenantId} AND definition_id=#{definitionId}
+</select>
+
+<!--
+  按租户和版本标识读取已保存的工作流版本。
+  返回发布时的条件、审批人及快照摘要；不存在时返回空 Optional。
+-->
+<select id="findVersion" resultMap="VersionRow">
+<include refid="VersionSelect"/> WHERE tenant_id=#{tenantId} AND workflow_version_id=#{workflowVersionId}
+</select>
+
+<!--
+  查找由指定草稿发布的工作流版本。
+  按租户和 source_draft_id 定位，用于核对同一草稿的发布结果及幂等处理。
+-->
+<select id="findVersionBySourceDraft" resultMap="VersionRow">
+<include refid="VersionSelect"/> WHERE tenant_id=#{tenantId} AND source_draft_id=#{draftId}
+</select>
+
+<!--
+  分页读取租户内指定定义的版本列表。
+  可按版本号筛选，按版本号或发布时间与版本标识进行游标排序；最多返回 pageSize + 1 条。
+-->
+<select id="findVersions" resultMap="VersionRow">
+<bind name="ascending" value="!sort.startsWith('-')"/><bind name="limit" value="pageSize + 1"/>
+<include refid="VersionSelect"/> WHERE tenant_id=#{tenantId} AND definition_id=#{definitionId}
+<if test="versionNo != null">AND version_no=#{versionNo}</if>
+<if test="cursorValue != null and cursorId != null"><bind name="cursor" value="sort.endsWith('publishedAt') ? @java.time.Instant@parse(cursorValue) : @java.lang.Integer@valueOf(cursorValue)"/>
+AND (<include refid="VersionColumn"/> <include refid="Comparison"/> #{cursor} OR (<include refid="VersionColumn"/> = #{cursor} AND workflow_version_id <include refid="Comparison"/> #{cursorId}))</if>
+ORDER BY <include refid="VersionColumn"/> <include refid="Direction"/>, workflow_version_id <include refid="Direction"/> LIMIT #{limit}
+</select>
+</mapper>

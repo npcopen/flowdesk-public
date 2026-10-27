@@ -5,9 +5,6 @@ import vue from '@vitejs/plugin-vue'
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
   const gatewayUrl = env.VITE_GATEWAY_DEV_URL || 'http://127.0.0.1:8080'
-  const outputDirectory = mode === 'gateway'
-    ? fileURLToPath(new URL('../flowdesk-gateway/src/main/resources/static', import.meta.url))
-    : 'dist'
 
   return {
     plugins: [vue()],
@@ -15,13 +12,11 @@ export default defineConfig(({ mode }) => {
       alias: { '@': fileURLToPath(new URL('./src', import.meta.url)) }
     },
     build: {
-      outDir: outputDirectory,
-      // A clean output prevents stale chunks (including old local-only copy)
-      // from remaining reachable after a rebuild.
+      // 前端独立交付，由 Nginx 提供 dist，不再写入后端源码目录。
+      outDir: 'dist',
+      // 构建前清理输出，避免旧分块或本地演示内容在重新部署后仍可访问。
       emptyOutDir: true,
-      // Gateway artifacts are deployable browser assets; do not publish source
-      // maps that expose internal implementation and test-only modules.
-      sourcemap: mode !== 'production' && mode !== 'gateway'
+      sourcemap: false
     },
     server: {
       host: '127.0.0.1',
@@ -33,9 +28,6 @@ export default defineConfig(({ mode }) => {
           secure: false
         }
       }
-    },
-    define: {
-      __FLOWDESK_GATEWAY_MODE__: JSON.stringify(mode === 'gateway')
     }
   }
 })

@@ -7,17 +7,20 @@ import java.util.Objects;
 import java.util.TreeMap;
 import java.util.UUID;
 
-/**
- * Canonical JSON encoder for the payload persisted before
- * {@code flowdesk.workflow.start.v1} publication.
- */
+/** 为 flowdesk.workflow.start.v1 编码规范 JSON，在发布前将确定的载荷字节持久化。 */
 public final class WorkflowStartV1PayloadCodec {
 
     private static final ObjectMapper JSON = new ObjectMapper();
 
+    /**
+     * 私有构造方法，阻止工具类实例化，调用方应使用静态入口。
+     */
     private WorkflowStartV1PayloadCodec() {
     }
 
+    /**
+     * 按冻结协议编码业务载荷，生成发布与摘要计算使用的字节。
+     */
     public static byte[] encode(UUID ticketId,
                                 UUID workflowDefinitionId,
                                 UUID workflowVersionId,

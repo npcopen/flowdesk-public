@@ -1,5 +1,6 @@
 package com.flowdesk.workflow.contract;
 
+import com.flowdesk.workflow.service.recovery.*;
 import com.flowdesk.common.authz.PermissionCode;
 import com.flowdesk.common.authz.RoleCode;
 import com.flowdesk.common.security.JwtPrincipal;
@@ -9,7 +10,7 @@ import com.flowdesk.common.tenant.TenantContextSource;
 import com.flowdesk.common.web.JwtPrincipalHolder;
 import com.flowdesk.workflow.start.WorkflowApproverEligibilityChecker;
 import com.flowdesk.workflow.start.WorkflowIamUnavailableException;
-import com.flowdesk.workflow.start.WorkflowRecoveryReplayService;
+import com.flowdesk.workflow.service.recovery.WorkflowRecoveryReplayService;
 import com.flowdesk.workflow.start.WorkflowStartContract;
 import com.flowdesk.workflow.start.WorkflowStartConsumeResult;
 import com.flowdesk.workflow.start.WorkflowStartConsumer;
@@ -40,6 +41,9 @@ import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+/**
+ * 工作流启动严格消费测试，覆盖信任边界、幂等冲突、外部预检和本地事务原子性。
+ */
 @SpringBootTest(
         webEnvironment = SpringBootTest.WebEnvironment.NONE,
         properties = {
@@ -100,12 +104,18 @@ class WorkflowStartStrictConsumerTest {
     @Autowired
     private TrackingEligibilityChecker eligibility;
 
+    /**
+     * 注入测试 JWT 验签公钥，供模拟身份经过真实认证路径。
+     */
     @DynamicPropertySource
     static void jwtVerificationKey(DynamicPropertyRegistry registry) {
         registry.add("flowdesk.security.jwt.public-key-pem",
                 () -> readResource("test-jwt-public-key.pem"));
     }
 
+    /**
+     * 清空业务表并复位依赖替身，使消息处理断言只反映本轮输入。
+     */
     @BeforeEach
     void resetDatabaseAndDependencies() {
         for (String table : List.of("message_recovery", "audit_record", "inbox_message",
@@ -118,6 +128,9 @@ class WorkflowStartStrictConsumerTest {
                 TENANT_A, DEFINITION_A, VERSION_A, APPROVER_A1, APPROVER_A2, "HIGH");
     }
 
+    /**
+     * 验证确认消息前已原子提交 Inbox、实例、首级任务和审计，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void commitsInboxInstanceFirstTaskAndAuditBeforeAck() {
         WorkflowStartConsumeResult result = consume(WorkflowStartV1WireFixture.load());
@@ -153,6 +166,9 @@ class WorkflowStartStrictConsumerTest {
         assertThat(TenantContextHolder.currentOrNull()).isNull();
     }
 
+    /**
+     * 验证相同消息及相同业务意图重投复用快速路径且不产生新副作用，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void exactMessageAndSameIntentRedeliveriesUseFastPathWithoutNewEffects() {
         WorkflowStartV1WireFixture.WireMessage original = WorkflowStartV1WireFixture.load();
@@ -172,6 +188,9 @@ class WorkflowStartStrictConsumerTest {
         assertThat(eligibility.calls).isEqualTo(1);
     }
 
+    /**
+     * 验证相同消息身份的内容冲突只增加冲突审计且不覆盖 Inbox，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void sameMessageDifferentContentAddsOnlyConflictAuditAndNeverOverwritesInbox() {
         WorkflowStartV1WireFixture.WireMessage original = WorkflowStartV1WireFixture.load();
@@ -206,6 +225,9 @@ class WorkflowStartStrictConsumerTest {
         assertThat(eligibility.calls).isEqualTo(1);
     }
 
+    /**
+     * 验证相同业务意图的不同内容按冻结的第二冲突规则处置，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void sameBusinessIntentDifferentContentUsesSecondFrozenConflictRule() {
         WorkflowStartV1WireFixture.WireMessage original = WorkflowStartV1WireFixture.load();
@@ -227,6 +249,9 @@ class WorkflowStartStrictConsumerTest {
         assertThat(eligibility.calls).isEqualTo(1);
     }
 
+    /**
+     * 验证非法传输在租户上下文建立前确认丢弃且无租户内副作用，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void invalidTransportIsAckedBeforeTenantContextAndHasNoTenantSideEffects() {
         WorkflowStartV1WireFixture.WireMessage invalid = WorkflowStartV1WireFixture.load()
@@ -243,6 +268,9 @@ class WorkflowStartStrictConsumerTest {
         assertThat(TenantContextHolder.currentOrNull()).isNull();
     }
 
+    /**
+     * 验证篡改的信封租户在任何租户内读写之前被拒绝，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void tamperedEnvelopeTenantFailsBeforeAnyTenantReadOrWrite() {
         WorkflowStartV1WireFixture.WireMessage invalid = WorkflowStartV1WireFixture.load()
@@ -256,6 +284,9 @@ class WorkflowStartStrictConsumerTest {
         assertThat(eligibility.calls).isZero();
     }
 
+    /**
+     * 验证其他租户的真实版本引用在本租户事务中被拒绝且无业务副作用，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void anotherTenantsRealVersionIsRejectedInTenantATransactionWithoutBusinessEffects() {
         seedPublishedVersion(
@@ -287,6 +318,9 @@ class WorkflowStartStrictConsumerTest {
         assertThat(eligibility.calls).isZero();
     }
 
+    /**
+     * 验证IAM 不合格结论触发代理重试且不写入业务事实，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void iamNegativeDecisionReturnsBrokerRetryAndWritesNothing() {
         eligibility.eligible = false;
@@ -303,6 +337,9 @@ class WorkflowStartStrictConsumerTest {
         assertThat(eligibility.calls).isEqualTo(1);
     }
 
+    /**
+     * 验证IAM 暂时不可用触发代理重试且不写入业务事实，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void temporaryIamFailureReturnsBrokerRetryAndWritesNothing() {
         eligibility.unavailable = true;
@@ -319,6 +356,9 @@ class WorkflowStartStrictConsumerTest {
         assertThat(eligibility.calls).isEqualTo(1);
     }
 
+    /**
+     * 验证规则条件为假时直接提交完成实例且不调用 IAM 或创建任务，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void falseConditionCommitsCompletedInstanceWithoutIamOrTask() {
         jdbc.update("""
@@ -343,6 +383,9 @@ class WorkflowStartStrictConsumerTest {
         assertThat(eligibility.calls).isZero();
     }
 
+    /**
+     * 验证事务内核对拒绝 IAM 预检后已变化的流程版本，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void localTransactionRejectsAWorkflowVersionChangedAfterIamPrecheck() {
         eligibility.afterCheck = () -> jdbc.update("""
@@ -361,6 +404,9 @@ class WorkflowStartStrictConsumerTest {
         assertThat(eligibility.calls).isEqualTo(1);
     }
 
+    /**
+     * 验证末步审计失败会回滚 Inbox、实例及任务再返回重试，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void failureOnFinalAuditRollsBackInboxInstanceAndTaskBeforeReturningRetry() {
         jdbc.execute("""
@@ -387,6 +433,9 @@ class WorkflowStartStrictConsumerTest {
         assertThat(count("outbox_event")).isZero();
     }
 
+    /**
+     * 验证死信接纳原子保留原来源且只创建一条恢复记录，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void dlqAcceptorAtomicallyPreservesSourceAndCreatesOneRecovery() {
         WorkflowStartV1WireFixture.WireMessage wire = WorkflowStartV1WireFixture.load();
@@ -424,6 +473,9 @@ class WorkflowStartStrictConsumerTest {
         assertThat(eligibility.calls).isZero();
     }
 
+    /**
+     * 验证死信确定性引用错误被拒绝且不创建可恢复记录，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void deterministicDlqReferenceFailureIsRejectedWithoutRecovery() {
         jdbc.update("DELETE FROM workflow_version");
@@ -443,6 +495,9 @@ class WorkflowStartStrictConsumerTest {
         assertThat(count("audit_record")).isEqualTo(1);
     }
 
+    /**
+     * 验证人工重放使用原信封和相同消费入口，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void manualReplayUsesOriginalEnvelopeAndSameConsumerEntry() throws Exception {
         WorkflowStartV1WireFixture.WireMessage wire = WorkflowStartV1WireFixture.load();
@@ -511,6 +566,9 @@ class WorkflowStartStrictConsumerTest {
         assertThat(TenantContextHolder.currentOrNull()).isNull();
     }
 
+    /**
+     * 验证人工 Outbox 重放重新排队原始事实且保持幂等，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void manualWorkflowOutboxReplayQueuesTheOriginalFactAndIsIdempotent() {
         Instant now = Instant.now().truncatedTo(ChronoUnit.MICROS);
@@ -578,10 +636,16 @@ class WorkflowStartStrictConsumerTest {
                 + "'WORKFLOW_RECOVERY_REPLAY_REQUESTED'", Integer.class)).isEqualTo(1);
     }
 
+    /**
+     * 将测试消息送入真实消费入口，取得单次确认或重试结果供断言。
+     */
     private WorkflowStartConsumeResult consume(WorkflowStartV1WireFixture.WireMessage message) {
         return consumer.consume(message.transportMessage());
     }
 
+    /**
+     * 把原始启动样例转换为死信接纳投递，保持身份与原始载荷不变。
+     */
     private WorkflowStartTransportMessage dlqDelivery(
             WorkflowStartV1WireFixture.WireMessage message) {
         return new WorkflowStartTransportMessage(
@@ -590,6 +654,9 @@ class WorkflowStartStrictConsumerTest {
                 message.keys(), message.tags(), message.body(), message.properties());
     }
 
+    /**
+     * 在超时前等待恢复状态达到预期，超时以场景上下文使测试失败。
+     */
     private void awaitRecoveryState(String expected) throws InterruptedException {
         Instant deadline = Instant.now().plusSeconds(5);
         while (Instant.now().isBefore(deadline)) {
@@ -604,6 +671,9 @@ class WorkflowStartStrictConsumerTest {
                 "SELECT state FROM message_recovery", String.class)).isEqualTo(expected);
     }
 
+    /**
+     * 在超时前等待重放审计数量达到预期，超时以场景上下文使测试失败。
+     */
     private void awaitReplayAuditCount(int expected) throws InterruptedException {
         Instant deadline = Instant.now().plusSeconds(5);
         while (Instant.now().isBefore(deadline)) {
@@ -622,10 +692,16 @@ class WorkflowStartStrictConsumerTest {
                 """, Integer.class)).isEqualTo(expected);
     }
 
+    /**
+     * 读取或统计当前场景的持久化及代理事实，为身份、状态和唯一副作用断言提供依据。
+     */
     private int count(String table) {
         return jdbc.queryForObject("SELECT COUNT(*) FROM " + table, Integer.class);
     }
 
+    /**
+     * 建立当前测试场景的持久化前置事实，保留指定租户、身份和状态供后续业务路径验证。
+     */
     private void seedPublishedVersion(UUID tenantId,
                                       UUID definitionId,
                                       UUID versionId,
@@ -666,6 +742,9 @@ class WorkflowStartStrictConsumerTest {
                 bytes(32, (byte) 0x32), Timestamp.from(now));
     }
 
+    /**
+     * 在 UUID 与持久化表示之间转换，保持标识高低位的编码顺序一致。
+     */
     private static byte[] uuid(UUID value) {
         return ByteBuffer.allocate(16)
                 .putLong(value.getMostSignificantBits())
@@ -673,17 +752,26 @@ class WorkflowStartStrictConsumerTest {
                 .array();
     }
 
+    /**
+     * 按数据库二进制编码还原 UUID，供读取后的稳定身份比较。
+     */
     private static UUID binaryUuid(byte[] value) {
         ByteBuffer bytes = ByteBuffer.wrap(value);
         return new UUID(bytes.getLong(), bytes.getLong());
     }
 
+    /**
+     * 构造按固定字节填充的测试数组，用于生成可重复的摘要、意图键和非法内容变体。
+     */
     private static byte[] bytes(int size, byte value) {
         byte[] result = new byte[size];
         java.util.Arrays.fill(result, value);
         return result;
     }
 
+    /**
+     * 从测试类路径读取 UTF-8 资源，缺失或读取失败直接使当前用例失败。
+     */
     private static String readResource(String name) {
         try (var input = WorkflowStartStrictConsumerTest.class
                 .getClassLoader().getResourceAsStream(name)) {
@@ -697,9 +785,15 @@ class WorkflowStartStrictConsumerTest {
         }
     }
 
+    /**
+     * 可控制资格结果及依赖故障的测试替身，记录调用用于验证事务外预检和竞争处理。
+     */
     @TestConfiguration(proxyBeanMethods = false)
     static class EligibilityStubConfiguration {
 
+        /**
+         * 装配当前测试使用的替身组件，替换外部依赖并保留可控结果与调用观察。
+         */
         @Bean
         @Primary
         TrackingEligibilityChecker trackingEligibilityChecker() {
@@ -707,6 +801,9 @@ class WorkflowStartStrictConsumerTest {
         }
     }
 
+    /**
+     * 可控制资格结果及依赖故障的测试替身，记录调用用于验证事务外预检和竞争处理。
+     */
     static final class TrackingEligibilityChecker
             implements WorkflowApproverEligibilityChecker {
 
@@ -718,6 +815,9 @@ class WorkflowStartStrictConsumerTest {
         UUID contextTenant;
         Runnable afterCheck = () -> { };
 
+        /**
+         * 返回可配置的测试审批资格结果并记录调用次数，供预检、依赖失败及并发路径断言。
+         */
         @Override
         public boolean isEligibleApprover(UUID tenantId, UUID approverUserId) {
             calls++;
@@ -732,6 +832,9 @@ class WorkflowStartStrictConsumerTest {
             return eligible;
         }
 
+        /**
+         * 恢复测试替身与数据库的初始状态，保证每个场景从独立前置条件开始。
+         */
         void reset() {
             calls = 0;
             eligible = true;

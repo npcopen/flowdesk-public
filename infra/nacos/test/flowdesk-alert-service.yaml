@@ -1,0 +1,36 @@
+# Namespace: flowdesk-test | Group: FLOWDESK_GROUP | Data ID: flowdesk-alert-service.yaml
+# Startup-loaded configuration; restart instances after publishing a change.
+# Secrets and key/token file paths are supplied by the deployment, never here.
+spring:
+  datasource:
+    url: ${FLOWDESK_ALERT_DB_URL:jdbc:mysql://mysql:3306/flowdesk_alert?sslMode=PREFERRED&allowPublicKeyRetrieval=true&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true}
+    username: fd_alert_runtime
+    hikari:
+      maximum-pool-size: 64
+      minimum-idle: 16
+      transaction-isolation: TRANSACTION_READ_COMMITTED
+  cloud:
+    stream:
+      rocketmq:
+        binder:
+          name-server: ${FLOWDESK_ROCKETMQ_NAME_SERVER:rocketmq-nameserver:9876}
+flowdesk:
+  configuration:
+    service-name: flowdesk-alert-service
+  health:
+    database-required: true
+    migration-required: true
+  alert:
+    webhook:
+      enabled: true
+      timestamp-window: PT5M
+    ticket-result:
+      entry:
+        enabled: true
+      consumer:
+        enabled: true
+        name-server: ${FLOWDESK_ROCKETMQ_NAME_SERVER:rocketmq-nameserver:9876}
+    outbox:
+      publisher:
+        enabled: true
+        name-server: ${FLOWDESK_ROCKETMQ_NAME_SERVER:rocketmq-nameserver:9876}

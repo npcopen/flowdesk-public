@@ -1,0 +1,24 @@
+# Environment selection is supplied by SPRING_PROFILES_ACTIVE at deployment.
+# Config and Discovery deliberately share one fixed environment namespace.
+spring:
+  config:
+    import:
+      - "nacos:flowdesk-common.yaml?refreshEnabled=false"
+      - "nacos:${spring.application.name}.yaml?refreshEnabled=false"
+  cloud:
+    nacos:
+      config:
+        enabled: true
+        server-addr: ${FLOWDESK_NACOS_SERVER_ADDR:127.0.0.1:8848}
+        namespace: flowdesk-prod
+        group: FLOWDESK_GROUP
+        username: ${FLOWDESK_NACOS_USERNAME}
+        password: ${FLOWDESK_NACOS_PASSWORD}
+        refresh-enabled: false
+        import-check:
+          enabled: true
+      discovery:
+        namespace: flowdesk-prod
+        group: FLOWDESK_GROUP
+        username: ${FLOWDESK_NACOS_USERNAME}
+        password: ${FLOWDESK_NACOS_PASSWORD}

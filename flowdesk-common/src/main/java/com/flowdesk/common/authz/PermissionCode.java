@@ -4,10 +4,7 @@ import java.util.EnumSet;
 import java.util.Set;
 
 /**
- * The complete frozen P0 permission white list (API-SPEC §3.2, 36 codes).
- *
- * <p>Permission entries only gate actions inside the fixed persona role ceiling;
- * they are not a dynamic authorization language.</p>
+ * 固定权限代码白名单；权限只能在角色允许的范围内生效，不能作为任意扩展的授权语言。
  */
 public enum PermissionCode {
     CATALOG_READ_ACTIVE(RoleCode.REQUESTER),
@@ -52,14 +49,23 @@ public enum PermissionCode {
 
     private final Set<RoleCode> ceiling;
 
+    /**
+     * 将允许角色复制为不可变集合，形成该权限的固定角色上限。
+     */
     PermissionCode(RoleCode... allowedRoles) {
         this.ceiling = Set.copyOf(EnumSet.copyOf(java.util.Arrays.asList(allowedRoles)));
     }
 
+    /**
+     * 返回允许授予此权限的固定角色集合，供令牌签发和资源授权共同限制权限上限。
+     */
     public Set<RoleCode> ceiling() {
         return ceiling;
     }
 
+    /**
+     * 判断角色是否在此权限的白名单内，令牌中的权限声明不能绕过此限制。
+     */
     public boolean isAllowedFor(RoleCode roleCode) {
         return ceiling.contains(roleCode);
     }

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+/** 展示告警与原始事件，并分别维护加载状态、错误及告警分页。 */
 import { computed, onMounted, ref } from "vue";
 import {
   Activity,
@@ -37,6 +38,10 @@ const canReadRecovery = computed(
   () => auth.hasRole("SERVICE_DESK_ADMIN") && auth.can("RECOVERY_READ_TENANT"),
 );
 
+/**
+ * 按当前状态筛选和游标读取告警聚合列表。
+ * 查询前清理旧页数据，失败时保留明确反馈，避免把旧结果当作新页。
+ */
 async function loadIncidents(token = ""): Promise<void> {
   if (!canReadIncidents.value) {
     loading.value = false;
@@ -68,6 +73,10 @@ async function loadIncidents(token = ""): Promise<void> {
     loading.value = false;
   }
 }
+/**
+ * 加载告警接入事件列表。
+ * 仅对具备相应管理权限的用户查询，单独维护加载和错误状态。
+ */
 async function loadEvents(): Promise<void> {
   if (!isAdmin.value) {
     eventsLoading.value = false;
@@ -87,6 +96,10 @@ async function loadEvents(): Promise<void> {
     eventsLoading.value = false;
   }
 }
+/**
+ * 将告警聚合分页重置至第一页并刷新相关列表。
+ * 事件与聚合分别加载，互不覆盖请求结果。
+ */
 async function refresh(): Promise<void> {
   tokenStack.value = [];
   currentToken.value = "";
@@ -95,12 +108,20 @@ async function refresh(): Promise<void> {
     loadEvents(),
   ]);
 }
+/**
+ * 保存当前游标并读取下一页告警聚合。
+ * 没有下一页游标时保持当前列表不变。
+ */
 function nextPage(): void {
   if (nextToken.value && !loading.value) {
     tokenStack.value.push(nextToken.value);
     void loadIncidents(nextToken.value);
   }
 }
+/**
+ * 从历史游标栈恢复上一页告警聚合。
+ * 页码与筛选条件保持一致，避免重新从整个集合计算偏移。
+ */
 function previousPage(): void {
   if (loading.value) return;
   if (tokenStack.value.length < 2) {
@@ -111,10 +132,18 @@ function previousPage(): void {
   tokenStack.value.pop();
   void loadIncidents(tokenStack.value[tokenStack.value.length - 1] || "");
 }
+/**
+ * 在告警状态筛选变化后重置分页。
+ * 使用新条件重新读取第一页，避免沿用旧筛选的游标。
+ */
 function filterChanged(): void {
   tokenStack.value = [];
   void loadIncidents("");
 }
+/**
+ * 使用当前页游标重试告警聚合查询。
+ * 保留用户所在页及筛选条件，便于临时故障后恢复。
+ */
 function retryIncidents(): void {
   void loadIncidents(currentToken.value);
 }

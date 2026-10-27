@@ -26,7 +26,7 @@ describe('ApiClient', () => {
     configureTokenProvider(() => null)
     const fetcher = vi.fn(async () => new Response(JSON.stringify({ error: { code: 'RESOURCE_VERSION_CONFLICT', message: 'localized', correlationId: 'c-2', details: [] } }), { status: 412, headers: { 'X-Correlation-Id': 'c-2' } }))
     const client = new ApiClient('/api/v1', fetcher)
-    await expect(client.get('/tickets/1')).rejects.toMatchObject<ApiClientError>({ status: 412, code: 'RESOURCE_VERSION_CONFLICT', correlationId: 'c-2' })
+    await expect(client.get('/tickets/1')).rejects.toMatchObject({ status: 412, code: 'RESOURCE_VERSION_CONFLICT', correlationId: 'c-2' })
   })
 
   it('sanitizes caller-controlled identity headers', async () => {
@@ -81,7 +81,7 @@ describe('ApiClient', () => {
       }), { status: 401, headers: { 'X-Correlation-Id': 'c-5' } }))
     const client = new ApiClient('/api/v1', fetcher)
 
-    await expect(client.get('/users/me')).rejects.toMatchObject<ApiClientError>({
+    await expect(client.get('/users/me')).rejects.toMatchObject({
       status: 401,
       code: 'AUTHENTICATION_REQUIRED',
       correlationId: 'c-5',
@@ -94,7 +94,7 @@ describe('ApiClient', () => {
     const fetcher = vi.fn(async () => new Response(null, { status: 415 }))
     const client = new ApiClient('/api/v1', fetcher)
 
-    await expect(client.get('/tickets')).rejects.toMatchObject<ApiClientError>({
+    await expect(client.get('/tickets')).rejects.toMatchObject({
       status: 415,
       code: 'MEDIA_TYPE_UNSUPPORTED',
     })

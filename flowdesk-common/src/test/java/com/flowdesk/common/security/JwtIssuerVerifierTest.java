@@ -20,6 +20,9 @@ import java.util.UUID;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
+/**
+ * 验证人类和服务 JWT 的签发验签契约，覆盖主体类型、受保护声明、签名算法及过期分类。
+ */
 class JwtIssuerVerifierTest {
 
     private static final UUID TENANT = UUID.fromString("11111111-1111-1111-1111-111111111111");
@@ -29,6 +32,9 @@ class JwtIssuerVerifierTest {
     private static JwtVerifier verifier;
     private static KeyPair keyPair;
 
+    /**
+     * 初始化当前测试所需签名密钥、认证配置或 Mock MVC 环境，使后续行为断言基于隔离依赖。
+     */
     @BeforeAll
     static void setUp() throws Exception {
         keyPair = KeyPairGenerator.getInstance("RSA").generateKeyPair();
@@ -38,6 +44,9 @@ class JwtIssuerVerifierTest {
                 "flowdesk-api", "flowdesk-internal", 30);
     }
 
+    /**
+     * 验证人类 JWT 签发与验签往返后保留租户、用户、角色、权限和到期等受保护声明。
+     */
     @Test
     void humanTokenRoundTripsProtectedClaims() {
         IssuedJwt issued = issuer.issueHuman(TENANT, USER,
@@ -52,6 +61,9 @@ class JwtIssuerVerifierTest {
         assertThat(principal.expiresAt().getEpochSecond()).isEqualTo(issued.expiresAt().getEpochSecond());
     }
 
+    /**
+     * 验证人类令牌签发拒绝 null 角色或权限集合，避免不明确授权输入被默认解释。
+     */
     @Test
     void humanIssueRejectsNullRoleOrPermissionCollections() {
         assertThatThrownBy(() -> issuer.issueHuman(TENANT, USER, null, Set.of()))
@@ -66,6 +78,9 @@ class JwtIssuerVerifierTest {
                 .isInstanceOf(IllegalArgumentException.class);
     }
 
+    /**
+     * 验证服务 JWT 能正确往返验签，同时不能被用于人类身份入口。
+     */
     @Test
     void serviceTokenRoundTripsAndCannotBeUsedAsHumanToken() {
         IssuedJwt issued = issuer.issueService(TENANT, "flowdesk-ticket-service");
@@ -79,6 +94,9 @@ class JwtIssuerVerifierTest {
                 .isEqualTo(JwtVerificationException.Kind.TYPE_REJECTED);
     }
 
+    /**
+     * 验证其他密钥签名的令牌不能通过当前验签器，阻止伪造可信主体。
+     */
     @Test
     void wrongKeyIsRejected() throws Exception {
         KeyPair other = KeyPairGenerator.getInstance("RSA").generateKeyPair();
@@ -92,6 +110,9 @@ class JwtIssuerVerifierTest {
                 .isEqualTo(JwtVerificationException.Kind.SIGNATURE_INVALID);
     }
 
+    /**
+     * 验证验签器严格限制签名算法，即使提供相同秘密也拒绝 HS256 令牌。
+     */
     @Test
     void hs256TokenIsRejectedEvenWithTheSameSecret() throws Exception {
         JWTClaimsSet claims = new JWTClaimsSet.Builder()
@@ -111,6 +132,9 @@ class JwtIssuerVerifierTest {
                 .isEqualTo(JwtVerificationException.Kind.ALGORITHM_REJECTED);
     }
 
+    /**
+     * 验证过期令牌得到明确的过期分类，使认证错误与格式或签名错误可区分。
+     */
     @Test
     void expiredTokenIsClassifiedAsExpired() {
         JwtVerifier shortLivedVerifier = new JwtVerifier(keyPair.getPublic(),

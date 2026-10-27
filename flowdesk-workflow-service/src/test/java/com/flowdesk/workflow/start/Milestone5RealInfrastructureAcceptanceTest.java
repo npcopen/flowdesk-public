@@ -1,5 +1,11 @@
 package com.flowdesk.workflow.start;
 
+import com.flowdesk.workflow.service.start.*;
+import com.flowdesk.workflow.service.start.impl.*;
+import com.flowdesk.workflow.service.recovery.*;
+import com.flowdesk.workflow.service.recovery.impl.*;
+import com.flowdesk.workflow.model.recovery.WorkflowRecoveryModels;
+import com.flowdesk.workflow.dto.*;
 import com.flowdesk.common.tenant.ActorRef;
 import com.flowdesk.common.tenant.TenantContext;
 import com.flowdesk.common.tenant.TenantContextScope;
@@ -9,7 +15,10 @@ import com.flowdesk.ticket.outbox.RocketMqTicketOutboxTransport;
 import com.flowdesk.ticket.outbox.TicketOutboxMessage;
 import com.flowdesk.ticket.outbox.TicketOutboxPublisher;
 import com.flowdesk.ticket.outbox.TicketOutboxPublisherProperties;
-import com.flowdesk.ticket.outbox.TicketOutboxRepository;
+import com.flowdesk.ticket.outbox.WorkflowStartDispatchService;
+import com.flowdesk.ticket.outbox.impl.WorkflowStartDispatchServiceImpl;
+import com.flowdesk.ticket.model.outbox.Candidate;
+import com.flowdesk.ticket.model.outbox.ClaimedOutbox;
 import com.flowdesk.ticket.outbox.TicketOutboxSendResult;
 import com.flowdesk.ticket.outbox.TicketOutboxTransport;
 import com.flowdesk.ticket.service.IdempotencyCodec;
@@ -87,12 +96,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /**
- * Destructive, opt-in M5 acceptance against an explicitly isolated MySQL 8.4 / RocketMQ 5.3.4
- * environment. It is intentionally disabled during ordinary Maven builds.
- *
- * <p>Every frozen F01..F14 scenario runs for both frozen demo tenants. Assertions read final rows
- * through the deployment/admin connection and record only identities, hashes, states and counts;
- * message bodies and credentials never enter the evidence file.</p>
+ * 里程碑五真实基础设施验收，覆盖消息重投、身份冲突、租约竞争、ACL 和数据库故障的最终一致结果。
  */
 @EnabledIfEnvironmentVariable(named = "FLOWDESK_M5_REAL_INFRA", matches = "true")
 @TestInstance(TestInstance.Lifecycle.PER_CLASS)
@@ -148,12 +152,12 @@ class Milestone5RealInfrastructureAcceptanceTest {
     private JdbcTemplate workflowRuntime;
     private JdbcTransactionManager ticketTransactions;
     private JdbcTransactionManager workflowTransactions;
-    private TicketOutboxRepository ticketRepository;
+    private WorkflowStartDispatchService ticketRepository;
     private WorkflowStartConsumer workflowConsumer;
     private WorkflowStartDlqAcceptor dlqAcceptor;
-    private WorkflowRecoveryRepository recoveryRepository;
-    private WorkflowRecoveryReplayTransaction replayTransaction;
-    private WorkflowRecoveryReplaySettlement replaySettlement;
+    private WorkflowRecoveryMapper recoveryMapper;
+    private WorkflowRecoveryAcceptanceService replayTransaction;
+    private WorkflowRecoveryExecutionService replaySettlement;
     private WorkflowRecoveryReplayWorker replayWorker;
     private WorkflowStartRocketMqConsumers mqConsumers;
     private RocketMqTicketOutboxTransport ticketTransport;
@@ -162,6 +166,9 @@ class Milestone5RealInfrastructureAcceptanceTest {
     private ExecutorService replayExecutor;
     private long secondaryDlqInitialMessages;
 
+    /**
+     * 检查验收环境并启动隔离数据库及真实消息代理协作组件，准备完整故障场景。
+     */
     @BeforeAll
     void startIsolatedAcceptance() throws Exception {
         requireExactEnvironment("FLOWDESK_M5_ACCEPTANCE_ISOLATED", "true");
@@ -191,28 +198,29 @@ class Milestone5RealInfrastructureAcceptanceTest {
         workflowRuntime = new JdbcTemplate(workflowRuntimeDataSource);
         ticketTransactions = new JdbcTransactionManager(ticketRuntimeDataSource);
         workflowTransactions = new JdbcTransactionManager(workflowRuntimeDataSource);
-        ticketRepository = new TicketOutboxRepository(ticketRuntime);
+        ticketRepository = new WorkflowStartDispatchServiceImpl(com.flowdesk.workflow.support.WorkflowTestMappers.mapper(ticketRuntime.getDataSource(), com.flowdesk.ticket.outbox.TicketOutboxPersistenceMapper.class));
 
         assertFreshIsolatedDatabase();
         seedAcceptanceDefinitionsAndCatalogs();
 
         WorkflowStartEnvelopeGuard guard = new WorkflowStartEnvelopeGuard();
-        WorkflowStartRepository startRepository = new WorkflowStartRepository(workflowRuntime);
-        WorkflowStartTransaction startTransaction = new WorkflowStartTransaction(
-                startRepository, workflowTransactions);
+        WorkflowStartMapper startMapper = com.flowdesk.workflow.support.WorkflowTestMappers.mapper(workflowRuntime.getDataSource(), WorkflowStartMapper.class);
+        WorkflowStartQueryService queries = new WorkflowStartQueryServiceImpl(startMapper);
+        WorkflowStartCommandService startTransaction = new WorkflowStartCommandServiceImpl(
+                startMapper, workflowTransactions);
         workflowConsumer = new WorkflowStartConsumer(
-                guard, startRepository, startTransaction, eligibility);
+                guard, queries, startTransaction, eligibility);
         dlqAcceptor = new WorkflowStartDlqAcceptor(
-                guard, new WorkflowStartDlqTransaction(startRepository, workflowTransactions));
-        recoveryRepository = new WorkflowRecoveryRepository(workflowRuntime);
-        replayTransaction = new WorkflowRecoveryReplayTransaction(
-                recoveryRepository, workflowTransactions);
-        replaySettlement = new WorkflowRecoveryReplaySettlement(
-                recoveryRepository, workflowTransactions);
+                guard, new WorkflowStartDlqServiceImpl(startMapper, workflowTransactions));
+        recoveryMapper = com.flowdesk.workflow.support.WorkflowTestMappers.mapper(workflowRuntime.getDataSource(), WorkflowRecoveryMapper.class);
+        replayTransaction = new WorkflowRecoveryAcceptanceServiceImpl(
+                recoveryMapper, workflowTransactions);
+        replaySettlement = new WorkflowRecoveryExecutionServiceImpl(
+                recoveryMapper, workflowTransactions);
         replayExecutor = Executors.newSingleThreadExecutor();
         TaskExecutor taskExecutor = task -> replayExecutor.execute(task);
         replayWorker = new WorkflowRecoveryReplayWorker(
-                taskExecutor, recoveryRepository, workflowConsumer, replaySettlement);
+                taskExecutor, workflowConsumer, replaySettlement);
 
         WorkflowStartRocketMqProperties consumerProperties = new WorkflowStartRocketMqProperties();
         consumerProperties.setEnabled(true);
@@ -241,6 +249,9 @@ class Milestone5RealInfrastructureAcceptanceTest {
         ticketTransport.start();
     }
 
+    /**
+     * 关闭验收组件并输出事实证据，即使单个清理失败仍继续释放剩余资源。
+     */
     @AfterAll
     void stopAndWriteEvidence() throws Exception {
         try {
@@ -274,6 +285,9 @@ class Milestone5RealInfrastructureAcceptanceTest {
         writeEvidenceIfRequested();
     }
 
+    /**
+     * 验证两个租户的正常链路只提交冻结契约要求的业务副作用，记录真实基础设施中的消息身份和最终持久化事实。
+     */
     @Test
     @Order(1)
     void m5HappyPathCommitsOnlyFrozenEffectsForBothTenants() {
@@ -292,13 +306,16 @@ class Milestone5RealInfrastructureAcceptanceTest {
         }
     }
 
+    /**
+     * 验证过期发送前租约可被接管且消息身份不变，记录真实基础设施中的消息身份和最终持久化事实。
+     */
     @Test
     @Order(2)
     void m5F01ExpiredPreSendClaimsAreReclaimedWithoutChangingIdentity() {
         List<ScenarioFixture> fixtures = fixtures("M5-F01");
         Instant claimedAt = now();
         fixtures.forEach(fixture -> seedTicket(fixture, "PENDING", 0, null));
-        Map<UUID, TicketOutboxRepository.ClaimedOutbox> abandoned = new LinkedHashMap<>();
+        Map<UUID, ClaimedOutbox> abandoned = new LinkedHashMap<>();
         for (ScenarioFixture fixture : fixtures) {
             abandoned.put(fixture.outboxId(), concurrentClaim(fixture, claimedAt));
         }
@@ -316,13 +333,16 @@ class Milestone5RealInfrastructureAcceptanceTest {
         }
     }
 
+    /**
+     * 验证代理已接纳但本地未结算时重复发送最终收敛，记录真实基础设施中的消息身份和最终持久化事实。
+     */
     @Test
     @Order(3)
     void m5F02BrokerAcceptedBeforeLocalCompletionConvergesAfterDuplicateSend() throws Exception {
         List<ScenarioFixture> fixtures = fixtures("M5-F02");
         Instant claimedAt = now();
         fixtures.forEach(fixture -> seedTicket(fixture, "PENDING", 0, null));
-        Map<UUID, TicketOutboxRepository.ClaimedOutbox> staleClaims = new LinkedHashMap<>();
+        Map<UUID, ClaimedOutbox> staleClaims = new LinkedHashMap<>();
         for (ScenarioFixture fixture : fixtures) {
             staleClaims.put(fixture.outboxId(), claim(fixture, claimedAt));
             assertThat(ticketTransport.send(wire(fixture).outboxMessage()).status())
@@ -347,6 +367,9 @@ class Milestone5RealInfrastructureAcceptanceTest {
         }
     }
 
+    /**
+     * 验证发布器重启后已发布状态仍为终态，记录真实基础设施中的消息身份和最终持久化事实。
+     */
     @Test
     @Order(4)
     void m5F03PublishedIsTerminalAcrossPublisherRestart() {
@@ -367,6 +390,9 @@ class Milestone5RealInfrastructureAcceptanceTest {
         }
     }
 
+    /**
+     * 验证二至十次精确重复投递只产生一次业务副作用，记录真实基础设施中的消息身份和最终持久化事实。
+     */
     @Test
     @Order(5)
     void m5F04TwoToTenExactDeliveriesHaveOneBusinessEffect() throws Exception {
@@ -403,6 +429,9 @@ class Milestone5RealInfrastructureAcceptanceTest {
         }
     }
 
+    /**
+     * 验证消息与意图内容冲突始终不覆盖 Inbox，记录真实基础设施中的消息身份和最终持久化事实。
+     */
     @Test
     @Order(6)
     void m5F05MessageAndIntentContentConflictsNeverOverwriteInbox() throws Exception {
@@ -438,6 +467,9 @@ class Milestone5RealInfrastructureAcceptanceTest {
         awaitMainGroupDrained();
     }
 
+    /**
+     * 验证迟到与相同意图投递不回退终态，记录真实基础设施中的消息身份和最终持久化事实。
+     */
     @Test
     @Order(7)
     void m5F06LateAndSameIntentDeliveriesNeverRegressTerminalState() throws Exception {
@@ -460,6 +492,9 @@ class Milestone5RealInfrastructureAcceptanceTest {
         }
     }
 
+    /**
+     * 验证认证租户篡改及跨租户版本引用均失败关闭，记录真实基础设施中的消息身份和最终持久化事实。
+     */
     @Test
     @Order(8)
     void m5F07TicketAuthenticatedTenantTamperingAndCrossTenantVersionsFailClosed()
@@ -505,6 +540,9 @@ class Milestone5RealInfrastructureAcceptanceTest {
         awaitMainGroupDrained();
     }
 
+    /**
+     * 验证ACL 只允许冻结工单发布身份和工作流消费组，记录真实基础设施中的消息身份和最终持久化事实。
+     */
     @Test
     @Order(9)
     void m5F08AclAllowsOnlyFrozenTicketPublishAndWorkflowGroups() throws Exception {
@@ -543,6 +581,9 @@ class Milestone5RealInfrastructureAcceptanceTest {
         }
     }
 
+    /**
+     * 验证不可用端点八次发送后原子进入工单恢复，记录真实基础设施中的消息身份和最终持久化事实。
+     */
     @Test
     @Order(10)
     void m5F09EightUnavailableEndpointSendsAtomicallyEnterTicketRecovery() throws Exception {
@@ -584,6 +625,9 @@ class Milestone5RealInfrastructureAcceptanceTest {
         }
     }
 
+    /**
+     * 验证数据库故障经主队列死信后原子保存 Inbox 恢复，记录真实基础设施中的消息身份和最终持久化事实。
+     */
     @Test
     @Order(11)
     void m5F10WorkflowDatabaseOutageReachesMainDlqThenAtomicInboxRecovery() {
@@ -622,6 +666,9 @@ class Milestone5RealInfrastructureAcceptanceTest {
         }
     }
 
+    /**
+     * 验证未知发送结果重投同一身份并只收敛一次，记录真实基础设施中的消息身份和最终持久化事实。
+     */
     @Test
     @Order(12)
     void m5F11UnknownResultResendsSameIdentityAndConvergesOnce() {
@@ -651,6 +698,9 @@ class Milestone5RealInfrastructureAcceptanceTest {
         }
     }
 
+    /**
+     * 验证人工重放与迟到成功竞争只有一个胜者且无状态回退，记录真实基础设施中的消息身份和最终持久化事实。
+     */
     @Test
     @Order(13)
     void m5F12ManualReplayAndLateBrokerSuccessHaveOneWinnerAndNoRegression()
@@ -682,7 +732,7 @@ class Milestone5RealInfrastructureAcceptanceTest {
 
             TenantContext human = TenantContext.ofHumanJwt(
                     fixture.tenant().tenantId(), ADMIN_USER, UUID.randomUUID());
-            WorkflowRecoveryReplayTransaction.Acceptance replay;
+            WorkflowRecoveryModels.Acceptance replay;
             try (TenantContextScope ignored = TenantContextScope.open(human)) {
                 replay = replayTransaction.accept(human, recoveryId, ADMIN_USER,
                         "M5 F12 concurrent late-delivery acceptance", "m5-f12-" + fixture.tenant().label(), 0);
@@ -722,6 +772,9 @@ class Milestone5RealInfrastructureAcceptanceTest {
         }
     }
 
+    /**
+     * 验证第八次发布和第六次消费为准确终结边界，记录真实基础设施中的消息身份和最终持久化事实。
+     */
     @Test
     @Order(14)
     void m5F13EighthPublishAndSixthConsumeAreExactTerminalBoundaries() {
@@ -799,6 +852,9 @@ class Milestone5RealInfrastructureAcceptanceTest {
         assertThat(topicMessageCount(SECONDARY_DLQ)).isEqualTo(secondaryDlqInitialMessages);
     }
 
+    /**
+     * 验证非法 V1 为毒消息而未知可选字段保持兼容，记录真实基础设施中的消息身份和最终持久化事实。
+     */
     @Test
     @Order(15)
     void m5F14MalformedV1IsPoisonWhileUnknownOptionalPayloadIsCompatible()
@@ -835,6 +891,9 @@ class Milestone5RealInfrastructureAcceptanceTest {
         awaitMainGroupDrained();
     }
 
+    /**
+     * 断言当前场景的验收数据库为空且与生产环境隔离，失败时直接报告对应证据差异。
+     */
     private void assertFreshIsolatedDatabase() {
         for (TenantFixture tenant : tenants) {
             assertThat(ticketAdmin.queryForObject("""
@@ -850,6 +909,9 @@ class Milestone5RealInfrastructureAcceptanceTest {
         }
     }
 
+    /**
+     * 建立当前测试场景的持久化前置事实，保留指定租户、身份和状态供后续业务路径验证。
+     */
     private void seedAcceptanceDefinitionsAndCatalogs() {
         for (TenantFixture tenant : tenants) {
             workflowAdmin.update("""
@@ -905,10 +967,16 @@ class Milestone5RealInfrastructureAcceptanceTest {
         }
     }
 
+    /**
+     * 列出当前契约测试使用的冻结样例，确保两种通知来源均被覆盖。
+     */
     private List<ScenarioFixture> fixtures(String scenario) {
         return tenants.stream().map(tenant -> fixture(scenario, tenant)).toList();
     }
 
+    /**
+     * 加载指定冻结属性样例，供协议一致性及错误变体测试复用。
+     */
     private ScenarioFixture fixture(String scenario, TenantFixture tenant) {
         UUID ticketId = id(scenario, tenant, "ticket");
         UUID outboxId = id(scenario, tenant, "outbox");
@@ -927,6 +995,9 @@ class Milestone5RealInfrastructureAcceptanceTest {
                 correlationId, body, bodyHash, intent, publication);
     }
 
+    /**
+     * 建立当前测试场景的持久化前置事实，保留指定租户、身份和状态供后续业务路径验证。
+     */
     private void seedTicket(ScenarioFixture fixture,
                             String outboxStatus,
                             int attemptCount,
@@ -986,9 +1057,12 @@ class Milestone5RealInfrastructureAcceptanceTest {
                 Timestamp.from(created), uuid(REQUESTER), Timestamp.from(created));
     }
 
-    private TicketOutboxRepository.ClaimedOutbox claim(
+    /**
+     * 在指定租户的短事务中领取场景 Outbox，返回包含当前令牌和版本的发送快照。
+     */
+    private ClaimedOutbox claim(
             ScenarioFixture fixture, Instant claimedAt) {
-        TicketOutboxRepository.Candidate candidate = ticketRepository.findCandidates(
+        Candidate candidate = ticketRepository.findCandidates(
                         claimedAt, claimedAt.minusSeconds(30), 50).stream()
                 .filter(row -> row.outboxId().equals(fixture.outboxId()))
                 .findFirst().orElseThrow();
@@ -1000,16 +1074,19 @@ class Milestone5RealInfrastructureAcceptanceTest {
                                 .orElseThrow()));
     }
 
-    private TicketOutboxRepository.ClaimedOutbox concurrentClaim(
+    /**
+     * 同时启动两个领取事务，验证同一候选只允许一个处理者取得有效发送租约。
+     */
+    private ClaimedOutbox concurrentClaim(
             ScenarioFixture fixture, Instant claimedAt) {
-        TicketOutboxRepository.Candidate candidate = ticketRepository.findCandidates(
+        Candidate candidate = ticketRepository.findCandidates(
                         claimedAt, claimedAt.minusSeconds(30), 50).stream()
                 .filter(row -> row.outboxId().equals(fixture.outboxId()))
                 .findFirst().orElseThrow();
         java.util.concurrent.CountDownLatch start = new java.util.concurrent.CountDownLatch(1);
         ExecutorService executor = Executors.newFixedThreadPool(2);
         try {
-            List<Future<TicketOutboxRepository.ClaimedOutbox>> attempts = new ArrayList<>();
+            List<Future<ClaimedOutbox>> attempts = new ArrayList<>();
             for (int worker = 0; worker < 2; worker++) {
                 attempts.add(executor.submit(() -> {
                     start.await();
@@ -1022,9 +1099,9 @@ class Milestone5RealInfrastructureAcceptanceTest {
                 }));
             }
             start.countDown();
-            List<TicketOutboxRepository.ClaimedOutbox> winners = new ArrayList<>();
-            for (Future<TicketOutboxRepository.ClaimedOutbox> attempt : attempts) {
-                TicketOutboxRepository.ClaimedOutbox claimed = attempt.get(10, TimeUnit.SECONDS);
+            List<ClaimedOutbox> winners = new ArrayList<>();
+            for (Future<ClaimedOutbox> attempt : attempts) {
+                ClaimedOutbox claimed = attempt.get(10, TimeUnit.SECONDS);
                 if (claimed != null) {
                     winners.add(claimed);
                 }
@@ -1040,6 +1117,9 @@ class Milestone5RealInfrastructureAcceptanceTest {
         }
     }
 
+    /**
+     * 在测试租户上下文中执行或构造当前消息变体，保留原始场景事实供后续比较。
+     */
     private <T> T withTicketContext(ScenarioFixture fixture,
                                     java.util.concurrent.Callable<T> work) {
         TenantContext context = TenantContext.ofPersistedTask(
@@ -1057,16 +1137,25 @@ class Milestone5RealInfrastructureAcceptanceTest {
         }
     }
 
+    /**
+     * 使用场景时钟和传输适配器创建工单发布器，复用真实仓储及事务边界。
+     */
     private TicketOutboxPublisher publisher(Clock clock, TicketOutboxTransport transport) {
         return new TicketOutboxPublisher(
                 ticketRepository, transport, ticketTransactions, clock);
     }
 
+    /**
+     * 在超时前等待消息处理事实提交，超时以场景上下文使测试失败。
+     */
     private void awaitProcessed(ScenarioFixture fixture) {
         await(Duration.ofSeconds(30), () -> "PROCESSED".equals(workflowInboxStatus(
                 fixture.tenant().tenantId(), fixture.messageId())), "Workflow Inbox PROCESSED");
     }
 
+    /**
+     * 断言当前场景的正常链路的全部冻结业务事实，失败时直接报告对应证据差异。
+     */
     private void assertHappyPath(ScenarioFixture fixture, int attempts) {
         assertTicketPublished(fixture, attempts);
         assertWorkflowEffectCounts(fixture, 1, 1, 1, 1);
@@ -1082,6 +1171,9 @@ class Milestone5RealInfrastructureAcceptanceTest {
                 fixture.businessIntentKey())).isZero();
     }
 
+    /**
+     * 断言当前场景的稳定身份、终态或业务副作用，失败时直接报告对应证据差异。
+     */
     private void assertTicketPublished(ScenarioFixture fixture, int attempts) {
         assertThat(ticketAdmin.queryForObject("""
                 SELECT status FROM outbox_event WHERE tenant_id = ? AND outbox_id = ?
@@ -1099,6 +1191,9 @@ class Milestone5RealInfrastructureAcceptanceTest {
                 .isZero();
     }
 
+    /**
+     * 断言当前场景的稳定身份、终态或业务副作用，失败时直接报告对应证据差异。
+     */
     private void assertWorkflowReverseOutboxCount(ScenarioFixture fixture, int expected) {
         assertThat(workflowAdmin.queryForObject("""
                 SELECT COUNT(*) FROM outbox_event WHERE tenant_id = ?
@@ -1107,6 +1202,9 @@ class Milestone5RealInfrastructureAcceptanceTest {
                 .isEqualTo(expected);
     }
 
+    /**
+     * 断言当前场景的稳定身份、终态或业务副作用，失败时直接报告对应证据差异。
+     */
     private void assertWorkflowEffectCounts(ScenarioFixture fixture,
                                             int inbox,
                                             int instance,
@@ -1139,6 +1237,9 @@ class Milestone5RealInfrastructureAcceptanceTest {
                 .isEqualTo(audit);
     }
 
+    /**
+     * 断言当前场景的稳定身份、终态或业务副作用，失败时直接报告对应证据差异。
+     */
     private void assertImmutableMessageFactsDeniedToRuntime(ScenarioFixture fixture) {
         assertThatThrownBy(() -> ticketRuntime.update("""
                 UPDATE outbox_event SET message_id = message_id
@@ -1162,6 +1263,9 @@ class Milestone5RealInfrastructureAcceptanceTest {
                 .isInstanceOf(DataAccessException.class);
     }
 
+    /**
+     * 读取或统计当前场景的持久化及代理事实，为身份、状态和唯一副作用断言提供依据。
+     */
     private int workflowCount(String table, ScenarioFixture fixture) {
         if ("workflow_instance".equals(table)) {
             return workflowAdmin.queryForObject("""
@@ -1182,6 +1286,9 @@ class Milestone5RealInfrastructureAcceptanceTest {
         throw new IllegalArgumentException("Unsupported count table " + table);
     }
 
+    /**
+     * 读取或统计当前场景的持久化及代理事实，为身份、状态和唯一副作用断言提供依据。
+     */
     private int workflowAuditCount(UUID tenantId, UUID ticketId, String action) {
         return workflowAdmin.queryForObject("""
                 SELECT COUNT(*) FROM audit_record
@@ -1194,6 +1301,9 @@ class Milestone5RealInfrastructureAcceptanceTest {
                 uuid(tenantId), uuid(ticketId));
     }
 
+    /**
+     * 断言当前场景的发送和接纳两侧身份一致性，失败时直接报告对应证据差异。
+     */
     private void assertOutboxAndInboxIdentity(ScenarioFixture fixture) {
         Map<String, Object> outbox = ticketAdmin.queryForMap("""
                 SELECT LOWER(HEX(message_id)) AS message_id,
@@ -1217,14 +1327,20 @@ class Milestone5RealInfrastructureAcceptanceTest {
         assertThat(inbox.get("actual_hash")).isEqualTo(expectedHash);
     }
 
+    /**
+     * 断言当前场景的稳定身份、终态或业务副作用，失败时直接报告对应证据差异。
+     */
     private void assertIdentityUnchanged(
-            ScenarioFixture fixture, TicketOutboxRepository.ClaimedOutbox claimed) {
+            ScenarioFixture fixture, ClaimedOutbox claimed) {
         assertThat(claimed.messageId()).isEqualTo(fixture.messageId());
         assertThat(claimed.bodyBytes()).containsExactly(fixture.body());
         assertThat(claimed.bodySha256()).containsExactly(fixture.bodyHash());
         assertOutboxAndInboxIdentity(fixture);
     }
 
+    /**
+     * 断言当前场景的下次尝试次数与重试时间，失败时直接报告对应证据差异。
+     */
     private void assertNextAttempt(ScenarioFixture fixture, Instant expected) {
         Timestamp actual = ticketAdmin.queryForObject("""
                 SELECT next_attempt_at FROM outbox_event WHERE tenant_id = ? AND outbox_id = ?
@@ -1232,6 +1348,9 @@ class Milestone5RealInfrastructureAcceptanceTest {
         assertThat(actual.toInstant()).isEqualTo(expected);
     }
 
+    /**
+     * 断言当前场景的稳定身份、终态或业务副作用，失败时直接报告对应证据差异。
+     */
     private void assertTicketRecovery(
             ScenarioFixture fixture, int attempts, boolean deadLettered) {
         Map<String, Object> row = ticketAdmin.queryForMap("""
@@ -1261,6 +1380,9 @@ class Milestone5RealInfrastructureAcceptanceTest {
                 .isEqualTo(1);
     }
 
+    /**
+     * 断言当前场景的稳定身份、终态或业务副作用，失败时直接报告对应证据差异。
+     */
     private void assertWorkflowRecovery(ScenarioFixture fixture, int attempts) {
         Map<String, Object> row = workflowAdmin.queryForMap("""
                 SELECT i.status, i.attempt_count, LOWER(HEX(i.message_id)) AS message_id,
@@ -1290,6 +1412,9 @@ class Milestone5RealInfrastructureAcceptanceTest {
                 .isEqualTo(1);
     }
 
+    /**
+     * 读取当前验收场景的业务快照或状态，供消息处理前后结果比较。
+     */
     private String workflowInboxStatus(UUID tenantId, UUID messageId) {
         List<String> rows = workflowAdmin.query("""
                 SELECT status FROM inbox_message WHERE tenant_id = ? AND message_id = ?
@@ -1297,18 +1422,27 @@ class Milestone5RealInfrastructureAcceptanceTest {
         return rows.isEmpty() ? "MISSING" : rows.get(0);
     }
 
+    /**
+     * 读取当前验收场景的业务快照或状态，供消息处理前后结果比较。
+     */
     private String ticketLinkStatus(ScenarioFixture fixture) {
         return ticketAdmin.queryForObject("""
                 SELECT status FROM workflow_start_link WHERE tenant_id = ? AND ticket_id = ?
                 """, String.class, uuid(fixture.tenant().tenantId()), uuid(fixture.ticketId()));
     }
 
+    /**
+     * 通过场景声明的真实或测试传输发送原消息，保留身份供重复投递与收敛结果核对。
+     */
     private SendResult sendRaw(Wire wire) throws Exception {
         SendResult result = rawTicketProducer.send(wire.message(), 5000);
         assertThat(result.getSendStatus()).isEqualTo(SendStatus.SEND_OK);
         return result;
     }
 
+    /**
+     * 通过场景声明的真实或测试传输发送原消息，保留身份供重复投递与收敛结果核对。
+     */
     private void sendOnce(RPCHook hook, String producerGroup, Message message, String suffix)
             throws Exception {
         DefaultMQProducer producer = rawProducer(producerGroup, hook, nameServer, suffix);
@@ -1324,6 +1458,9 @@ class Milestone5RealInfrastructureAcceptanceTest {
         }
     }
 
+    /**
+     * 执行预期受限的代理操作并核验拒绝结果，证明错误身份或路由不能越过冻结边界。
+     */
     private void expectPullDenied(String label,
                                   RPCHook hook,
                                   String group,
@@ -1342,6 +1479,9 @@ class Milestone5RealInfrastructureAcceptanceTest {
         }
     }
 
+    /**
+     * 执行预期受限的代理操作并核验拒绝结果，证明错误身份或路由不能越过冻结边界。
+     */
     private void expectTopicPullDenied(String label,
                                        RPCHook hook,
                                        String group,
@@ -1363,6 +1503,9 @@ class Milestone5RealInfrastructureAcceptanceTest {
         }
     }
 
+    /**
+     * 执行预期受限的代理操作并核验拒绝结果，证明错误身份或路由不能越过冻结边界。
+     */
     private void expectDenied(String label, CheckedOperation operation) throws Exception {
         try {
             operation.run();
@@ -1377,6 +1520,9 @@ class Milestone5RealInfrastructureAcceptanceTest {
         throw new IllegalStateException(label + " unexpectedly succeeded");
     }
 
+    /**
+     * 沿异常因果链检查代理无权限响应和认证错误，区分预期 ACL 拒绝与其他连接故障。
+     */
     private static boolean isAuthorizationFailure(Throwable failure) {
         for (Throwable current = failure; current != null; current = current.getCause()) {
             if (current instanceof MQBrokerException broker
@@ -1398,6 +1544,9 @@ class Milestone5RealInfrastructureAcceptanceTest {
         return false;
     }
 
+    /**
+     * 在超时前等待指定原身份消息到达代理，超时以场景上下文使测试失败。
+     */
     private MessageExt awaitMessage(String topic, UUID messageId, Duration timeout) {
         final MessageExt[] found = new MessageExt[1];
         await(timeout, () -> {
@@ -1411,6 +1560,9 @@ class Milestone5RealInfrastructureAcceptanceTest {
         return found[0];
     }
 
+    /**
+     * 读取或统计当前场景的持久化及代理事实，为身份、状态和唯一副作用断言提供依据。
+     */
     private List<MessageExt> queryMessages(String topic, UUID messageId) {
         try {
             QueryResult result = mqAdmin.queryMessage(
@@ -1434,6 +1586,9 @@ class Milestone5RealInfrastructureAcceptanceTest {
         }
     }
 
+    /**
+     * 读取或统计当前场景的持久化及代理事实，为身份、状态和唯一副作用断言提供依据。
+     */
     private long topicMessageCount(String topic) {
         try {
             return mqAdmin.examineTopicStats(topic).getOffsetTable().values().stream()
@@ -1445,6 +1600,9 @@ class Milestone5RealInfrastructureAcceptanceTest {
         }
     }
 
+    /**
+     * 记录当前验收步骤观察到的消息与持久化结果，供最终证据和次数边界断言。
+     */
     private WorkflowStartConsumeResult observeMainDelivery(
             WorkflowStartTransportMessage delivery) {
         String messageId = delivery.userProperties().get("fd_message_id");
@@ -1460,11 +1618,17 @@ class Milestone5RealInfrastructureAcceptanceTest {
         return workflowConsumer.consume(delivery);
     }
 
+    /**
+     * 读取或统计当前场景的持久化及代理事实，为身份、状态和唯一副作用断言提供依据。
+     */
     private int mainDeliveryCount(UUID messageId) {
         AtomicInteger count = mainDeliveryCounts.get(messageId);
         return count == null ? 0 : count.get();
     }
 
+    /**
+     * 在超时前等待主消费组完成积压处理，超时以场景上下文使测试失败。
+     */
     private void awaitMainGroupDrained() {
         await(Duration.ofSeconds(30), () -> {
             try {
@@ -1477,6 +1641,9 @@ class Milestone5RealInfrastructureAcceptanceTest {
         }, "main consumer Group lag to reach zero");
     }
 
+    /**
+     * 断言当前场景的稳定身份、终态或业务副作用，失败时直接报告对应证据差异。
+     */
     private static void assertWireIdentity(MessageExt message, Wire expected, String topic) {
         assertThat(message.getTopic()).isEqualTo(topic);
         assertThat(message.getKeys()).isEqualTo(expected.keys());
@@ -1488,16 +1655,25 @@ class Milestone5RealInfrastructureAcceptanceTest {
                 .containsExactly(HEX.parseHex(expected.properties().get("fd_body_sha256")));
     }
 
+    /**
+     * 锁定验收专用工作流运行时数据库账号，模拟消费处理中数据库不可用的故障。
+     */
     private void lockWorkflowRuntime() {
         workflowAdmin.execute("ALTER USER 'fd_workflow_runtime'@'%' ACCOUNT LOCK");
     }
 
+    /**
+     * 解除验收数据库账号锁定，供故障场景结束后恢复消费及清理环境。
+     */
     private void unlockWorkflowRuntime() {
         if (workflowAdmin != null) {
             workflowAdmin.execute("ALTER USER 'fd_workflow_runtime'@'%' ACCOUNT UNLOCK");
         }
     }
 
+    /**
+     * 记录当前验收步骤观察到的消息与持久化结果，供最终证据和次数边界断言。
+     */
     private void record(String scenario,
                         ScenarioFixture fixture,
                         Map<String, Object> assertions) {
@@ -1515,6 +1691,9 @@ class Milestone5RealInfrastructureAcceptanceTest {
         evidence.add(item);
     }
 
+    /**
+     * 读取当前验收场景的业务快照或状态，供消息处理前后结果比较。
+     */
     private Map<String, Object> ticketSnapshot(ScenarioFixture fixture) {
         Map<String, Object> snapshot = new LinkedHashMap<>();
         List<Map<String, Object>> outbox = ticketAdmin.queryForList("""
@@ -1541,6 +1720,9 @@ class Milestone5RealInfrastructureAcceptanceTest {
         return snapshot;
     }
 
+    /**
+     * 读取当前验收场景的业务快照或状态，供消息处理前后结果比较。
+     */
     private Map<String, Object> workflowSnapshot(ScenarioFixture fixture) {
         Map<String, Object> snapshot = new LinkedHashMap<>();
         List<Map<String, Object>> inbox = workflowAdmin.queryForList("""
@@ -1594,6 +1776,9 @@ class Milestone5RealInfrastructureAcceptanceTest {
         return snapshot;
     }
 
+    /**
+     * 读取当前验收场景的业务快照或状态，供消息处理前后结果比较。
+     */
     private static Map<String, Object> safeRow(Map<String, Object> row) {
         Map<String, Object> safe = new LinkedHashMap<>();
         row.forEach((key, value) -> safe.put(key, value instanceof Number
@@ -1601,6 +1786,9 @@ class Milestone5RealInfrastructureAcceptanceTest {
         return safe;
     }
 
+    /**
+     * 将当前验收场景的原始观察和最终状态写入证据文件，便于复核故障处理结果。
+     */
     private void writeEvidenceIfRequested() throws IOException {
         String target = System.getenv("FLOWDESK_M5_ACCEPTANCE_RESULT");
         if (target == null || target.isBlank()) {
@@ -1621,6 +1809,9 @@ class Milestone5RealInfrastructureAcceptanceTest {
                 StandardCharsets.UTF_8);
     }
 
+    /**
+     * 根据场景原持久化事实构造冻结启动信封，保持租户、业务键、时间和摘要的一致身份。
+     */
     private Wire wire(ScenarioFixture fixture) {
         Map<String, String> properties = new LinkedHashMap<>();
         properties.put("fd_envelope_version", "1");
@@ -1643,12 +1834,18 @@ class Milestone5RealInfrastructureAcceptanceTest {
         return new Wire(fixture.messageId().toString(), fixture.body(), properties);
     }
 
+    /**
+     * 向 JSON 顶层追加可选字段，构造协议向前兼容的载荷变体。
+     */
     private static byte[] addOptional(byte[] body, String field, String value) {
         String json = new String(body, StandardCharsets.UTF_8);
         return (json.substring(0, json.length() - 1) + ",\"" + field + "\":\""
                 + value + "\"}").getBytes(StandardCharsets.UTF_8);
     }
 
+    /**
+     * 将时间截断为微秒并固定输出六位小数，匹配冻结消息契约的时间格式。
+     */
     private static String sixDigitInstant(Instant instant) {
         Instant micros = instant.truncatedTo(ChronoUnit.MICROS);
         long seconds = micros.getEpochSecond();
@@ -1657,6 +1854,9 @@ class Milestone5RealInfrastructureAcceptanceTest {
                 .replaceFirst("(?:\\.\\d+)?$", String.format(Locale.ROOT, ".%06d", micro)) + "Z";
     }
 
+    /**
+     * 构造指定代理端点的生产者配置，供正常和不可用端点故障场景复用。
+     */
     private static TicketOutboxPublisherProperties producerProperties(String nameServer) {
         TicketOutboxPublisherProperties properties = new TicketOutboxPublisherProperties();
         properties.setEnabled(true);
@@ -1666,6 +1866,9 @@ class Milestone5RealInfrastructureAcceptanceTest {
         return properties;
     }
 
+    /**
+     * 创建关闭 SDK 内部重试的验收生产者，明确指定访问身份、端点和独立实例名。
+     */
     private DefaultMQProducer rawProducer(
             String group, RPCHook hook, String server, String suffix) {
         DefaultMQProducer producer = new DefaultMQProducer(group, hook);
@@ -1679,6 +1882,9 @@ class Milestone5RealInfrastructureAcceptanceTest {
         return producer;
     }
 
+    /**
+     * 构造消息拉取客户端，按指定测试身份观察队列与访问控制行为。
+     */
     private DefaultMQPullConsumer pullConsumer(String group, RPCHook hook, String suffix) {
         DefaultMQPullConsumer consumer = new DefaultMQPullConsumer(group, hook);
         consumer.setNamesrvAddr(nameServer);
@@ -1687,26 +1893,41 @@ class Milestone5RealInfrastructureAcceptanceTest {
         return consumer;
     }
 
+    /**
+     * 构造工单发布测试身份，供 ACL 正常及越权场景验证。
+     */
     private RPCHook ticketHook() {
         return hook("FLOWDESK_TICKET_ROCKETMQ_ACCESS_KEY",
                 "FLOWDESK_TICKET_ROCKETMQ_SECRET_KEY");
     }
 
+    /**
+     * 构造工作流消费测试身份，供真实代理队列与 ACL 断言。
+     */
     private RPCHook workflowHook() {
         return hook("FLOWDESK_WORKFLOW_ROCKETMQ_ACCESS_KEY",
                 "FLOWDESK_WORKFLOW_ROCKETMQ_SECRET_KEY");
     }
 
+    /**
+     * 构造消息代理管理员测试身份，供查询队列和验收证据读取。
+     */
     private RPCHook adminHook() {
         return hook("FLOWDESK_ROCKETMQ_ADMIN_ACCESS_KEY",
                 "FLOWDESK_ROCKETMQ_ADMIN_SECRET_KEY");
     }
 
+    /**
+     * 从指定环境变量构造代理 ACL 钩子，使用场景声明的精确身份。
+     */
     private static RPCHook hook(String accessName, String secretName) {
         return new AclClientRPCHook(new SessionCredentials(
                 requiredEnvironment(accessName), requiredEnvironment(secretName)));
     }
 
+    /**
+     * 根据验收连接信息构造测试数据源，保持每个权限账号的连接独立。
+     */
     private static DriverManagerDataSource dataSource(
             String url, String username, String password) {
         if (!url.startsWith("jdbc:mysql://127.0.0.1:")
@@ -1722,17 +1943,26 @@ class Milestone5RealInfrastructureAcceptanceTest {
         return dataSource;
     }
 
+    /**
+     * 按场景、租户标签及记录种类派生稳定 UUID，便于将验收证据关联到同一业务事实。
+     */
     private static UUID id(String scenario, TenantFixture tenant, String kind) {
         return UUID.nameUUIDFromBytes(("flowdesk:" + scenario + ":" + tenant.label()
                 + ":" + kind).getBytes(StandardCharsets.UTF_8));
     }
 
+    /**
+     * 读取当前验收场景的业务快照或状态，供消息处理前后结果比较。
+     */
     private static String ticketNumber(ScenarioFixture fixture) {
         return "M5A-" + fixture.scenario().replace("M5-", "") + "-"
                 + fixture.tenant().label() + "-"
                 + fixture.ticketId().toString().substring(0, 6).toUpperCase(Locale.ROOT);
     }
 
+    /**
+     * 在给定时间内轮询条件，超时抛出带场景信息的断言错误。
+     */
     private static void await(Duration timeout, BooleanSupplier condition, String description) {
         long deadline = System.nanoTime() + timeout.toNanos();
         Throwable last = null;
@@ -1757,6 +1987,9 @@ class Milestone5RealInfrastructureAcceptanceTest {
         throw new IllegalStateException("Timed out waiting for " + description, last);
     }
 
+    /**
+     * 读取必填验收环境变量，缺失时立即失败以避免误用默认外部资源。
+     */
     private static String requiredEnvironment(String name) {
         String value = System.getenv(name);
         if (value == null || value.isBlank()) {
@@ -1765,12 +1998,18 @@ class Milestone5RealInfrastructureAcceptanceTest {
         return value.trim();
     }
 
+    /**
+     * 断言验收环境变量与冻结值一致，防止在错误基础设施上执行场景。
+     */
     private static void requireExactEnvironment(String name, String expected) {
         if (!expected.equals(requiredEnvironment(name))) {
             throw new IllegalArgumentException(name + " must be exactly " + expected);
         }
     }
 
+    /**
+     * 在 UUID 与持久化表示之间转换，保持标识高低位的编码顺序一致。
+     */
     private static byte[] uuid(UUID value) {
         return ByteBuffer.allocate(16)
                 .putLong(value.getMostSignificantBits())
@@ -1778,11 +2017,17 @@ class Milestone5RealInfrastructureAcceptanceTest {
                 .array();
     }
 
+    /**
+     * 按数据库二进制编码还原 UUID，供读取后的稳定身份比较。
+     */
     private static UUID binaryUuid(byte[] value) {
         ByteBuffer buffer = ByteBuffer.wrap(value);
         return new UUID(buffer.getLong(), buffer.getLong());
     }
 
+    /**
+     * 计算输入字节的 SHA-256 摘要，用于内容一致性核对及稳定业务键派生。
+     */
     private static byte[] sha256(byte[] value) {
         try {
             return MessageDigest.getInstance("SHA-256").digest(value);
@@ -1792,14 +2037,23 @@ class Milestone5RealInfrastructureAcceptanceTest {
         }
     }
 
+    /**
+     * 将可空时间转换为 JDBC 时间戳，保留数据库可空字段的语义。
+     */
     private static Timestamp nullableTimestamp(Instant value) {
         return value == null ? null : Timestamp.from(value);
     }
 
+    /**
+     * 返回断言工具使用的 NULL 展示标记，便于统一比较数据库中缺失的字段值。
+     */
     private static Object nullValue() {
         return "NULL";
     }
 
+    /**
+     * 冻结测试样例或传输快照，保留原始身份、字节和摘要供正常及错误变体场景复用。
+     */
     private record TenantFixture(
             String label,
             UUID tenantId,
@@ -1809,6 +2063,9 @@ class Milestone5RealInfrastructureAcceptanceTest {
             UUID catalogId) {
     }
 
+    /**
+     * 冻结测试样例或传输快照，保留原始身份、字节和摘要供正常及错误变体场景复用。
+     */
     private record ScenarioFixture(
             String scenario,
             TenantFixture tenant,
@@ -1821,6 +2078,9 @@ class Milestone5RealInfrastructureAcceptanceTest {
             byte[] businessIntentKey,
             byte[] publicationKey) {
 
+        /**
+         * 构造不可变快照并防御性复制可变内容，防止外部修改原数组或集合改变已接纳事实。
+         */
         private ScenarioFixture {
             body = body.clone();
             bodyHash = bodyHash.clone();
@@ -1828,26 +2088,41 @@ class Milestone5RealInfrastructureAcceptanceTest {
             publicationKey = publicationKey.clone();
         }
 
+        /**
+         * 返回消息体字节的防御性副本，避免调用方通过数组修改已保存事实。
+         */
         @Override
         public byte[] body() {
             return body.clone();
         }
 
+        /**
+         * 返回样例消息体摘要的副本，防止错误变体修改原始测试基线。
+         */
         @Override
         public byte[] bodyHash() {
             return bodyHash.clone();
         }
 
+        /**
+         * 返回业务意图键的防御性副本，避免调用方通过数组修改已保存事实。
+         */
         @Override
         public byte[] businessIntentKey() {
             return businessIntentKey.clone();
         }
 
+        /**
+         * 返回消息发布键的防御性副本，避免调用方通过数组修改已保存事实。
+         */
         @Override
         public byte[] publicationKey() {
             return publicationKey.clone();
         }
 
+        /**
+         * 复制消息并替换消息体，供摘要一致或不一致的契约变体验证。
+         */
         private ScenarioFixture withBody(byte[] replacement) {
             return new ScenarioFixture(scenario, tenant, ticketId, outboxId, messageId,
                     correlationId, replacement, sha256(replacement), businessIntentKey,
@@ -1855,31 +2130,49 @@ class Milestone5RealInfrastructureAcceptanceTest {
         }
     }
 
+    /**
+     * 冻结测试样例或传输快照，保留原始身份、字节和摘要供正常及错误变体场景复用。
+     */
     private record Wire(String keys, byte[] body, Map<String, String> properties) {
 
+        /**
+         * 构造不可变快照并防御性复制可变内容，防止外部修改原数组或集合改变已接纳事实。
+         */
         private Wire {
             body = body.clone();
             properties = Map.copyOf(properties);
         }
 
+        /**
+         * 复制消息并替换消息体，供摘要一致或不一致的契约变体验证。
+         */
         private Wire withBody(byte[] replacement) {
             Map<String, String> changed = new LinkedHashMap<>(properties);
             changed.put("fd_body_sha256", HEX.formatHex(sha256(replacement)));
             return new Wire(keys, replacement, changed);
         }
 
+        /**
+         * 复制消息并替换身份，构造消息身份冲突或重复投递场景。
+         */
         private Wire withMessageId(UUID replacement) {
             Map<String, String> changed = new LinkedHashMap<>(properties);
             changed.put("fd_message_id", replacement.toString());
             return new Wire(replacement.toString(), body, changed);
         }
 
+        /**
+         * 复制消息属性并替换单个字段，避免错误变体修改原始基线。
+         */
         private Wire withProperty(String name, String value) {
             Map<String, String> changed = new LinkedHashMap<>(properties);
             changed.put(name, value);
             return new Wire(keys, body, changed);
         }
 
+        /**
+         * 将样例转换为真实代理消息，保留冻结属性与原始消息体。
+         */
         private Message message() {
             Message message = new Message(WorkflowStartContract.TOPIC, body.clone());
             message.setKeys(keys);
@@ -1887,11 +2180,17 @@ class Milestone5RealInfrastructureAcceptanceTest {
             return message;
         }
 
+        /**
+         * 将样例转换为发送适配器输入，保持稳定身份与原始字节。
+         */
         private TicketOutboxMessage outboxMessage() {
             return new TicketOutboxMessage(
                     WorkflowStartContract.TOPIC, keys, body, properties);
         }
 
+        /**
+         * 将样例转换为死信传输入口，沿用冻结信封及原始内容。
+         */
         private WorkflowStartTransportMessage dlqTransport() {
             return new WorkflowStartTransportMessage(
                     WorkflowStartContract.DLQ_TOPIC,
@@ -1899,29 +2198,47 @@ class Milestone5RealInfrastructureAcceptanceTest {
                     keys, null, body, properties);
         }
 
+        /**
+         * 返回消息体字节的防御性副本，避免调用方通过数组修改已保存事实。
+         */
         @Override
         public byte[] body() {
             return body.clone();
         }
     }
 
+    /**
+     * 可由测试推进的时钟，供重试、租约过期和恢复续跑场景使用确定性时间。
+     */
     private static final class MutableClock extends Clock {
 
         private Instant instant;
 
+        /**
+         * 初始化组件依赖与运行参数，使后续调用使用一致的协作对象。
+         */
         private MutableClock(Instant instant) {
             this.instant = instant.truncatedTo(ChronoUnit.MICROS);
         }
 
+        /**
+         * 推进测试时钟指定时长，触发到期重试或租约过期路径。
+         */
         private void advance(Duration duration) {
             instant = instant.plus(duration);
         }
 
+        /**
+         * 返回测试时钟的固定 UTC 时区，避免本地时区影响时间边界。
+         */
         @Override
         public ZoneId getZone() {
             return ZoneId.of("UTC");
         }
 
+        /**
+         * 按测试时钟支持的时区契约返回时钟，保持可控时间点不变。
+         */
         @Override
         public Clock withZone(ZoneId zone) {
             if (!ZoneId.of("UTC").equals(zone)) {
@@ -1930,22 +2247,34 @@ class Milestone5RealInfrastructureAcceptanceTest {
             return this;
         }
 
+        /**
+         * 返回测试时钟当前时间，供租约及重试场景确定性推进。
+         */
         @Override
         public Instant instant() {
             return instant;
         }
     }
 
+    /**
+     * 可控制资格结果及依赖故障的测试替身，记录调用用于验证事务外预检和竞争处理。
+     */
     private static final class AcceptanceEligibility
             implements WorkflowApproverEligibilityChecker {
 
         private final Map<UUID, CyclicBarrier> barriers = new ConcurrentHashMap<>();
 
+        /**
+         * 为指定场景安装并发屏障，确保多个请求在被测竞争点同步相遇。
+         */
         private void installBarrier(UUID ticketId, int parties) {
             barriers.put(ticketId, new CyclicBarrier(parties,
                     () -> barriers.remove(ticketId)));
         }
 
+        /**
+         * 返回可配置的测试审批资格结果并记录调用次数，供预检、依赖失败及并发路径断言。
+         */
         @Override
         public boolean isEligibleApprover(UUID tenantId, UUID approverUserId) {
             assertThat(approverUserId).isEqualTo(APPROVER_1);
@@ -1962,11 +2291,20 @@ class Milestone5RealInfrastructureAcceptanceTest {
         }
     }
 
+    /**
+     * 工作流内部协作类型，组合当前处理所需的结构与行为，供所在用例的依赖链调用。
+     */
     @FunctionalInterface
     private interface CheckedOperation {
+        /**
+         * 执行可抛受检异常的验收步骤，使故障场景能通过统一调用包装运行。
+         */
         void run() throws Exception;
     }
 
+    /**
+     * 读取注入时钟并截断至数据库可保存的精度，便于持久化比较及测试。
+     */
     private static Instant now() {
         return Instant.now().truncatedTo(ChronoUnit.MICROS);
     }

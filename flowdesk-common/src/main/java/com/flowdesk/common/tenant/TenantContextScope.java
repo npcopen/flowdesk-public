@@ -22,6 +22,9 @@ public final class TenantContextScope implements AutoCloseable {
     private final TenantContext previous;
     private final TenantContext context;
 
+    /**
+     * 保存当前线程原上下文并绑定新上下文，关闭作用域时可以恢复外层状态。
+     */
     private TenantContextScope(TenantContext context) {
         this.previous = TenantContextHolder.currentOrNull();
         this.context = Objects.requireNonNull(context, "context");

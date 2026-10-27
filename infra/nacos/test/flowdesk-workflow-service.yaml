@@ -1,0 +1,39 @@
+# Namespace: flowdesk-test | Group: FLOWDESK_GROUP | Data ID: flowdesk-workflow-service.yaml
+# Startup-loaded configuration; restart instances after publishing a change.
+# Secrets and key/token file paths are supplied by the deployment, never here.
+spring:
+  datasource:
+    url: ${FLOWDESK_WORKFLOW_DB_URL:jdbc:mysql://mysql:3306/flowdesk_workflow?sslMode=PREFERRED&allowPublicKeyRetrieval=true&connectionTimeZone=UTC&forceConnectionTimeZoneToSession=true}
+    username: fd_workflow_runtime
+  cloud:
+    stream:
+      rocketmq:
+        binder:
+          name-server: ${FLOWDESK_ROCKETMQ_NAME_SERVER:rocketmq-nameserver:9876}
+flowdesk:
+  configuration:
+    service-name: flowdesk-workflow-service
+  health:
+    database-required: true
+    migration-required: true
+  workflow:
+    notification:
+      outbox:
+        publisher:
+          enabled: true
+          name-server: ${FLOWDESK_ROCKETMQ_NAME_SERVER:rocketmq-nameserver:9876}
+          poll-interval-millis: 500
+    outbox:
+      publisher:
+        enabled: true
+        name-server: ${FLOWDESK_ROCKETMQ_NAME_SERVER:rocketmq-nameserver:9876}
+    iam:
+      base-url: ${FLOWDESK_WORKFLOW_IAM_BASE_URL:}
+      connect-timeout: PT2S
+      read-timeout: PT3S
+    start:
+      entry:
+        enabled: true
+      consumer:
+        enabled: true
+        name-server: ${FLOWDESK_ROCKETMQ_NAME_SERVER:rocketmq-nameserver:9876}

@@ -1,3 +1,4 @@
+/** 前后端 API 契约的 TypeScript 类型：统一响应、业务实体、分页和异步状态。 */
 export type RoleCode =
   | 'REQUESTER'
   | 'AGENT'
@@ -107,6 +108,12 @@ export interface AuthSession {
   tokenType: 'Bearer' | string
   expiresAt: string
   user: CurrentUser
+}
+
+export interface UserIdentity {
+  userId: string
+  username: string
+  displayName: string
 }
 
 export interface UserSummary {
@@ -474,11 +481,19 @@ export interface ListResult<T> {
 
 export type FeatureMode = 'disabled' | 'mock' | 'api'
 
+/**
+ * 将未知输入收窄为受支持的角色码。
+ * 仅接受约定角色白名单，非法类型或未知值返回空值。
+ */
 export function asRoleCode(value: unknown): RoleCode | null {
   const allowed: RoleCode[] = ['REQUESTER', 'AGENT', 'APPROVER', 'SERVICE_DESK_ADMIN', 'TENANT_ADMIN']
   return typeof value === 'string' && allowed.includes(value as RoleCode) ? value as RoleCode : null
 }
 
+/**
+ * 将未知枚举值转换为可显示字符串。
+ * 有效非空字符串原样返回，其他输入统一使用未知占位。
+ */
 export function displayEnum(value: unknown): string {
   return typeof value === 'string' && value.length > 0 ? value : 'UNKNOWN'
 }

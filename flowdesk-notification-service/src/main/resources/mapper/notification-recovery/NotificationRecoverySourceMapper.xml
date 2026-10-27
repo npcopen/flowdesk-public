@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+  通知恢复专用数据源的源消息读取接口。
+  按租户与收件箱标识读取包含原始消息体的恢复数据，可在重放事务中加行锁。
+-->
+<mapper namespace="com.flowdesk.notification.recovery.mapper.NotificationRecoverySourceMapper">
+  <!-- 将查询列按构造参数映射为 NotificationInboxRow，明确字段、Java 类型及构造顺序，供相应查询复用。 -->
+  <resultMap id="inbox" type="com.flowdesk.notification.model.NotificationInboxRow">
+    <constructor>
+      <arg name="inboxId" column="inbox_id" javaType="java.util.UUID"/>
+      <arg name="producerService" column="producer_service" javaType="java.lang.String"/>
+      <arg name="messageId" column="message_id" javaType="java.util.UUID"/>
+      <arg name="messageKey" column="message_key" javaType="java.lang.String"/>
+      <arg name="businessIntentKey" column="business_intent_key" javaType="[B"/>
+      <arg name="publicationKey" column="publication_key" javaType="[B"/>
+      <arg name="contractRef" column="contract_ref" javaType="java.lang.String"/>
+      <arg name="contractVersion" column="contract_version" javaType="_int"/>
+      <arg name="aggregateType" column="aggregate_type" javaType="java.lang.String"/>
+      <arg name="aggregateId" column="aggregate_id" javaType="java.util.UUID"/>
+      <arg name="bodySha256" column="body_sha256" javaType="[B"/>
+      <arg name="bodyBytes" column="body_bytes" javaType="[B"/>
+      <arg name="topic" column="topic" javaType="java.lang.String"/>
+      <arg name="consumerGroup" column="consumer_group" javaType="java.lang.String"/>
+      <arg name="logicalDestination" column="logical_destination" javaType="java.lang.String"/>
+      <arg name="direction" column="direction" javaType="java.lang.String"/>
+      <arg name="correlationId" column="correlation_id" javaType="java.util.UUID"/>
+      <arg name="causationId" column="causation_id" javaType="java.util.UUID"/>
+      <arg name="occurredAt" column="occurred_at" javaType="java.time.Instant"/>
+      <arg name="status" column="status" javaType="java.lang.String"/>
+      <arg name="resultType" column="result_type" javaType="java.lang.String"/>
+      <arg name="resultId" column="result_id" javaType="java.util.UUID"/>
+      <arg name="attemptCount" column="attempt_count" javaType="_int"/>
+      <arg name="lastErrorCode" column="last_error_code" javaType="java.lang.String"/>
+      <arg name="firstReceivedAt" column="first_received_at" javaType="java.time.Instant"/>
+      <arg name="lastAttemptAt" column="last_attempt_at" javaType="java.time.Instant"/>
+      <arg name="processedAt" column="processed_at" javaType="java.time.Instant"/>
+      <arg name="lockVersion" column="lock_version" javaType="_long"/>
+      <arg name="createdAt" column="created_at" javaType="java.time.Instant"/>
+      <arg name="updatedAt" column="updated_at" javaType="java.time.Instant"/>
+    </constructor>
+  </resultMap>
+  <!-- 使用恢复专用数据源按租户及收件箱读取含 body_bytes 的完整消息，供校验及重放；lock 为 true 时加行锁。 -->
+  <select id="findSource" resultMap="inbox">
+SELECT inbox_id,producer_service,message_id,message_key,business_intent_key,publication_key,contract_ref,contract_version,aggregate_type,aggregate_id,body_sha256,body_bytes,topic,consumer_group,logical_destination,direction,correlation_id,causation_id,occurred_at,status,result_type,result_id,attempt_count,last_error_code,first_received_at,last_attempt_at,processed_at,lock_version,created_at,updated_at FROM inbox_message WHERE tenant_id=#{tenantId} AND inbox_id=#{inboxId}<if test="lock"> FOR UPDATE</if>
+  </select>
+</mapper>

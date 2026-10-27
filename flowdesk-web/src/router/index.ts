@@ -1,3 +1,4 @@
+/** 定义按需加载的页面路由，并依据登录状态与有效权限执行导航守卫。 */
 import {
   createRouter,
   createWebHistory,
@@ -126,6 +127,11 @@ const router = createRouter({
   ],
 });
 
+// 路由可要求全部权限或任选其一；这里只控制页面入口，资源授权仍由后端执行。
+/**
+ * 根据路由声明检查当前用户的功能访问权限。
+ * 未声明权限时允许访问，其他情况按任一或全部权限规则判断；资源级授权仍由后端执行。
+ */
 function isAllowed(
   route: RouteLocationNormalized,
   auth: ReturnType<typeof useAuthStore>,
@@ -137,6 +143,7 @@ function isAllowed(
     : permissions.every((permission) => auth.can(permission));
 }
 
+// 未登录时保留目标地址，登录成功后可返回原页面。
 router.beforeEach(async (to) => {
   const auth = useAuthStore();
   if (to.meta.requiresAuth && !auth.isAuthenticated) {

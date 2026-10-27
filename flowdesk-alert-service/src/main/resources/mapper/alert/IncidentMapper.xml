@@ -1,0 +1,108 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<!--
+  告警事件聚合与周期实例持久化接口，维护活动状态、代次、计数和恢复时间。
+  PreTrust 查询显式限定租户，普通入口校验租户上下文，并通过行锁或版本协调并发。
+-->
+<mapper namespace="com.flowdesk.alert.mapper.IncidentMapper">
+  <!-- 按租户及指纹读取 ACTIVE 实例和首事件周期，始终使用 FOR UPDATE 串行处理同一活动实例。 -->
+  <select id="sqlFindActiveForUpdatePreTrust" resultType="com.flowdesk.alert.model.IncidentCycleRow">
+SELECT n.incident_id,n.fingerprint,n.generation_no,n.status,n.event_count,
+                       n.opened_at,n.last_event_at,n.recovered_at,n.summary,n.lock_version,
+                       n.created_at,n.updated_at,
+                       (SELECT e.alert_cycle_ref FROM alert_event e
+                        WHERE e.tenant_id=n.tenant_id
+                          AND e.alert_event_id=n.first_event_id) AS cycle_ref
+                FROM incident n
+                WHERE n.tenant_id=#{tenantId} AND n.fingerprint=#{fingerprint} AND n.status='ACTIVE'
+                FOR UPDATE
+  </select>
+  <!-- 为先到达的恢复事件创建 RECOVERED 实例，首末及恢复事件均指向该事件，计数为 1，版本为 0。 -->
+  <insert id="sqlInsertRecoveredIncident">
+INSERT INTO incident (tenant_id,incident_id,fingerprint,generation_no,status,
+                  first_event_id,last_event_id,event_count,opened_at,last_event_at,recovered_at,
+                  recovery_event_id,recovery_review_state,summary,lock_version,created_at,created_by_type,created_by_id,
+                  updated_at,updated_by_type,updated_by_id)
+                VALUES (#{tenantId},#{incidentId},#{fingerprint},#{generation},'RECOVERED',#{eventId},#{eventId},1,#{now},#{now},#{now},#{eventId},'NONE',#{summary},0,#{now},'INTEGRATION',#{integrationId},#{now},'INTEGRATION',#{integrationId})
+  </insert>
+  <!-- 判断租户内实例是否已恢复且首事件本身为 RESOLVED，以识别仅由恢复事件建立的实例。 -->
+  <select id="sqlIsRecoveryOnlyIncident" resultType="boolean">
+SELECT CASE WHEN COUNT(*) &gt; 0 THEN TRUE ELSE FALSE END FROM incident i JOIN alert_event e
+                  ON e.tenant_id=i.tenant_id AND e.alert_event_id=i.first_event_id
+                WHERE i.tenant_id=#{tenantId} AND i.incident_id=#{incidentId} AND i.status='RECOVERED'
+                  AND e.event_type='RESOLVED'
+  </select>
+  <!-- 统计指定租户当前 ACTIVE 事件实例数量。 -->
+  <select id="sqlCountActiveIncidents" resultType="long">
+SELECT COUNT(*) FROM incident WHERE tenant_id = #{tenantId} AND status = 'ACTIVE'
+  </select>
+  <!-- 按租户、指纹及首事件周期查询实例，按代次及实例标识排序，供判断该周期是否已经建立实例。 -->
+  <select id="sqlFindByCyclePreTrust" resultType="com.flowdesk.alert.model.IncidentCycleRow">
+SELECT n.incident_id,n.fingerprint,n.generation_no,n.status,n.event_count,
+                       n.opened_at,n.last_event_at,n.recovered_at,n.summary,n.lock_version,
+                       n.created_at,n.updated_at,e.alert_cycle_ref AS cycle_ref
+                FROM incident n JOIN alert_event e
+                  ON e.tenant_id=n.tenant_id AND e.alert_event_id=n.first_event_id
+                WHERE n.tenant_id=#{tenantId} AND n.fingerprint=#{fingerprint} AND e.alert_cycle_ref=#{cycleRef}
+                ORDER BY n.generation_no,n.incident_id
+  </select>
+  <!-- 读取同租户及指纹的最大代次加 1，无记录时从 1 开始；本查询自身不加锁。 -->
+  <select id="sqlNextGenerationPreTrust" resultType="int">
+SELECT COALESCE(MAX(generation_no),0)+1 FROM incident
+                WHERE tenant_id=#{tenantId} AND fingerprint=#{fingerprint}
+  </select>
+  <!-- 为新周期创建 ACTIVE 实例，初始化首末事件、计数、时间及版本，记录监控集成创建主体。 -->
+  <insert id="sqlInsertIncident">
+INSERT INTO incident
+                  (tenant_id,incident_id,fingerprint,generation_no,status,first_event_id,
+                   last_event_id,event_count,opened_at,last_event_at,recovered_at,
+                   recovery_event_id,recovery_review_state,summary,lock_version,created_at,
+                   created_by_type,created_by_id,updated_at,updated_by_type,updated_by_id)
+                VALUES (#{tenantId},#{incidentId},#{fingerprint},#{generation},'ACTIVE',#{eventId},#{eventId},1,#{now},#{now},NULL,NULL,'NONE',#{summary},0,#{now},
+                        'INTEGRATION',#{integrationId},#{now},'INTEGRATION',#{integrationId})
+  </insert>
+  <!-- 将 FIRING 归并到 ACTIVE 实例，增加计数、维护不倒退的末次时间并刷新摘要，以 active 的实例标识及版本控制并发。 -->
+  <update id="sqlAggregateFiring">
+UPDATE incident SET last_event_id=#{eventId},event_count=event_count+1,
+                    last_event_at=GREATEST(last_event_at,#{now}),
+                    summary=COALESCE(#{summary},summary),lock_version=lock_version+1,
+                    updated_at=#{now},updated_by_type='INTEGRATION',updated_by_id=#{integrationId}
+                WHERE tenant_id=#{tenantId} AND incident_id=#{active.incidentId} AND status='ACTIVE' AND lock_version=#{active.lockVersion}
+  </update>
+  <!-- 以恢复事件将 ACTIVE 实例转为 RECOVERED，更新末次及恢复时间并增加计数，仅在 active 预期版本匹配时生效。 -->
+  <update id="sqlRecoverIncident">
+UPDATE incident SET status='RECOVERED',last_event_id=#{eventId},event_count=event_count+1,
+                    last_event_at=GREATEST(last_event_at,#{now}),
+                    recovered_at=GREATEST(last_event_at,#{now}),recovery_event_id=#{eventId},
+                    summary=COALESCE(#{summary},summary),lock_version=lock_version+1,
+                    updated_at=#{now},updated_by_type='INTEGRATION',updated_by_id=#{integrationId}
+                WHERE tenant_id=#{tenantId} AND incident_id=#{active.incidentId} AND status='ACTIVE' AND lock_version=#{active.lockVersion}
+  </update>
+  <!-- 按租户及实例标识读取聚合详情和首事件周期，lock 为 true 时追加 FOR UPDATE。 -->
+  <select id="sqlFindIncident" resultType="com.flowdesk.alert.model.IncidentCycleRow">
+SELECT n.incident_id,n.fingerprint,n.generation_no,n.status,n.event_count,
+                       n.opened_at,n.last_event_at,n.recovered_at,n.summary,n.lock_version,
+                       n.created_at,n.updated_at,
+                       (SELECT e.alert_cycle_ref FROM alert_event e
+                        WHERE e.tenant_id=n.tenant_id
+                          AND e.alert_event_id=n.first_event_id) AS cycle_ref
+                FROM incident n
+                WHERE n.tenant_id=#{tenantId} AND n.incident_id=#{incidentId}
+<if test="lock">FOR UPDATE</if>
+  </select>
+
+  <!-- 排序列白名单：-openedAt 使用开启时间，其余使用末次事件时间，供排序及游标条件复用。 -->
+  <sql id="incidentSort"><choose><when test="sort == '-openedAt'">n.opened_at</when><otherwise>n.last_event_at</otherwise></choose></sql>
+  <!-- 按状态、指纹、工单关联及开启时间筛选并关联首事件周期，以选定时间及实例标识进行稳定游标分页并限制条数。 -->
+  <select id="sqlListIncidents" resultType="com.flowdesk.alert.model.IncidentCycleRow">
+    SELECT n.incident_id,n.fingerprint,n.generation_no,n.status,n.event_count,n.opened_at,n.last_event_at,n.recovered_at,n.summary,n.lock_version,n.created_at,n.updated_at,e.alert_cycle_ref AS cycle_ref
+    FROM incident n JOIN alert_event e ON e.tenant_id=n.tenant_id AND e.alert_event_id=n.first_event_id LEFT JOIN incident_ticket_link l ON l.tenant_id=n.tenant_id AND l.incident_id=n.incident_id WHERE n.tenant_id=#{tenantId}
+    <if test="filter.status != null">AND n.status=#{filter.status}</if>
+    <if test="filter.fingerprint != null">AND n.fingerprint=#{filter.fingerprint}</if>
+    <if test="filter.ticketLinkStatus != null">AND l.status=#{filter.ticketLinkStatus}</if>
+    <if test="filter.openedFrom != null">AND n.opened_at &gt;= #{filter.openedFrom}</if>
+    <if test="filter.openedTo != null">AND n.opened_at &lt;= #{filter.openedTo}</if>
+    <if test="cursorTime != null">AND (<include refid="incidentSort"/> <choose><when test="sort == 'lastEventAt'">&gt;</when><otherwise>&lt;</otherwise></choose> #{cursorTime} OR (<include refid="incidentSort"/>=#{cursorTime} AND n.incident_id <choose><when test="sort == 'lastEventAt'">&gt;</when><otherwise>&lt;</otherwise></choose> #{cursorId}))</if>
+    ORDER BY <include refid="incidentSort"/> <choose><when test="sort == 'lastEventAt'">ASC</when><otherwise>DESC</otherwise></choose>,n.incident_id <choose><when test="sort == 'lastEventAt'">ASC</when><otherwise>DESC</otherwise></choose> LIMIT #{limit}
+  </select>
+</mapper>

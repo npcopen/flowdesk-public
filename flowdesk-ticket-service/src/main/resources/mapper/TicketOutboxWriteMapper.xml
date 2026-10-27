@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper
+  PUBLIC '-//mybatis.org//DTD Mapper 3.0//EN'
+  'https://mybatis.org/dtd/mybatis-3-mapper.dtd'>
+<!--
+  工单事务消息写入接口，保存待发布消息并查询通知发布记录。
+  语句与同名 Java Mapper 方法对应；租户参数、状态条件和并发版本共同限定数据访问。
+-->
+<mapper namespace="com.flowdesk.ticket.mapper.TicketOutboxWriteMapper">
+  <!--
+    保存待发布的事务消息，保留消息体及摘要、发布键、业务意图键和链路信息，初始状态为 PENDING。
+  -->
+  <insert id="insertOutboxEvent">
+    INSERT INTO outbox_event
+  (tenant_id, outbox_id, message_id, publication_key, business_intent_key,
+   aggregate_type, aggregate_id, contract_ref, contract_version, body_bytes,
+   body_sha256, correlation_id, causation_id, status, attempt_count,
+   next_attempt_at, locked_by, locked_at, last_error_code,
+   broker_confirmed_at, lock_version,
+   created_at, created_by_type, created_by_id,
+   updated_at, updated_by_type, updated_by_id)
+VALUES (#{tenantId}, #{outboxId}, #{messageId}, #{publicationKey}, #{businessIntentKey}, #{aggregateType}, #{aggregateId}, #{contractRef}, #{contractVersion}, #{bodyBytes}, #{bodySha256}, #{correlationId}, #{causationId}, 'PENDING', 0,
+        #{createdAt}, NULL, NULL, NULL, NULL, 0,
+        #{createdAt}, 'SERVICE', NULL, #{createdAt}, 'SERVICE', NULL)
+  </insert>
+  <!--
+    统计租户内发布键和来源 ID 匹配的 NOTIFICATION_REQUEST 记录，用于通知发布幂等判断。
+  -->
+  <select id="countNotificationPublications" resultType="long">SELECT COUNT(*) FROM outbox_event WHERE tenant_id=#{tenantId} AND publication_key=#{publicationKey} AND aggregate_type='NOTIFICATION_REQUEST' AND aggregate_id=#{sourceRefId}</select>
+</mapper>

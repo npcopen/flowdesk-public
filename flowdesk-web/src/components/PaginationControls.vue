@@ -1,4 +1,5 @@
 <script setup lang="ts">
+/** 只负责发出上一页、下一页事件，游标历史由使用它的页面维护。 */
 import { ArrowLeft, ArrowRight } from "lucide-vue-next";
 defineProps<{
   hasNext: boolean;

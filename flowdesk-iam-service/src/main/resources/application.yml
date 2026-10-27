@@ -13,6 +13,12 @@ spring:
       fail-on-unknown-properties: true
   cloud:
     nacos:
+      # No-profile local development and unit tests do not require remote config.
+      # Managed dev/test/prod profiles explicitly enable required Nacos imports.
+      config:
+        enabled: false
+        import-check:
+          enabled: false
       discovery:
         server-addr: ${FLOWDESK_NACOS_SERVER_ADDR:127.0.0.1:8848}
         namespace: ${FLOWDESK_NACOS_NAMESPACE:}
@@ -46,3 +52,11 @@ flowdesk:
       refresh-interval: ${FLOWDESK_SERVICE_JWT_ROTATION_INTERVAL:PT2M}
       output-directory: ${FLOWDESK_IAM_SERVICE_JWT_OUTPUT_DIRECTORY:.data/service-tokens}
       mappings: ${FLOWDESK_IAM_SERVICE_JWT_MAPPINGS:}
+
+mybatis:
+  mapper-locations: classpath*:mapper/**/*.xml
+  type-handlers-package: com.flowdesk.common.mybatis
+  configuration:
+    map-underscore-to-camel-case: true
+    local-cache-scope: STATEMENT
+    cache-enabled: false

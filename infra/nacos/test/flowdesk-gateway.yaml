@@ -1,0 +1,14 @@
+# Namespace: flowdesk-test | Group: FLOWDESK_GROUP | Data ID: flowdesk-gateway.yaml
+# Startup-loaded configuration; restart instances after publishing a change.
+# Secrets and key/token file paths are supplied by the deployment, never here.
+flowdesk:
+  configuration:
+    service-name: flowdesk-gateway
+  gateway:
+    webhook-require-tls: true
+    routes:
+      iam: lb://flowdesk-iam-service
+      ticket: lb://flowdesk-ticket-service
+      workflow: lb://flowdesk-workflow-service
+      alert: lb://flowdesk-alert-service
+      notification: lb://flowdesk-notification-service

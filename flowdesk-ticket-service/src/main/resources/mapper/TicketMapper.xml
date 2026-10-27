@@ -1,0 +1,264 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper
+  PUBLIC '-//mybatis.org//DTD Mapper 3.0//EN'
+  'https://mybatis.org/dtd/mybatis-3-mapper.dtd'>
+<!--
+  工单主表持久化接口，覆盖创建、查询、状态流转和处理人变更。
+  语句与同名 Java Mapper 方法对应；租户参数、状态条件和并发版本共同限定数据访问。
+-->
+<mapper namespace="com.flowdesk.ticket.mapper.TicketMapper">
+  <!--
+    将查询列按构造参数映射为 TicketRow，参数顺序、字段别名及类型须与对应模型一致。 UUID 字段通过二进制类型处理器转换。
+  -->
+  <resultMap id="TicketRow" type="com.flowdesk.ticket.model.TicketRow">
+    <constructor>
+      <arg name="ticketId" column="ticket_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="ticketNo" column="ticket_no" javaType="java.lang.String"/>
+      <arg name="creationIntentKey" column="creation_intent_key" javaType="[B"/>
+      <arg name="originType" column="origin_type" javaType="java.lang.String"/>
+      <arg name="catalogItemId" column="catalog_item_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="requesterUserId" column="requester_user_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="previousAttemptTicketId" column="previous_attempt_ticket_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="subject" column="subject" javaType="java.lang.String"/>
+      <arg name="description" column="description" javaType="java.lang.String"/>
+      <arg name="status" column="status" javaType="java.lang.String"/>
+      <arg name="assigneeUserId" column="assignee_user_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="workflowDefinitionId" column="workflow_definition_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="workflowVersionId" column="workflow_version_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg name="workflowVersionNo" column="workflow_version_no" javaType="java.lang.Integer"/>
+      <arg name="firstProcessableAt" column="first_processable_at" javaType="java.time.Instant"/>
+      <arg name="resolvedAt" column="resolved_at" javaType="java.time.Instant"/>
+      <arg name="closedAt" column="closed_at" javaType="java.time.Instant"/>
+      <arg name="lastReopenedAt" column="last_reopened_at" javaType="java.time.Instant"/>
+      <arg name="reopenCount" column="reopen_count" javaType="_int"/>
+      <arg name="lockVersion" column="lock_version" javaType="_long"/>
+      <arg name="createdAt" column="created_at" javaType="java.time.Instant"/>
+      <arg name="updatedAt" column="updated_at" javaType="java.time.Instant"/>
+    </constructor>
+  </resultMap>
+  <!--
+    按请求人、处理人或可见范围统计待审批、待分配、已分配和处理中的工单数。
+  -->
+  <select id="countPendingTickets" resultType="long">
+    <bind name="scopeId" value="actorId"/>
+    SELECT COUNT(*) FROM ticket t WHERE t.tenant_id = #{tenantId} AND t.status IN ('AWAITING_APPROVAL','PENDING_ASSIGNMENT','ASSIGNED','IN_PROGRESS')
+    <choose>
+      <when test="scope.name() == 'REQUESTER'">AND t.requester_user_id = #{scopeId}</when>
+      <when test="scope.name() == 'ASSIGNEE'">AND t.assignee_user_id = #{scopeId}</when>
+      <when test="scope.name() == 'VISIBLE'">AND (t.requester_user_id = #{scopeId} OR t.assignee_user_id = #{scopeId})</when>
+    </choose>
+  </select>
+  <!--
+    按租户和工单 ID 查询工单详情，包含状态、处理人、流程引用及锁版本。
+  -->
+  <select id="findTicket" resultMap="TicketRow">
+    SELECT t.ticket_id, t.ticket_no, t.creation_intent_key, t.origin_type,
+       t.catalog_item_id, t.requester_user_id, t.previous_attempt_ticket_id,
+       t.subject, t.description, t.status, t.assignee_user_id,
+       t.workflow_definition_id, t.workflow_version_id, t.workflow_version_no,
+       t.first_processable_at, t.resolved_at, t.closed_at, t.last_reopened_at,
+       t.reopen_count, t.lock_version, t.created_at, t.updated_at
+FROM ticket t
+WHERE t.tenant_id = #{tenantId} AND t.ticket_id = #{ticketId}
+  </select>
+  <!--
+    按租户和展示工单号查询工单详情。
+  -->
+  <select id="findTicketByNumber" resultMap="TicketRow">
+    SELECT t.ticket_id, t.ticket_no, t.creation_intent_key, t.origin_type,
+       t.catalog_item_id, t.requester_user_id, t.previous_attempt_ticket_id,
+       t.subject, t.description, t.status, t.assignee_user_id,
+       t.workflow_definition_id, t.workflow_version_id, t.workflow_version_no,
+       t.first_processable_at, t.resolved_at, t.closed_at, t.last_reopened_at,
+       t.reopen_count, t.lock_version, t.created_at, t.updated_at
+FROM ticket t
+WHERE t.tenant_id = #{tenantId} AND t.ticket_no = #{ticketNo}
+  </select>
+  <!--
+    读取并锁定指定工单，供事务内进行状态校验和后续写入。
+    查询使用 FOR UPDATE 行锁，应在调用方事务内执行。
+  -->
+  <select id="findTicketForUpdate" resultMap="TicketRow">
+    SELECT t.ticket_id, t.ticket_no, t.creation_intent_key, t.origin_type,
+       t.catalog_item_id, t.requester_user_id, t.previous_attempt_ticket_id,
+       t.subject, t.description, t.status, t.assignee_user_id,
+       t.workflow_definition_id, t.workflow_version_id, t.workflow_version_no,
+       t.first_processable_at, t.resolved_at, t.closed_at, t.last_reopened_at,
+       t.reopen_count, t.lock_version, t.created_at, t.updated_at
+FROM ticket t
+WHERE t.tenant_id = #{tenantId} AND t.ticket_id = #{ticketId} FOR UPDATE
+  </select>
+  <!--
+    按租户和创建意图键查询已有工单，供创建请求幂等校验使用。
+  -->
+  <select id="findTicketByCreationIntent" resultMap="TicketRow">
+    SELECT t.ticket_id, t.ticket_no, t.creation_intent_key, t.origin_type,
+       t.catalog_item_id, t.requester_user_id, t.previous_attempt_ticket_id,
+       t.subject, t.description, t.status, t.assignee_user_id,
+       t.workflow_definition_id, t.workflow_version_id, t.workflow_version_no,
+       t.first_processable_at, t.resolved_at, t.closed_at, t.last_reopened_at,
+       t.reopen_count, t.lock_version, t.created_at, t.updated_at
+FROM ticket t
+WHERE t.tenant_id = #{tenantId} AND t.creation_intent_key = #{creationIntentKey}
+  </select>
+  <!--
+    保存新工单并初始化终态时间、重开次数和锁版本；手工来源记录用户主体，其他来源记录服务主体。
+  -->
+  <insert id="insertTicket">
+    <bind name="actorType" value="originType == &quot;MANUAL&quot; ? &quot;USER&quot; : &quot;SERVICE&quot;"/>
+    <bind name="actorIdBytes" value="originType == &quot;MANUAL&quot; ? actorId : null"/>
+    INSERT INTO ticket
+  (tenant_id, ticket_id, ticket_no, creation_intent_key, origin_type,
+   catalog_item_id, requester_user_id, previous_attempt_ticket_id,
+   subject, description, status, assignee_user_id,
+   workflow_definition_id, workflow_version_id, workflow_version_no,
+   first_processable_at, resolved_at, closed_at, last_reopened_at,
+   reopen_count, terminal_at, lock_version,
+   created_at, created_by_type, created_by_id,
+   updated_at, updated_by_type, updated_by_id)
+VALUES (#{tenantId}, #{ticketId}, #{ticketNo}, #{creationIntentKey}, #{originType}, #{catalogItemId}, #{requesterUserId}, #{previousAttemptTicketId}, #{subject}, #{description}, #{status}, #{assigneeUserId}, #{workflowDefinitionId}, #{workflowVersionId}, #{workflowVersionNo}, #{firstProcessableAt}, NULL, NULL, NULL,
+        0, NULL, 0, #{now}, #{actorType}, #{actorIdBytes}, #{now}, #{actorType}, #{actorIdBytes})
+  </insert>
+  <!--
+    按预期锁版本设置处理人并将工单置为 ASSIGNED，同时记录操作人并递增版本。
+    WHERE 同时校验锁版本；受影响行数为 0 时，调用方需处理记录缺失或并发状态变化。
+  -->
+  <update id="updateTicketAssign">
+    UPDATE ticket
+SET status = 'ASSIGNED',
+    assignee_user_id = #{assigneeUserId},
+    lock_version = lock_version + 1,
+    updated_at = #{now},
+    updated_by_type = 'USER',
+    updated_by_id = #{actorId}
+WHERE tenant_id = #{tenantId} AND ticket_id = #{ticketId} AND lock_version = #{expectedLockVersion}
+  </update>
+  <!--
+    按预期锁版本将工单置为 IN_PROGRESS，记录受理操作人和更新时间。
+    WHERE 同时校验锁版本；受影响行数为 0 时，调用方需处理记录缺失或并发状态变化。
+  -->
+  <update id="updateTicketAccept">
+    UPDATE ticket
+SET status = 'IN_PROGRESS',
+    lock_version = lock_version + 1,
+    updated_at = #{now},
+    updated_by_type = 'USER',
+    updated_by_id = #{actorId}
+WHERE tenant_id = #{tenantId} AND ticket_id = #{ticketId} AND lock_version = #{expectedLockVersion}
+  </update>
+  <!--
+    按预期锁版本更换处理人为 newAssigneeUserId，并将状态设为 ASSIGNED。
+    WHERE 同时校验锁版本；受影响行数为 0 时，调用方需处理记录缺失或并发状态变化。
+  -->
+  <update id="updateTicketTransfer">
+    UPDATE ticket
+SET status = 'ASSIGNED',
+    assignee_user_id = #{newAssigneeUserId},
+    lock_version = lock_version + 1,
+    updated_at = #{now},
+    updated_by_type = 'USER',
+    updated_by_id = #{actorId}
+WHERE tenant_id = #{tenantId} AND ticket_id = #{ticketId} AND lock_version = #{expectedLockVersion}
+  </update>
+  <!--
+    按预期锁版本将工单置为 RESOLVED，仅在尚无解决时间时写入本次解决时间。
+    WHERE 同时校验锁版本；受影响行数为 0 时，调用方需处理记录缺失或并发状态变化。
+  -->
+  <update id="updateTicketResolve">
+    UPDATE ticket
+SET status = 'RESOLVED',
+    resolved_at = COALESCE(resolved_at, #{now}),
+    lock_version = lock_version + 1,
+    updated_at = #{now},
+    updated_by_type = 'USER',
+    updated_by_id = #{actorId}
+WHERE tenant_id = #{tenantId} AND ticket_id = #{ticketId} AND lock_version = #{expectedLockVersion}
+  </update>
+  <!--
+    按预期锁版本关闭工单，记录关闭时间与终态时间并递增版本。
+    WHERE 同时校验锁版本；受影响行数为 0 时，调用方需处理记录缺失或并发状态变化。
+  -->
+  <update id="updateTicketClose">
+    UPDATE ticket
+SET status = 'CLOSED',
+    closed_at = #{now},
+    terminal_at = #{now},
+    lock_version = lock_version + 1,
+    updated_at = #{now},
+    updated_by_type = 'USER',
+    updated_by_id = #{actorId}
+WHERE tenant_id = #{tenantId} AND ticket_id = #{ticketId} AND lock_version = #{expectedLockVersion}
+  </update>
+  <!--
+    按预期锁版本重开工单为 IN_PROGRESS，记录最近重开时间并累计重开次数。
+    WHERE 同时校验锁版本；受影响行数为 0 时，调用方需处理记录缺失或并发状态变化。
+  -->
+  <update id="updateTicketReopen">
+    UPDATE ticket
+SET status = 'IN_PROGRESS',
+    last_reopened_at = #{now},
+    reopen_count = reopen_count + 1,
+    lock_version = lock_version + 1,
+    updated_at = #{now},
+    updated_by_type = 'USER',
+    updated_by_id = #{actorId}
+WHERE tenant_id = #{tenantId} AND ticket_id = #{ticketId} AND lock_version = #{expectedLockVersion}
+  </update>
+  <!--
+    按可见范围、状态、来源、目录及创建时间筛选工单，以白名单排序字段和工单 ID 稳定分页，多取一条。
+  -->
+  <select id="findTickets" resultMap="TicketRow">
+    <bind name="pageSizePlusOne" value="pageSize + 1"/>
+    SELECT t.ticket_id, t.ticket_no, t.creation_intent_key, t.origin_type, t.catalog_item_id, t.requester_user_id, t.previous_attempt_ticket_id, t.subject, t.description, t.status, t.assignee_user_id, t.workflow_definition_id, t.workflow_version_id, t.workflow_version_no, t.first_processable_at, t.resolved_at, t.closed_at, t.last_reopened_at, t.reopen_count, t.lock_version, t.created_at, t.updated_at FROM ticket t WHERE t.tenant_id = #{tenantId}
+    <choose>
+      <when test="scope.name() == 'REQUESTER'">AND t.requester_user_id = #{scopeId}</when>
+      <when test="scope.name() == 'ASSIGNEE'">AND t.assignee_user_id = #{scopeId}</when>
+      <when test="scope.name() == 'VISIBLE'">AND (t.requester_user_id = #{scopeId} OR t.assignee_user_id = #{scopeId})</when>
+    </choose>
+    <if test="status != null">AND t.status = #{status}</if>
+    <if test="originType != null">AND t.origin_type = #{originType}</if>
+    <if test="catalogItemId != null">AND t.catalog_item_id = #{catalogItemId}</if>
+    <if test="createdFrom != null">AND t.created_at &gt;= #{createdFrom}</if>
+    <if test="createdTo != null">AND t.created_at &lt;= #{createdTo}</if>
+    <if test="cursorValue != null and cursorId != null">
+       AND (
+      <choose>
+        <when test="sortColumn == 'ticketNo'">t.ticket_no</when>
+        <when test="sortColumn == 'createdAt'">t.created_at</when>
+        <otherwise>t.updated_at</otherwise>
+      </choose>
+      <choose>
+        <when test="ascending">&gt;</when>
+        <otherwise>&lt;</otherwise>
+      </choose>
+       #{cursorValue} OR (
+      <choose>
+        <when test="sortColumn == 'ticketNo'">t.ticket_no</when>
+        <when test="sortColumn == 'createdAt'">t.created_at</when>
+        <otherwise>t.updated_at</otherwise>
+      </choose>
+       = #{cursorValue} AND t.ticket_id
+      <choose>
+        <when test="ascending">&gt;</when>
+        <otherwise>&lt;</otherwise>
+      </choose>
+       #{cursorId}))
+    </if>
+     ORDER BY
+    <choose>
+      <when test="sortColumn == 'ticketNo'">t.ticket_no</when>
+      <when test="sortColumn == 'createdAt'">t.created_at</when>
+      <otherwise>t.updated_at</otherwise>
+    </choose>
+    <choose>
+      <when test="ascending">ASC</when>
+      <otherwise>DESC</otherwise>
+    </choose>
+    , t.ticket_id
+    <choose>
+      <when test="ascending">ASC</when>
+      <otherwise>DESC</otherwise>
+    </choose>
+     LIMIT #{pageSizePlusOne}
+  </select>
+</mapper>

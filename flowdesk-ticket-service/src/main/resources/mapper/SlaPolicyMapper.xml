@@ -1,0 +1,100 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper
+  PUBLIC '-//mybatis.org//DTD Mapper 3.0//EN'
+  'https://mybatis.org/dtd/mybatis-3-mapper.dtd'>
+<!--
+  SLA 策略查询接口，提供租户内策略详情、启用策略和游标分页列表。
+  语句与同名 Java Mapper 方法对应；租户参数、状态条件和并发版本共同限定数据访问。
+-->
+<mapper namespace="com.flowdesk.ticket.mapper.SlaPolicyMapper">
+  <!--
+    将查询列按构造参数映射为 SlaPolicyRow，参数顺序、字段别名及类型须与对应模型一致。 UUID 字段通过二进制类型处理器转换。
+  -->
+  <resultMap id="SlaPolicyRow" type="com.flowdesk.ticket.model.SlaPolicyRow">
+    <constructor>
+      <arg column="sla_policy_id" javaType="java.util.UUID" typeHandler="com.flowdesk.common.mybatis.UuidBinaryTypeHandler"/>
+      <arg column="policy_code" javaType="java.lang.String"/>
+      <arg column="policy_name" javaType="java.lang.String"/>
+      <arg column="first_response_seconds" javaType="_long"/>
+      <arg column="resolution_seconds" javaType="_long"/>
+      <arg column="first_response_reminder_before_seconds" javaType="java.lang.Long"/>
+      <arg column="resolution_reminder_before_seconds" javaType="java.lang.Long"/>
+      <arg column="status" javaType="java.lang.String"/>
+      <arg column="lock_version" javaType="_long"/>
+    </constructor>
+  </resultMap>
+  <!--
+    根据 ascending 选择固定的 ASC 或 DESC，供排序字段及 ID 次序共用。
+  -->
+  <sql id="sortDirection">
+    <choose>
+      <when test="ascending">ASC</when>
+      <otherwise>DESC</otherwise>
+    </choose>
+  </sql>
+  <!--
+    根据排序方向选择游标比较符，保证后续页与当前排序方向一致。
+  -->
+  <sql id="cursorComparator">
+    <choose>
+      <when test="ascending">&gt;</when>
+      <otherwise>&lt;</otherwise>
+    </choose>
+  </sql>
+  <!--
+    从固定分支选择允许的排序列，避免将任意输入直接拼接为列名。
+  -->
+  <sql id="sortColumn">
+    <choose>
+      <when test="sortColumn == 'policyName'">policy_name</when>
+      <otherwise>policy_code</otherwise>
+    </choose>
+  </sql>
+  <!--
+    读取指定租户的 SLA 策略及响应、解决时限，不限制策略启用状态。
+  -->
+  <select id="findSlaPolicy" resultMap="SlaPolicyRow">
+    SELECT sla_policy_id, policy_code, policy_name, first_response_seconds,
+           resolution_seconds, first_response_reminder_before_seconds,
+           resolution_reminder_before_seconds, status, lock_version
+    FROM sla_policy
+    WHERE tenant_id = #{tenantId} AND sla_policy_id = #{slaPolicyId}
+  </select>
+  <!--
+    读取指定租户中状态为 ACTIVE 的 SLA 策略，供业务绑定有效策略。
+  -->
+  <select id="findActiveSlaPolicy" resultMap="SlaPolicyRow">
+    SELECT sla_policy_id, policy_code, policy_name, first_response_seconds,
+           resolution_seconds, first_response_reminder_before_seconds,
+           resolution_reminder_before_seconds, status, lock_version
+    FROM sla_policy
+    WHERE tenant_id = #{tenantId} AND sla_policy_id = #{slaPolicyId} AND status = 'ACTIVE'
+  </select>
+  <!--
+    按可选状态筛选策略，以名称或编码和策略 ID 组成游标分页，多取一条判断下一页。
+  -->
+  <select id="findSlaPolicies" resultMap="SlaPolicyRow">
+    <bind name="limit" value="pageSize + 1"/>
+    SELECT sla_policy_id, policy_code, policy_name, first_response_seconds, resolution_seconds,
+           first_response_reminder_before_seconds, resolution_reminder_before_seconds, status, lock_version
+    FROM sla_policy WHERE tenant_id = #{tenantId}
+    <if test="status != null">AND status = #{status}</if>
+    <if test="cursorValue != null and cursorId != null">
+      AND (
+      <include refid="sortColumn"/>
+      <include refid="cursorComparator"/>
+       #{cursorValue}
+        OR (
+      <include refid="sortColumn"/>
+       = #{cursorValue} AND sla_policy_id
+      <include refid="cursorComparator"/>
+       #{cursorId}))
+    </if>
+    ORDER BY
+    <include refid="sortColumn"/>
+    <include refid="sortDirection"/>
+    , sla_policy_id
+    <include refid="sortDirection"/>
+    LIMIT #{limit}
+  </select>
+</mapper>

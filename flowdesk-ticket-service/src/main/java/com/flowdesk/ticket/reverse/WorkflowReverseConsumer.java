@@ -20,39 +20,51 @@ import java.time.temporal.ChronoUnit;
 import java.util.Objects;
 import java.util.UUID;
 
-/** Strict Ticket entry for instance confirmation and approval finalization. */
+/** 工单侧流程实例确认与审批终结入口，校验关联事实并在本地事务内收敛工单及副作用。 */
 public final class WorkflowReverseConsumer {
     private static final Logger LOG = LoggerFactory.getLogger(WorkflowReverseConsumer.class);
     private final WorkflowReverseEnvelopeGuard guard;
-    private final WorkflowReverseInboxRepository repository;
+    private final WorkflowReverseInboxService repository;
     private final TransactionTemplate transactions;
     private final Clock clock;
     private final TicketNotificationOutboxWriter notificationWriter;
     private final SlaIndexProjection slaIndexProjection;
 
+    /**
+     * 构造工作流反向结果组件并保存调用依赖。
+     */
     WorkflowReverseConsumer(WorkflowReverseEnvelopeGuard guard,
-                            WorkflowReverseInboxRepository repository,
+                            WorkflowReverseInboxService repository,
                             PlatformTransactionManager transactionManager) {
         this(guard, repository, transactionManager, Clock.systemUTC(), null, null);
     }
 
+    /**
+     * 构造工作流反向结果组件并保存调用依赖；支持注入时钟以控制时间边界。
+     */
     WorkflowReverseConsumer(WorkflowReverseEnvelopeGuard guard,
-                            WorkflowReverseInboxRepository repository,
+                            WorkflowReverseInboxService repository,
                             PlatformTransactionManager transactionManager,
                             Clock clock) {
         this(guard, repository, transactionManager, clock, null, null);
     }
 
+    /**
+     * 构造工作流反向结果组件并保存调用依赖；支持注入时钟以控制时间边界。
+     */
     WorkflowReverseConsumer(WorkflowReverseEnvelopeGuard guard,
-                            WorkflowReverseInboxRepository repository,
+                            WorkflowReverseInboxService repository,
                             PlatformTransactionManager transactionManager,
                             Clock clock,
                             TicketNotificationOutboxWriter notificationWriter) {
         this(guard, repository, transactionManager, clock, notificationWriter, null);
     }
 
+    /**
+     * 构造工作流反向结果组件并保存调用依赖；支持注入时钟以控制时间边界。
+     */
     WorkflowReverseConsumer(WorkflowReverseEnvelopeGuard guard,
-                            WorkflowReverseInboxRepository repository,
+                            WorkflowReverseInboxService repository,
                             PlatformTransactionManager transactionManager,
                             Clock clock,
                             TicketNotificationOutboxWriter notificationWriter,
@@ -65,6 +77,7 @@ public final class WorkflowReverseConsumer {
         this.slaIndexProjection = slaIndexProjection;
     }
 
+    /** 先验证传输契约再建立可信租户上下文；数据库或事务暂时故障返回 RETRY。 */
     public WorkflowReverseConsumeResult consume(WorkflowReverseTransportMessage delivery) {
         final AcceptedWorkflowReverse message;
         try {
@@ -88,22 +101,20 @@ public final class WorkflowReverseConsumer {
         }
     }
 
+    /** 按消息身份去重，验证流程与工单关联后，统一提交业务变更、Inbox 终态和审计。 */
     private WorkflowReverseConsumeResult process(AcceptedWorkflowReverse message) {
-        WorkflowReverseInboxRepository.Duplicate duplicate = repository.findDuplicate(message, true);
+        com.flowdesk.ticket.model.reverse.Duplicate duplicate = repository.findDuplicate(message, true);
         Instant now = clock.instant().truncatedTo(ChronoUnit.MICROS);
-        if (duplicate.kind() == WorkflowReverseInboxRepository.DuplicateKind.TERMINAL) {
-            // A terminal Inbox is not proof that every deterministic business
-            // anchor committed.  A crash can leave the Inbox row ahead of the
-            // timeline, SLA, audit, or Notification Outbox rows.  Reconcile a
-            // successfully processed source before acknowledging the duplicate;
-            // rejected poison rows intentionally remain terminal and untouched.
+        if (duplicate.kind() == com.flowdesk.ticket.model.reverse.DuplicateKind.TERMINAL) {
+            // 终态 Inbox 不单独证明所有确定性业务锚点均已提交。
+            // 对 PROCESSED 消息再次投递时补核时间线、SLA、审计及通知 Outbox；已拒绝的非法消息保持终态。
             if (duplicate.inbox() != null
                     && "PROCESSED".equals(duplicate.inbox().status())) {
                 reconcileProcessedDuplicate(message, now);
             }
             return WorkflowReverseConsumeResult.ack("WORKFLOW_REVERSE_DUPLICATE");
         }
-        if (duplicate.kind() == WorkflowReverseInboxRepository.DuplicateKind.CONFLICT) {
+        if (duplicate.kind() == com.flowdesk.ticket.model.reverse.DuplicateKind.CONFLICT) {
             UUID target = duplicate.inbox().resultId() == null
                     ? message.ticketId() : duplicate.inbox().resultId();
             insertAuditOnce(message, target, "WORKFLOW_REVERSE_CONFLICT", "REJECTED",
@@ -112,11 +123,11 @@ public final class WorkflowReverseConsumer {
             return WorkflowReverseConsumeResult.ack(duplicate.conflictCode());
         }
 
-        WorkflowReverseInboxRepository.Aggregate aggregate = repository.findAggregate(message);
+        com.flowdesk.ticket.model.reverse.Aggregate aggregate = repository.findAggregate(message);
         String invalid = validateAggregate(message, aggregate, duplicate.kind() !=
-                WorkflowReverseInboxRepository.DuplicateKind.NONE);
+                com.flowdesk.ticket.model.reverse.DuplicateKind.NONE);
         if (invalid != null) {
-            if (duplicate.kind() == WorkflowReverseInboxRepository.DuplicateKind.RECOVERABLE) {
+            if (duplicate.kind() == com.flowdesk.ticket.model.reverse.DuplicateKind.RECOVERABLE) {
                 repository.rejectRecoveredInbox(message, duplicate.inbox(), invalid, now);
             }
             else {
@@ -128,21 +139,17 @@ public final class WorkflowReverseConsumer {
         }
 
         repository.establishLink(message, aggregate, now);
-        WorkflowReverseInboxRepository.FinalizationResult finalization =
-                WorkflowReverseInboxRepository.FinalizationResult.APPLIED;
+        com.flowdesk.ticket.model.reverse.FinalizationResult finalization =
+                com.flowdesk.ticket.model.reverse.FinalizationResult.APPLIED;
         if (message.binding().kind() == WorkflowReverseContract.Kind.APPROVAL_FINALIZED) {
             finalization = repository.finalizeTicket(message, aggregate, now);
-            // Both paths converge through deterministic effect identities.  A
-            // recovery request may observe the terminal Ticket state after the
-            // original transaction committed only part of its side effects, so
-            // ALREADY_APPLIED must still verify and fill each missing anchor.
+            // 首次处理与恢复均通过确定性的副作用身份收敛。
+            // 恢复可能看到工单已终结而副作用仍缺失，因此 ALREADY_APPLIED 也需逐一验证和补齐锚点。
             if ("PASSED".equals(message.outcome())) {
-                // SLA time starts when Ticket accepts the trusted terminal
-                // fact, never at the remote Workflow event timestamp. On an
-                // idempotent re-entry, reuse the persisted Ticket fact so a
-                // late duplicate cannot move its deadline forward.
+                // SLA 从工单侧接受可信终结事实时起算，不使用远端流程事件时间。
+                // 幂等重入复用已持久化起点，避免迟到的重复消息推迟截止时间。
                 Instant slaStartedAt = finalization
-                        == WorkflowReverseInboxRepository.FinalizationResult.APPLIED
+                        == com.flowdesk.ticket.model.reverse.FinalizationResult.APPLIED
                         ? now : aggregate.firstProcessableAt();
                 repository.insertSlaClocks(message, aggregate, slaStartedAt, now);
                 scheduleSlaIndexProjections(message);
@@ -150,7 +157,7 @@ public final class WorkflowReverseConsumer {
             repository.insertTimeline(message, now);
             writeRequesterNotification(message, aggregate, now);
         }
-        if (duplicate.kind() == WorkflowReverseInboxRepository.DuplicateKind.RECOVERABLE) {
+        if (duplicate.kind() == com.flowdesk.ticket.model.reverse.DuplicateKind.RECOVERABLE) {
             repository.completeRecoveredInbox(message, duplicate.inbox(), now);
         }
         else {
@@ -162,23 +169,24 @@ public final class WorkflowReverseConsumer {
         return WorkflowReverseConsumeResult.ack("WORKFLOW_REVERSE_PROCESSED");
     }
 
+    /**
+     * 核对已处理反向消息的关联事实，收敛状态而不重复业务副作用。
+     */
     private void reconcileProcessedDuplicate(AcceptedWorkflowReverse message, Instant now) {
-        WorkflowReverseInboxRepository.Aggregate aggregate = repository.findAggregate(message);
+        com.flowdesk.ticket.model.reverse.Aggregate aggregate = repository.findAggregate(message);
         String invalid = validateAggregate(message, aggregate, true);
         if (invalid != null) {
-            // A processed source must never be silently accepted against a
-            // different Ticket fact.  Returning a retry lets an operator repair
-            // the missing/corrupt anchor without manufacturing a new Inbox row.
+            // 已处理来源必须匹配原工单事实；缺失或损坏时返回重试，交由修复而不制造新的 Inbox。
             throw new IllegalStateException("Processed Workflow reverse source cannot be reconciled: "
                     + invalid);
         }
         repository.establishLink(message, aggregate, now);
         if (message.binding().kind() == WorkflowReverseContract.Kind.APPROVAL_FINALIZED) {
-            WorkflowReverseInboxRepository.FinalizationResult finalization =
+            com.flowdesk.ticket.model.reverse.FinalizationResult finalization =
                     repository.finalizeTicket(message, aggregate, now);
             if ("PASSED".equals(message.outcome())) {
                 Instant startedAt = finalization
-                        == WorkflowReverseInboxRepository.FinalizationResult.APPLIED
+                        == com.flowdesk.ticket.model.reverse.FinalizationResult.APPLIED
                         ? now : aggregate.firstProcessableAt();
                 repository.insertSlaClocks(message, aggregate, startedAt, now);
                 scheduleSlaIndexProjections(message);
@@ -191,12 +199,13 @@ public final class WorkflowReverseConsumer {
         insertAuditOnce(message, message.ticketId(), action, "SUCCEEDED", null, null, now);
     }
 
+    /** 审计 UUID 确定性派生；遇到并发重复插入时核对内容一致，不能只凭主键相同认定成功。 */
     private void insertAuditOnce(AcceptedWorkflowReverse message, UUID targetId,
                                  String action, String outcome, String reason,
                                  String errorCode, Instant now) {
-        UUID auditId = WorkflowReverseInboxRepository.auditId(message, action, targetId,
+        UUID auditId = WorkflowReverseIdentity.auditId(message, action, targetId,
                 outcome, reason, errorCode);
-        WorkflowReverseInboxRepository.Audit existing = repository.findAudit(message, auditId)
+        com.flowdesk.ticket.model.reverse.Audit existing = repository.findAudit(message, auditId)
                 .orElse(null);
         if (existing != null) {
             if (!repository.sameAudit(existing, auditId, targetId, action, outcome,
@@ -210,7 +219,7 @@ public final class WorkflowReverseConsumer {
                     reason, errorCode, now);
         }
         catch (org.springframework.dao.DuplicateKeyException duplicate) {
-            WorkflowReverseInboxRepository.Audit raced = repository.findAudit(message, auditId)
+            com.flowdesk.ticket.model.reverse.Audit raced = repository.findAudit(message, auditId)
                     .orElseThrow(() -> duplicate);
             if (!repository.sameAudit(raced, auditId, targetId, action, outcome,
                     reason, errorCode, message)) {
@@ -219,8 +228,11 @@ public final class WorkflowReverseConsumer {
         }
     }
 
+    /**
+     * 为申请人保存审批结果通知，重复消费沿用稳定发布身份。
+     */
     private void writeRequesterNotification(AcceptedWorkflowReverse message,
-                                             WorkflowReverseInboxRepository.Aggregate aggregate,
+                                             com.flowdesk.ticket.model.reverse.Aggregate aggregate,
                                              Instant now) {
         if (aggregate.requesterUserId() == null) {
             insertAuditOnce(message, message.ticketId(),
@@ -244,25 +256,31 @@ public final class WorkflowReverseConsumer {
                 : "你提交的工单审批未通过。";
         notificationWriter.write(message.tenantId(), TicketNotificationIntent.create(
                 message.tenantId(), aggregate.requesterUserId(), kind,
-                WorkflowReverseInboxRepository.finalizationEffectKey(message), "TICKET",
+                WorkflowReverseIdentity.finalizationEffectKey(message), "TICKET",
                 message.ticketId(), title, body,
                 message.correlationId(), message.messageId(), now));
     }
 
+    /**
+     * 为本次时钟安排提交后投影，使索引反映已落库事实。
+     */
     private void scheduleSlaIndexProjections(AcceptedWorkflowReverse message) {
         if (slaIndexProjection == null) {
             return;
         }
         slaIndexProjection.schedule(message.tenantId(),
-                WorkflowReverseInboxRepository.slaClockId(message.tenantId(), message.ticketId(),
+                WorkflowReverseIdentity.slaClockId(message.tenantId(), message.ticketId(),
                         "FIRST_RESPONSE"));
         slaIndexProjection.schedule(message.tenantId(),
-                WorkflowReverseInboxRepository.slaClockId(message.tenantId(), message.ticketId(),
+                WorkflowReverseIdentity.slaClockId(message.tenantId(), message.ticketId(),
                         "RESOLUTION"));
     }
 
+    /**
+     * 核对工单、启动意图与实例关联，拒绝冲突消息推进工单。
+     */
     private static String validateAggregate(AcceptedWorkflowReverse message,
-                                            WorkflowReverseInboxRepository.Aggregate aggregate,
+                                            com.flowdesk.ticket.model.reverse.Aggregate aggregate,
                                             boolean allowPostState) {
         if (aggregate == null || aggregate.startIntentKey() == null
                 || aggregate.linkStatus() == null || aggregate.requestedAt() == null) {
@@ -318,10 +336,16 @@ public final class WorkflowReverseConsumer {
         return null;
     }
 
+    /**
+     * 判断提醒提前量与时长关系是否无法形成合法提醒时间。
+     */
     private static boolean invalidReminder(Long reminder, Long duration) {
         return reminder != null && (reminder < 0 || reminder > duration);
     }
 
+    /**
+     * 从消息稳定身份派生 Inbox 标识，使重复投递命中同一接收记录。
+     */
     private static UUID inboxId(AcceptedWorkflowReverse message) {
         return IdempotencyCodec.uuidFromDigest(IdempotencyCodec.derivedKey(
                 "FD-WORKFLOW-REVERSE-INBOX-V1", message.tenantId(), message.messageId()));

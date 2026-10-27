@@ -9,10 +9,16 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.Map;
 
-/** Builds the frozen Ticket Notification envelope from persisted bytes. */
+/** 从已持久化的工单通知字节构造固定契约信封，重试复用同一消息身份和内容。 */
 final class TicketNotificationOutboxEnvelopeFactory {
+    /**
+     * 私有构造方法，阻止工具类实例化，调用方应使用静态入口。
+     */
     private TicketNotificationOutboxEnvelopeFactory() { }
-    static TicketNotificationOutboxMessage create(TicketNotificationOutboxRepository.Claimed row) {
+    /**
+     * 校验工单通知创建请求并保存事实，按接口约定处理幂等及版本条件。
+     */
+    static TicketNotificationOutboxMessage create(com.flowdesk.ticket.model.notification.Claimed row) {
         if (!NotificationEventContract.TICKET.contractRef().equals(row.contractRef())
                 || row.contractVersion() != NotificationEventContract.VERSION
                 || !"NOTIFICATION_REQUEST".equals(row.aggregateType())) {
@@ -36,5 +42,12 @@ final class TicketNotificationOutboxEnvelopeFactory {
         return new TicketNotificationOutboxMessage(NotificationEventContract.TICKET.topic(),
                 row.messageId().toString(), body, properties);
     }
-    static final class InvalidContract extends RuntimeException { InvalidContract(String message) { super(message); } }
+    /**
+     * 持久化消息契约异常，发布器据此进入可诊断的恢复状态。
+     */
+    static final class InvalidContract extends RuntimeException {
+        /**
+         * 构造工单通知组件并保存调用依赖。
+         */
+        InvalidContract(String message) { super(message); } }
 }

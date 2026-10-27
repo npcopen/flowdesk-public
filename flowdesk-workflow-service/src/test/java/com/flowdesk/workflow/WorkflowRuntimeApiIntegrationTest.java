@@ -40,9 +40,50 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
+/**
+ * 审批运行时 API 集成测试，覆盖两级推进、审批人交接、可见范围、并发决定与终态保护。
+ */
 @SpringBootTest(properties = "flowdesk.workflow.start.entry.enabled=false")
 @AutoConfigureMockMvc
 class WorkflowRuntimeApiIntegrationTest {
+
+    @Autowired
+    private com.flowdesk.workflow.mapper.WorkflowRuntimeMapper runtimeMapper;
+
+    @Autowired
+    private com.flowdesk.workflow.mapper.WorkflowDefinitionMapper definitionMapper;
+
+    /**
+     * 验证运行时和版本游标保持可见范围与二进制 UUID 映射，并检查相关业务事实或错误响应符合约定。
+     */
+    @Test
+    void mybatisRuntimeAndVersionCursorsKeepScopeAndBinaryUuidMapping() {
+        Instant startedAt = Instant.parse("2026-08-24T10:00:00Z");
+        assertThat(runtimeMapper.findLevel1Approver(TENANT, INSTANCE)).contains(APPROVER_1);
+        assertThat(runtimeMapper.findLevel2Approver(TENANT, INSTANCE)).contains(APPROVER_2);
+        assertThat(runtimeMapper.findInstances(TENANT, "RUNNING", TICKET, VERSION, APPROVER_1,
+                true, null, null, 10)).extracting(row -> row.workflowInstanceId()).containsExactly(INSTANCE);
+        assertThat(runtimeMapper.findInstances(TENANT, "RUNNING", TICKET, VERSION, OTHER_APPROVER,
+                true, null, null, 10)).isEmpty();
+        assertThat(runtimeMapper.findInstances(TENANT, null, null, null, null,
+                true, startedAt, INSTANCE, 10)).isEmpty();
+        assertThat(runtimeMapper.findTasks(TENANT, "PENDING", 1, INSTANCE, APPROVER_1,
+                "-decidedAt", null, null, 10)).extracting(row -> row.approvalTaskId()).containsExactly(TASK_1);
+        assertThat(runtimeMapper.findTasks(TENANT, "PENDING", 1, INSTANCE, APPROVER_1,
+                "-decidedAt", startedAt.toString(), TASK_1, 10)).isEmpty();
+        assertThat(definitionMapper.findVersions(TENANT, DEFINITION, 1, "versionNo", null, null, 10))
+                .extracting(row -> row.workflowVersionId()).containsExactly(VERSION);
+        assertThat(definitionMapper.findVersions(TENANT, DEFINITION, 1, "versionNo", "1", VERSION, 10))
+                .isEmpty();
+        assertThat(definitionMapper.findVersions(TENANT, DEFINITION, null, "-publishedAt",
+                startedAt.toString(), VERSION, 10)).isEmpty();
+        jdbc.update("UPDATE approval_task SET lock_version=7 WHERE tenant_id=? AND approval_task_id=?",
+                bytes(TENANT), bytes(TASK_1));
+        assertThat(runtimeMapper.findTask(TENANT, TASK_1, false).orElseThrow().lockVersion()).isEqualTo(7);
+    }
+    /**
+     * 验证审批完成事件包含给申请人的说明，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void finalizedEventIncludesTheExplanationGivenToTheApplicant() throws Exception {
         String reason="缺少访问用途，请补充后重新申请。";
@@ -75,6 +116,9 @@ class WorkflowRuntimeApiIntegrationTest {
     @Autowired private JdbcTemplate jdbc;
     @Autowired private RuntimeEligibility eligibility;
 
+    /**
+     * 注册测试专用数据库、密钥和开关配置，使应用上下文使用隔离依赖。
+     */
     @DynamicPropertySource
     static void properties(DynamicPropertyRegistry registry) {
         registry.add("flowdesk.security.jwt.public-key-pem", WorkflowRuntimeApiIntegrationTest::publicKeyPem);
@@ -91,6 +135,9 @@ class WorkflowRuntimeApiIntegrationTest {
         registry.add("spring.sql.init.schema-locations", () -> "classpath:schema-test.sql");
     }
 
+    /**
+     * 建立当前测试场景的持久化前置事实，保留指定租户、身份和状态供后续业务路径验证。
+     */
     @BeforeEach
     void seed() {
         for (String table : List.of("workflow_approver_override", "workflow_approver_change", "message_recovery", "audit_record", "inbox_message",
@@ -164,6 +211,9 @@ class WorkflowRuntimeApiIntegrationTest {
                 Timestamp.from(now));
     }
 
+    /**
+     * 验证管理员可交接待办并保留历史及幂等重放保护，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void administratorCanHandOffPendingApprovalWithHistoryAndReplayProtection() throws Exception {
         String path = "/api/v1/workflow-instances/" + INSTANCE + "/approver-changes";
@@ -193,6 +243,9 @@ class WorkflowRuntimeApiIntegrationTest {
                         .contentType("application/json").content(body)).andExpect(status().isConflict());
     }
 
+    /**
+     * 验证未来级别失效审批人可替换且不改变已发布版本，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void inactiveFutureApproverCanBeReplacedWithoutChangingThePublishedVersion() throws Exception {
         eligibility.inactive = APPROVER_2;
@@ -210,6 +263,9 @@ class WorkflowRuntimeApiIntegrationTest {
         assertThat(uuid(jdbc.queryForObject("SELECT level2_approver_user_id FROM workflow_version", byte[].class))).isEqualTo(APPROVER_2);
     }
 
+    /**
+     * 验证交接拒绝另一级办理人及停用用户，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void handoffRejectsTheOtherLevelApproverAndInactivePeople() throws Exception {
         String path = "/api/v1/workflow-instances/" + INSTANCE + "/approver-changes";
@@ -224,6 +280,9 @@ class WorkflowRuntimeApiIntegrationTest {
         assertThat(jdbc.queryForObject("SELECT lock_version FROM workflow_instance", Integer.class)).isZero();
     }
 
+    /**
+     * 验证首级通过仅创建第二级任务且第二级通过只终结一次，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void level1ApproveCreatesOnlyLevel2TaskThenLevel2ApproveFinalizesOnce() throws Exception {
         mockMvc.perform(post("/api/v1/approval-tasks/" + TASK_1 + "/approve")
@@ -269,6 +328,9 @@ class WorkflowRuntimeApiIntegrationTest {
                 .isEqualTo(2);
     }
 
+    /**
+     * 验证首级拒绝即终结且相反决定发生冲突，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void level1RejectIsTerminalAndOppositeDecisionConflicts() throws Exception {
         mockMvc.perform(post("/api/v1/approval-tasks/" + TASK_1 + "/reject")
@@ -295,6 +357,9 @@ class WorkflowRuntimeApiIntegrationTest {
                 .andExpect(jsonPath("$.error.code").value("APPROVAL_DECISION_CONFLICT"));
     }
 
+    /**
+     * 验证固定审批人范围不可越权探测且管理员只有读取权，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void fixedApproverScopeIsOpaqueAndAdminIsReadOnly() throws Exception {
         mockMvc.perform(get("/api/v1/approval-tasks/" + TASK_1)
@@ -314,6 +379,9 @@ class WorkflowRuntimeApiIntegrationTest {
                 .andExpect(status().isForbidden());
     }
 
+    /**
+     * 验证并发相反决定只有一个稳定胜者且无部分提交副作用，并检查相关业务事实或错误响应符合约定。
+     */
     @Test
     void concurrentOppositeDecisionsHaveOneStableWinnerAndNoPartialEffects() throws Exception {
         ExecutorService executor = Executors.newFixedThreadPool(2);
@@ -364,6 +432,9 @@ class WorkflowRuntimeApiIntegrationTest {
         }
     }
 
+    /**
+     * 提交并发审批决定，供相反方向竞争及事务完整性验证。
+     */
     private MvcResult concurrentDecision(String direction, String reason, String key)
             throws Exception {
         return mockMvc.perform(post("/api/v1/approval-tasks/" + TASK_1 + "/" + direction)
@@ -375,30 +446,48 @@ class WorkflowRuntimeApiIntegrationTest {
                 .andReturn();
     }
 
+    /**
+     * 签发当前场景需要的测试身份令牌，固定租户、角色与最小权限供真实认证路径校验。
+     */
     private String approverToken(UUID actor) {
         return ISSUER.issueHuman(TENANT, actor, Set.of(RoleCode.APPROVER),
                 Set.of(PermissionCode.APPROVAL_READ_ASSIGNED,
                         PermissionCode.APPROVAL_DECIDE_ASSIGNED)).token();
     }
 
+    /**
+     * 签发当前场景需要的测试身份令牌，固定租户、角色与最小权限供真实认证路径校验。
+     */
     private String adminToken() {
         return ISSUER.issueHuman(TENANT, ADMIN, Set.of(RoleCode.SERVICE_DESK_ADMIN),
                 Set.of(PermissionCode.WORKFLOW_RUNTIME_READ_TENANT)).token();
     }
 
+    /**
+     * 签发当前场景需要的测试身份令牌，固定租户、角色与最小权限供真实认证路径校验。
+     */
     private String handoffAdminToken() {
         return ISSUER.issueHuman(TENANT, ADMIN, Set.of(RoleCode.SERVICE_DESK_ADMIN),
                 Set.of(PermissionCode.WORKFLOW_RUNTIME_READ_TENANT, PermissionCode.APPROVAL_REASSIGN_TENANT)).token();
     }
 
+    /**
+     * 将 UUID 编码为数据库使用的二进制值，空标识保持为空。
+     */
     private static byte[] bytes(UUID value) {
         return WorkflowIdempotencyCodec.uuidBytes(value);
     }
 
+    /**
+     * 在 UUID 与持久化表示之间转换，保持标识高低位的编码顺序一致。
+     */
     private static UUID uuid(byte[] value) {
         return WorkflowIdempotencyCodec.uuid(value);
     }
 
+    /**
+     * 生成仅供测试签发与验签的 RSA 密钥对，使身份流程无需外部密钥文件。
+     */
     private static KeyPair newKeyPair() {
         try {
             return KeyPairGenerator.getInstance("RSA").generateKeyPair();
@@ -408,23 +497,38 @@ class WorkflowRuntimeApiIntegrationTest {
         }
     }
 
+    /**
+     * 将测试公钥编码为 PEM，供应用配置中的实际验签器加载。
+     */
     private static String publicKeyPem() {
         return "-----BEGIN PUBLIC KEY-----\n"
                 + Base64.getEncoder().encodeToString(KEYS.getPublic().getEncoded())
                 + "\n-----END PUBLIC KEY-----";
     }
 
+    /**
+     * 可控制资格结果及依赖故障的测试替身，记录调用用于验证事务外预检和竞争处理。
+     */
     @TestConfiguration
     static class RuntimeEligibilityConfiguration {
+        /**
+         * 装配当前测试使用的替身组件，替换外部依赖并保留可控结果与调用观察。
+         */
         @Bean @Primary
         RuntimeEligibility runtimeEligibility() {
             return new RuntimeEligibility();
         }
     }
 
+    /**
+     * 可控制资格结果及依赖故障的测试替身，记录调用用于验证事务外预检和竞争处理。
+     */
     static final class RuntimeEligibility implements WorkflowApproverEligibilityChecker {
         int calls;
         UUID inactive;
+        /**
+         * 返回可配置的测试审批资格结果并记录调用次数，供预检、依赖失败及并发路径断言。
+         */
         @Override public boolean isEligibleApprover(UUID tenantId, UUID approverUserId) {
             calls++;
             return !approverUserId.equals(inactive);
